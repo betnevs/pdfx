@@ -1,0 +1,7 @@
+Ma Shan Zheng (regular TTF)
+URL:     https://raw.githubusercontent.com/google/fonts/406197b91ff39a93061c2c2eeaee67ddf2ae1f0d/ofl/mashanzheng/MaShanZheng-Regular.ttf
+SHA-256: 6d2546bb189c732a8ca29af9e22457b152387d158aa459e4ac2ce1e51788b7fb
+License: SIL Open Font License 1.1, see MaShanZheng-OFL.txt in this directory
+
+Used by the typed-signature canvas. The glyphs are rasterised into a PNG that
+becomes page content, so no font is embedded in the PDF.

@@ -21,12 +21,22 @@
 //! file's magic bytes must agree with it. Files above [`MAX_IMAGE_BYTES`] or
 //! [`MAX_IMAGE_PIXELS`] are rejected before the document is touched, as are
 //! malformed files, so a failed insertion never leaves a partial page edit.
+//!
+//! # Signatures
+//!
+//! [`insert_signature_image`] accepts the same PNG/JPEG bytes in memory rather
+//! than a file path, because the signature dialog draws or generates the image
+//! in the frontend. Signatures are still ordinary image page objects (same
+//! save, alpha and undo path); the [`ImageKind`] label only distinguishes them
+//! in the overlay and in the image list. They use a smaller default rectangle
+//! so a signature does not cover most of the page.
 
 use std::fs::File;
 use std::io::{Cursor, Read};
 use std::path::Path;
 use std::sync::Arc;
 
+use base64::Engine as _;
 use pdfium_render::prelude::{
     PdfBitmap, PdfBitmapFormat, PdfDocument, PdfMatrix, PdfPageImageObject, PdfPageObject,
     PdfPageObjectsCommon,
@@ -49,8 +59,17 @@ pub(crate) const MAX_IMAGE_BYTES: u64 = 25 * 1024 * 1024;
 /// BGRA buffers of a JPEG decode comfortably below 150 MB.
 pub(crate) const MAX_IMAGE_PIXELS: u64 = 20_000_000;
 
-/// Fraction of the page's display width and height a new image may occupy.
+/// Fraction of the page's display width and height a new photo may occupy.
 const DEFAULT_FIT_RATIO: f32 = 0.8;
+
+/// Fraction of the page's display width and height a new signature may occupy.
+///
+/// A signature is a personal mark, not a picture: filling 80% of the page (as
+/// a photo does) would place a six-inch-wide signature on Letter paper. The
+/// rectangle stays aspect-preserved and centered, so the user can still move,
+/// scale and rotate it with the normal image controls.
+const SIGNATURE_FIT_WIDTH: f32 = 0.35;
+const SIGNATURE_FIT_HEIGHT: f32 = 0.25;
 
 /// Minimum display-space size of an image, in points.
 const MIN_IMAGE_SIZE: f32 = 1.0;
@@ -62,11 +81,31 @@ const MAX_IMAGE_SIZE: f32 = 100_000.0;
 const PNG_MAGIC: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
 const JPEG_MAGIC: [u8; 3] = [0xff, 0xd8, 0xff];
 
+/// Base64 length that encodes [`MAX_IMAGE_BYTES`], padding included. Checked
+/// before decoding so an oversized payload is rejected without allocating its
+/// decoded size.
+const MAX_SIGNATURE_BASE64_LEN: usize = (MAX_IMAGE_BYTES as usize).div_ceil(3) * 4;
+
+/// Longest signature name accepted, counted in Unicode scalar values.
+const MAX_SIGNATURE_NAME_CHARS: usize = 80;
+
 /// The two image encodings accepted by the insertion tool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ImageFormat {
     Png,
     Jpeg,
+}
+
+/// What a page image represents.
+///
+/// Both kinds are ordinary PDFium image page objects and share the same save,
+/// alpha, transform and undo path. The label lets the overlay show a signature
+/// badge and lets the frontend list/filter them without a second object type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ImageKind {
+    Image,
+    Signature,
 }
 
 /// Pixel position, size and clockwise rotation of an image, in display-space
@@ -99,6 +138,7 @@ pub(crate) struct ImageRecord {
     pub(crate) count: usize,
     pub(crate) layout: ImageLayout,
     pub(crate) name: String,
+    pub(crate) kind: ImageKind,
     pub(crate) pixel_width: u32,
     pub(crate) pixel_height: u32,
     pub(crate) format: ImageFormat,
@@ -116,6 +156,7 @@ pub(crate) struct ImageSnapshot {
     pub(crate) count: usize,
     pub(crate) layout: ImageLayout,
     pub(crate) name: String,
+    pub(crate) kind: ImageKind,
     pub(crate) pixel_width: u32,
     pub(crate) pixel_height: u32,
     pub(crate) format: ImageFormat,
@@ -132,6 +173,7 @@ impl ImageRecord {
             count: self.count,
             layout: self.layout.clone(),
             name: self.name.clone(),
+            kind: self.kind,
             pixel_width: self.pixel_width,
             pixel_height: self.pixel_height,
             format: self.format,
@@ -147,6 +189,7 @@ impl ImageRecord {
         self.count = snapshot.count;
         self.layout = snapshot.layout.clone();
         self.name = snapshot.name.clone();
+        self.kind = snapshot.kind;
         self.pixel_width = snapshot.pixel_width;
         self.pixel_height = snapshot.pixel_height;
         self.format = snapshot.format;
@@ -161,6 +204,7 @@ impl ImageRecord {
             count: snapshot.count,
             layout: snapshot.layout.clone(),
             name: snapshot.name.clone(),
+            kind: snapshot.kind,
             pixel_width: snapshot.pixel_width,
             pixel_height: snapshot.pixel_height,
             format: snapshot.format,
@@ -174,6 +218,7 @@ impl ImageRecord {
             image_id: self.image_id,
             page_index,
             name: self.name.clone(),
+            kind: self.kind,
             x: self.layout.x,
             y: self.layout.y,
             width: self.layout.width,
@@ -192,6 +237,8 @@ pub struct ImageObjectView {
     pub image_id: u64,
     pub page_index: u32,
     pub name: String,
+    /// Whether this object is a photo or a signature.
+    pub kind: ImageKind,
     /// Unrotated top-left corner in display-space points.
     pub x: f32,
     pub y: f32,
@@ -326,6 +373,79 @@ pub(crate) fn load_image(path: &str) -> Result<LoadedImage, CommandError> {
             })
         }
     }
+}
+
+/// Trims and validates a signature label. The label is shown by the overlay
+/// and stored only in the editing session — it is not written into the PDF.
+fn check_signature_name(name: &str) -> Result<String, CommandError> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err(CommandError::new(
+            CommandErrorCode::InvalidArgument,
+            "the signature name must not be empty",
+        ));
+    }
+    if trimmed.chars().count() > MAX_SIGNATURE_NAME_CHARS {
+        return Err(CommandError::new(
+            CommandErrorCode::InvalidArgument,
+            format!("the signature name must not exceed {MAX_SIGNATURE_NAME_CHARS} characters"),
+        ));
+    }
+    if trimmed.chars().any(char::is_control) {
+        return Err(CommandError::new(
+            CommandErrorCode::InvalidArgument,
+            "the signature name must not contain control characters",
+        ));
+    }
+    Ok(trimmed.to_owned())
+}
+
+/// Decodes the in-memory image a signature dialog produced.
+///
+/// The bytes never touch disk: the dialog hands the command a base64 PNG or
+/// JPEG payload, and the same magic-byte, size, pixel and decode checks as a
+/// file insertion apply before any document is opened. The format comes from
+/// the bytes themselves, so a mislabeled payload cannot slip through.
+fn load_signature(encoded: &str, name: &str) -> Result<LoadedImage, CommandError> {
+    let name = check_signature_name(name)?;
+    if encoded.is_empty() {
+        return Err(CommandError::new(
+            CommandErrorCode::InvalidArgument,
+            "the signature image data is empty",
+        ));
+    }
+    if encoded.len() > MAX_SIGNATURE_BASE64_LEN {
+        return Err(too_large(format!(
+            "the signature image exceeds the {} byte limit",
+            MAX_IMAGE_BYTES
+        )));
+    }
+    let source = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|error| {
+            decode_failed(format!("the signature image is not valid base64: {error}"))
+        })?;
+    if source.len() as u64 > MAX_IMAGE_BYTES {
+        return Err(too_large(format!(
+            "the signature image is larger than the {} byte limit",
+            MAX_IMAGE_BYTES
+        )));
+    }
+    let (format, decoded) = if source.starts_with(&PNG_MAGIC) {
+        (ImageFormat::Png, decode_png(&source)?)
+    } else if source.starts_with(&JPEG_MAGIC) {
+        (ImageFormat::Jpeg, decode_jpeg(&source)?)
+    } else {
+        return Err(unsupported_format(
+            "the signature image is neither PNG nor JPEG data",
+        ));
+    };
+    Ok(LoadedImage {
+        name,
+        format,
+        source,
+        decoded,
+    })
 }
 
 fn check_pixel_count(width: u32, height: u32) -> Result<(), CommandError> {
@@ -478,16 +598,25 @@ fn from_image_color(color: image::ColorType) -> Result<PixelColor, CommandError>
 
 /// Default insertion rectangle: the image's natural pixel size, shrunk if
 /// needed to occupy at most 80% of the page on either axis, and centered.
+///
+/// A signature uses a smaller box — 35% of the page width and 25% of its
+/// height — so it reads as a signature rather than a photo. Its aspect ratio
+/// is preserved and it is centered the same way.
 fn default_layout(
     page_width: f32,
     page_height: f32,
     pixel_width: u32,
     pixel_height: u32,
+    kind: ImageKind,
 ) -> ImageLayout {
+    let (fit_width, fit_height) = match kind {
+        ImageKind::Image => (DEFAULT_FIT_RATIO, DEFAULT_FIT_RATIO),
+        ImageKind::Signature => (SIGNATURE_FIT_WIDTH, SIGNATURE_FIT_HEIGHT),
+    };
     let natural_width = pixel_width as f32;
     let natural_height = pixel_height as f32;
-    let scale = (DEFAULT_FIT_RATIO * page_width / natural_width)
-        .min(DEFAULT_FIT_RATIO * page_height / natural_height)
+    let scale = (fit_width * page_width / natural_width)
+        .min(fit_height * page_height / natural_height)
         .min(1.0);
     let width = (natural_width * scale).max(MIN_IMAGE_SIZE);
     let height = (natural_height * scale).max(MIN_IMAGE_SIZE);
@@ -690,13 +819,14 @@ fn insert_for(
     entry: &mut OpenDocument,
     page_index: u32,
     loaded: LoadedImage,
+    kind: ImageKind,
 ) -> Result<ImageEditResultView, CommandError> {
     ensure_content_editable(&entry.document)?;
     let (geometry, start) = page_geometry(&entry.document, page_index)?;
     let pixel_width = loaded.decoded.width;
     let pixel_height = loaded.decoded.height;
     let (page_width, page_height) = geometry.display_size();
-    let layout = default_layout(page_width, page_height, pixel_width, pixel_height);
+    let layout = default_layout(page_width, page_height, pixel_width, pixel_height, kind);
     check_layout(&layout)?;
 
     let object = build_image_object(&entry.document, &geometry, &layout, loaded.decoded)?;
@@ -721,6 +851,7 @@ fn insert_for(
         count: 1,
         layout: layout.clone(),
         name: loaded.name,
+        kind,
         pixel_width,
         pixel_height,
         format: loaded.format,
@@ -1028,7 +1159,32 @@ pub fn insert_image(
     let loaded = load_image(&path)?;
     with_open_document(&document_id, |entry| {
         let physical = entry.physical_page(page_index)?;
-        let mut view = insert_for(entry, physical, loaded)?;
+        let mut view = insert_for(entry, physical, loaded, ImageKind::Image)?;
+        let logical = entry.logical_page(physical).unwrap_or(0);
+        view.page_index = logical;
+        view.image.page_index = logical;
+        Ok(view)
+    })
+}
+
+/// The `insert_signature_image` command: places a signature produced by the
+/// draw or type tab, or an uploaded PNG/JPEG, on the current Page.
+///
+/// The payload is decoded and validated in memory before the document is
+/// opened, so malformed data leaves the document, its history and its saved
+/// state untouched. The resulting object is an ordinary image page object and
+/// is undoable through the shared Edit Session.
+#[tauri::command]
+pub fn insert_signature_image(
+    document_id: String,
+    page_index: u32,
+    image_base64: String,
+    name: String,
+) -> Result<ImageEditResultView, CommandError> {
+    let loaded = load_signature(&image_base64, &name)?;
+    with_open_document(&document_id, |entry| {
+        let physical = entry.physical_page(page_index)?;
+        let mut view = insert_for(entry, physical, loaded, ImageKind::Signature)?;
         let logical = entry.logical_page(physical).unwrap_or(0);
         view.page_index = logical;
         view.image.page_index = logical;

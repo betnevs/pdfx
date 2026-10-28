@@ -381,8 +381,13 @@ export interface PageOperationView {
 export interface ImageObjectView {
   imageId: number;
   pageIndex: number;
-  /** File name, shown on the overlay label. */
+  /** Label shown on the overlay: a file name or the signature source. */
   name: string;
+  /**
+   * A photo or a signature. Signatures are the same page image objects, with
+   * their own label and smaller default size, so the overlay can badge them.
+   */
+  kind: ImageKind;
   x: number;
   y: number;
   width: number;
@@ -392,6 +397,9 @@ export interface ImageObjectView {
   pixelWidth: number;
   pixelHeight: number;
 }
+
+/** What a page image represents. */
+export type ImageKind = "image" | "signature";
 
 /** Move, resize or rotate an image around its center. */
 export interface ImageTransformRequest {
@@ -1619,6 +1627,27 @@ export async function insertImage(
     documentId,
     pageIndex,
     path,
+  });
+}
+
+/**
+ * Inserts a signature on a Page from an in-memory PNG or JPEG payload.
+ *
+ * The dialog hands the command base64 bytes, never a file path and never a
+ * log line. The backend decodes and validates them before opening the
+ * document, and records the insertion as one undoable image action.
+ */
+export async function insertSignatureImage(
+  documentId: string,
+  pageIndex: number,
+  imageBase64: string,
+  name: string,
+): Promise<ImageEditResultView> {
+  return invoke<ImageEditResultView>("insert_signature_image", {
+    documentId,
+    pageIndex,
+    imageBase64,
+    name,
   });
 }
 

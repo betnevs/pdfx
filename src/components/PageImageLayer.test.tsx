@@ -42,6 +42,7 @@ const image: ImageObjectView = {
   imageId: 1,
   pageIndex: 0,
   name: "photo.png",
+  kind: "image",
   x: 200,
   y: 300,
   width: 200,

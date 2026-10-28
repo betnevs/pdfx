@@ -102,6 +102,7 @@ pub fn run() {
             form_create::update_form_text_field,
             form_create::delete_form_text_field,
             image_edit::insert_image,
+            image_edit::insert_signature_image,
             image_edit::page_images,
             image_edit::transform_image,
             image_edit::delete_image,
