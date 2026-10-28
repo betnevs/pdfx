@@ -41,6 +41,18 @@ impl<'a> PdfPageCircleAnnotation<'a> {
             lifetime: PhantomData,
         }
     }
+
+    /// Consumes this [PdfPageCircleAnnotation] and releases the underlying Pdfium
+    /// annotation handle with `FPDFPage_CloseAnnot()`.
+    ///
+    /// Pdfium requires the caller to close every handle returned by
+    /// `FPDFPage_CreateAnnot()`, but `pdfium-render` annotation types do not
+    /// implement `Drop`. Use this method once the annotation is no longer needed.
+    pub fn close(self) {
+        unsafe {
+            self.bindings().FPDFPage_CloseAnnot(self.handle);
+        }
+    }
 }
 
 impl<'a> PdfPageAnnotationPrivate<'a> for PdfPageCircleAnnotation<'a> {

@@ -219,6 +219,7 @@ impl<'a> PdfiumAdapter<'a> {
         let annotations = page.annotations_mut();
         let mut annotation = annotations.create_circle_annotation()?;
         annotation.set_bounds(rect.to_pdf_rect())?;
+        annotation.close();
         Ok(AnnotationRef::new(page_index, annotations.len() - 1))
     }
 
@@ -237,6 +238,7 @@ impl<'a> PdfiumAdapter<'a> {
         let annotations = page.annotations_mut();
         let mut annotation = annotations.create_ink_annotation()?;
         annotation.set_bounds(rect.to_pdf_rect())?;
+        annotation.close();
         Ok(AnnotationRef::new(page_index, annotations.len() - 1))
     }
 

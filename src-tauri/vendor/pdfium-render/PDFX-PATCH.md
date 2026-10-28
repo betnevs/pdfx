@@ -47,7 +47,7 @@ safe wrapper lives in `src-tauri/src/pdfium_adapter.rs`.
 
 ## Patch scope
 
-Four files change. Each hunk is additive; no upstream behaviour changes.
+Five files change. Each hunk is additive; no upstream behaviour changes.
 
 ### `src/pdf/document.rs`
 
@@ -65,8 +65,16 @@ Four files change. Each hunk is additive; no upstream behaviour changes.
 - Added `create_circle_annotation()`, mirroring the other
   `create_*_annotation()` constructors (creation date, content regeneration).
 
+### `src/pdf/document/page/annotation/circle.rs`
+
+- Added `PdfPageCircleAnnotation::close(self)` calling
+  `FPDFPage_CloseAnnot()`. Upstream annotation types do not implement `Drop`,
+  so Pdfium's requirement to close handles returned by `FPDFPage_CreateAnnot()`
+  has no other safe outlet.
+
 ### `src/pdf/document/page/annotation/ink.rs`
 
+- Added `PdfPageInkAnnotation::close(self)` calling `FPDFPage_CloseAnnot()`.
 - Added `PdfPageInkAnnotation::add_ink_stroke(&[(f32, f32)])` calling
   `FPDFAnnot_AddInkStroke()`; returns the new zero-based stroke index.
 - Added `PdfPageInkAnnotation::ink_stroke_count()` calling
@@ -119,9 +127,9 @@ cargo test
    sha256 here.
 2. Replace everything in this directory with the new crate contents plus
    `LICENSE.md`, keeping `PDFX-PATCH.md`.
-3. Re-apply the four hunks above. `diff -u` against the pristine crate source
-   (cargo registry unpack directory or a fresh extract of the `.crate`) is the
-   authoritative patch; keep the diff to these four files.
+3. Re-apply the hunks above (five files). `diff -u` against the pristine crate
+   source (cargo registry unpack directory or a fresh extract of the `.crate`)
+   is the authoritative patch; keep the diff to those five files.
 4. Update `src-tauri/Cargo.toml` version if the patched range changes, then
    build. `pdfium-render` tracks the PDFium API, so re-run the adapter tests
    against the pinned PDFium build first.
@@ -132,9 +140,11 @@ cargo test
 ## Known limitations
 
 - Upstream concrete annotation types (e.g. `PdfPageCircleAnnotation`) have no
-  `Drop`; only the `PdfPageAnnotation` enum closes its annotation handle. This
-  is upstream behaviour, unchanged by the patch. The adapter's creation helpers
-  therefore return only an `AnnotationRef`, and later operations use the enum,
-  which does close the handle.
+  `Drop`; only the `PdfPageAnnotation` enum closes its annotation handle. The
+  patch adds `close(self)` to the two types PDFX creates, and the adapter calls
+  it immediately after setting bounds. Other concrete annotation types keep
+  upstream behaviour, so callers creating them directly must close them
+  explicitly if the patch is extended to expose them. Later adapter operations
+  fetch the annotation through the enum, which does close the handle.
 - The patch adds no raw-handle accessor. Any future capability must be added
   here with a typed, safe method rather than exposing `FPDF_*` handles.
