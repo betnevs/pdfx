@@ -246,6 +246,10 @@ PDFX 是一个 Tauri 2 桌面应用：Rust 负责 PDF 处理与文件系统，Re
 - 字段属性：名称、提示、必填、多行、字号。
 - 不执行计算或 JavaScript 动作；签名字段只创建结构，不做证书签名。
 - PDFium 负责读取与填写；lopdf 负责创建 /AcroForm、/Fields、/DA、/DR、Widget Annotation 与外观流（含 /Yes、/Off 状态、radio 的 /Kids 与 /AS）。
+- 创建的字段采用终端 Widget（字段字典与 Widget 为同一对象），并为每个状态写出显式 /AP /N；不依赖 /NeedAppearances 让阅读器生成外观。字符串值（/V、/TU、/Opt 等）使用 UTF-16BE；界面文字与外观使用内置 Noto Sans SC 子集，CJK 字体资源同时写入 /DR 与外观资源字典。
+- 页面 /Rotate 为 90/180/270 时，用外观变换矩阵补偿字段坐标，使画布、保存后渲染与其他阅读器中的位置一致。
+- 列表/下拉使用 /FT /Ch 与 /Opt、/V、/I；只有列表字段可多选。空签名字段使用 /FT /Sig，只提供可见 /AP，不写 /V、/SV 或 /Lock，并按需维护 /SigFlags（不设置 AppendOnly）；不执行证书签名。
+- 创建、属性修改与删除作为单个 lopdf incremental revision 追加到保存结果；重复保存不重复创建字段或字体资源。
 - 创建能力必须先通过技术验证；失败则降级为“只填不建”。按调研估算，文本/复选框/单选/下拉的完整实现约 2–4 工程师周；证书签名另需 4–8+ 周，本规格不做。
 
 ### 页面管理
