@@ -172,12 +172,16 @@ fn document_view_serializes_encryption_and_permissions_for_the_frontend() {
             can_print: true,
             can_copy_content: false,
         },
+        output_path: None,
+        recovered: false,
     };
 
     let json = serde_json::to_value(view).expect("DocumentView must serialize");
 
     assert_eq!(json["encrypted"], true);
     assert_eq!(json["readOnly"], true);
+    assert_eq!(json["outputPath"], serde_json::Value::Null);
+    assert_eq!(json["recovered"], false);
     assert_eq!(json["permissions"]["canModifyContent"], false);
     assert_eq!(json["permissions"]["canAnnotate"], false);
     assert_eq!(json["permissions"]["canAssemble"], false);

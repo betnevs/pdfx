@@ -500,8 +500,10 @@ fn insert_document(
         output_path: options.output_path.clone(),
         recovered: options.recovered,
     };
-    let mut save = crate::save::SaveState::default();
-    save.output_path = options.output_path.map(PathBuf::from);
+    let save = crate::save::SaveState {
+        output_path: options.output_path.map(PathBuf::from),
+        ..Default::default()
+    };
     registry.documents.insert(
         document_id,
         OpenDocument {
