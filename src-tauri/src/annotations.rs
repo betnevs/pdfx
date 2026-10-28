@@ -1,5 +1,6 @@
-//! Native annotations: text markup (highlight, underline, strikeout) and
-//! geometric shapes (rectangle, ellipse).
+//! Native annotations: text markup (highlight, underline, strikeout),
+//! geometric shapes (rectangle, ellipse), sticky notes, freehand ink and
+//! built-in stamps.
 //!
 //! Annotations are native PDFium annotations. Every created annotation carries
 //! its author (`/T`), creation time (`/CreationDate`), a stable `/NM` name and
@@ -14,19 +15,24 @@
 //! rotation, is drawn by the appearance stream. Rotation is therefore real PDF
 //! content, not a canvas-only effect: the saved document and the editor show
 //! the same rotated shape, and PDFX stores the unrotated geometry and angle in
-//! private keys so reopening restores the exact editable shape.
+//! private keys so reopening restores the exact editable shape. Sticky notes
+//! store their body in `/Contents`, and ink stores every stroke in `/InkList`
+//! together with its border width. Built-in stamps are native `/Stamp`
+//! annotations whose Chinese label is baked as vector outlines into a
+//! generated normal appearance (no font dependency); their design, rotation
+//! and frame are mirrored in private keys so they stay editable.
 //!
 //! Annotations are identified by their `/NM` name. The name is stable across
 //! edits and undo/redo, which makes it safe to look an annotation up again
-//! after another annotation was deleted. Pre-existing unnamed markup is
-//! rendered by PDFium but intentionally not listed: it has no stable identity
-//! and no author/creation metadata to manage.
+//! after another annotation was deleted. Pre-existing unnamed annotations are
+//! rendered by PDFium but intentionally not listed: they have no stable
+//! identity and no author/creation metadata to manage.
 //!
-//! Colours and opacity are also mirrored into private string keys
-//! (`PDFXColor`, `PDFXOpacity`, and the shape keys below). Pdfium refuses to
-//! read `/C` and `/CA` back once an appearance stream exists; the private keys
-//! keep the annotation list correct without touching the standard,
-//! reader-visible entries.
+//! Colour, opacity and ink line width are also mirrored into private string
+//! keys (`PDFXColor`, `PDFXOpacity`, `PDFXLineWidth`, and the shape keys
+//! below). Pdfium refuses to read `/C` and `/CA` back once an appearance stream
+//! exists; the private keys keep the annotation list correct without touching
+//! the standard, reader-visible entries.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -40,39 +46,60 @@ use crate::commands::{
 };
 use crate::pdfium_adapter::{
     annotation_author, annotation_border_width, annotation_bounds, annotation_color,
-    annotation_creation_date, annotation_fill_color, annotation_name, annotation_quads,
-    annotation_string_value, annotation_type, append_annotation_quads,
+    annotation_contents, annotation_creation_date, annotation_fill_color, annotation_ink_strokes,
+    annotation_name, annotation_quads, annotation_string_value, annotation_type,
+    append_annotation_quads, append_ink_strokes,
+    create_ink_annotation as create_native_ink_annotation,
     create_shape_annotation as create_shape_native,
+    create_stamp_annotation as create_stamp_pdf_annotation,
+    create_text_annotation as create_native_text_annotation,
     create_text_markup_annotation as create_markup_annotation, remove_annotation,
     set_annotation_appearance, set_annotation_author, set_annotation_border_width,
-    set_annotation_color, set_annotation_creation_date, set_annotation_fill_color,
-    set_annotation_name, set_annotation_string_value, AnnotationRect, AnnotationRef,
-    ShapeAnnotationKind, TextMarkupAnnotationKind,
+    set_annotation_color, set_annotation_contents, set_annotation_creation_date,
+    set_annotation_fill_color, set_annotation_name, set_annotation_string_value, AnnotationRect,
+    AnnotationRef, ShapeAnnotationKind, TextMarkupAnnotationKind,
 };
 use crate::settings::Settings;
+use crate::stamps::{
+    display_bounds, validate_frame, StampFrame, StampFrameView, StampKind, StampView,
+};
 use crate::text_edit::{push_annotation_action, EditHistoryView};
 
-/// Private annotation keys mirroring `/C` and `/CA` for reliable read-back.
+/// Private annotation keys mirroring `/C`, `/CA` and `/BS /W` for reliable
+/// read-back.
 const COLOR_KEY: &str = "PDFXColor";
 const OPACITY_KEY: &str = "PDFXOpacity";
+/// Identity of a built-in stamp kind and its rotation-capable frame.
+const STAMP_KEY: &str = "PDFXStamp";
+const STAMP_FRAME_KEY: &str = "PDFXStampFrame";
+/// Ink stroke width and shape line width share one private key.
+const LINE_WIDTH_KEY: &str = "PDFXLineWidth";
 /// Private shape keys. Pdfium refuses `/IC` and `/Border` read-back once the
 /// custom appearance is installed, and `/Rect` only holds the rotated bounding
 /// box, so the editable geometry and style are mirrored here.
 const SHAPE_GEOMETRY_KEY: &str = "PDFXShapeGeometry";
 const SHAPE_FILL_KEY: &str = "PDFXFillColor";
 const SHAPE_STROKE_KEY: &str = "PDFXStrokeColor";
-const SHAPE_LINE_WIDTH_KEY: &str = "PDFXLineWidth";
 /// Marker stored in a shape colour key for "no fill" / "no stroke".
 const NO_COLOR: &str = "none";
 const DEFAULT_MARKUP_COLOR: &str = "#ffd400";
+const DEFAULT_NOTE_COLOR: &str = "#f9a825";
+const DEFAULT_INK_COLOR: &str = "#c62828";
 /// Underline and strikeout stroke width in page points.
 const MARKUP_LINE_WIDTH: f32 = 1.5;
+const DEFAULT_INK_LINE_WIDTH: f32 = 3.0;
+const MIN_INK_LINE_WIDTH: f32 = 0.5;
+const MAX_INK_LINE_WIDTH: f32 = 32.0;
 /// Upper bound for a shape border, in page points.
 const MAX_SHAPE_LINE_WIDTH: f32 = 100.0;
 /// Extra room around a shape `/Rect` so the appearance boundary never clips
 /// the stroke; the editable geometry is recovered from [SHAPE_GEOMETRY_KEY].
 const SHAPE_RECT_PADDING: f32 = 0.5;
 const MAX_AUTHOR_CHARS: usize = 64;
+const MAX_NOTE_CHARS: usize = 5_000;
+const MAX_INK_POINTS: usize = 20_000;
+/// Smallest note box accepted from the frontend, in display points.
+const MIN_NOTE_SIZE: f32 = 4.0;
 
 static ANNOTATION_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -85,7 +112,8 @@ pub enum TextMarkupKind {
     Strikeout,
 }
 
-/// Every annotation kind PDFX can create and manage.
+/// Every annotation kind PDFX can create and manage. Stamps carry their
+/// built-in design separately in [`AnnotationView::stamp`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AnnotationKind {
@@ -94,6 +122,9 @@ pub enum AnnotationKind {
     Strikeout,
     Square,
     Circle,
+    Note,
+    Ink,
+    Stamp,
 }
 
 impl From<TextMarkupKind> for TextMarkupAnnotationKind {
@@ -133,6 +164,9 @@ impl AnnotationKind {
             PdfPageAnnotationType::Strikeout => Some(Self::Strikeout),
             PdfPageAnnotationType::Square => Some(Self::Square),
             PdfPageAnnotationType::Circle => Some(Self::Circle),
+            PdfPageAnnotationType::Text => Some(Self::Note),
+            PdfPageAnnotationType::Ink => Some(Self::Ink),
+            PdfPageAnnotationType::Stamp => Some(Self::Stamp),
             _ => None,
         }
     }
@@ -142,7 +176,7 @@ impl AnnotationKind {
             Self::Highlight => Some(TextMarkupKind::Highlight),
             Self::Underline => Some(TextMarkupKind::Underline),
             Self::Strikeout => Some(TextMarkupKind::Strikeout),
-            Self::Square | Self::Circle => None,
+            Self::Square | Self::Circle | Self::Note | Self::Ink | Self::Stamp => None,
         }
     }
 }
@@ -235,6 +269,14 @@ pub struct TextMarkupRect {
     pub height: f32,
 }
 
+/// One freehand point in display-space points.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InkPoint {
+    pub x: f32,
+    pub y: f32,
+}
+
 /// The frontend's request to mark up one or more selected lines.
 ///
 /// `rects` are display-space boxes, one per selected line. `opacity` is a
@@ -247,6 +289,54 @@ pub struct CreateTextMarkupRequest {
     pub color: String,
     pub opacity: u8,
     pub rects: Vec<TextMarkupRect>,
+}
+
+/// The frontend's request to place one built-in stamp.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateStampRequest {
+    pub page_index: u32,
+    pub kind: StampKind,
+    /// Opacity percentage (0-100). The ink colour comes from the stamp kind.
+    pub opacity: u8,
+    /// Frame in display-space points.
+    pub frame: StampFrameView,
+}
+
+/// The frontend's request to move, resize or rotate a stamp.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransformStampRequest {
+    pub name: String,
+    pub frame: StampFrameView,
+}
+
+/// The frontend's request to place a sticky note.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateNoteRequest {
+    pub page_index: u32,
+    /// Icon colour as `#rrggbb`.
+    pub color: String,
+    /// Constant opacity in percent (0-100).
+    pub opacity: u8,
+    /// Note body; may be empty and is edited later through `update_note_text`.
+    pub text: String,
+    /// Display-space box of the note icon.
+    pub rect: TextMarkupRect,
+}
+
+/// The frontend's request to draw one freehand annotation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateInkRequest {
+    pub page_index: u32,
+    pub color: String,
+    pub opacity: u8,
+    /// Stroke width in display points.
+    pub line_width: f32,
+    /// Display-space strokes; one entry per pen-down/pen-up gesture.
+    pub strokes: Vec<Vec<InkPoint>>,
 }
 
 /// One annotation as the annotation list and overlay consume it.
@@ -262,10 +352,20 @@ pub struct AnnotationView {
     /// so the list swatch has one colour for every kind.
     pub color: String,
     pub opacity: u8,
-    /// Display-space boxes, one per quadrilateral; empty for shapes.
+    /// Ink stroke width in display points; `None` for other kinds.
+    pub line_width: Option<f32>,
+    /// Sticky-note body; `None` for other kinds.
+    pub text: Option<String>,
+    /// Display-space boxes: one per quadrilateral for markup, the icon box for
+    /// a note, the ink bounds for a stroke annotation and the rotated stamp's
+    /// axis-aligned bounds for a stamp; empty for shapes.
     pub rects: Vec<TextMarkupRect>,
-    /// Shape geometry and style; `None` for text markup.
+    /// Display-space ink strokes; empty for other kinds.
+    pub strokes: Vec<Vec<InkPoint>>,
+    /// Shape geometry and style; `None` for every other kind.
     pub shape: Option<ShapeView>,
+    /// The built-in stamp design and editable frame; `None` for other kinds.
+    pub stamp: Option<StampView>,
 }
 
 /// The outcome of creating, restyling or deleting one annotation.
@@ -288,18 +388,30 @@ pub(crate) struct AnnotationSnapshot {
     pub(crate) created_at: Option<String>,
     pub(crate) color: String,
     pub(crate) opacity: u8,
+    /// Ink stroke width; `None` for other kinds.
+    pub(crate) line_width: Option<f32>,
+    /// Sticky-note body; `None` for other kinds.
+    pub(crate) text: Option<String>,
     /// Bounds in PDF user space.
     pub(crate) rect: AnnotationRect,
     /// Quadrilaterals in PDF user space, in the order PDFX creates them.
     pub(crate) quads: Vec<[f32; 8]>,
-    /// Display-space boxes derived from `quads`, kept for the list/overlay.
+    /// Display-space boxes derived from `quads`, `rect` or the shape geometry.
     pub(crate) rects: Vec<TextMarkupRect>,
-    /// Shape geometry and style; `None` for text markup.
+    /// Ink strokes in PDF user space.
+    pub(crate) strokes: Vec<Vec<(f32, f32)>>,
+    /// Shape geometry and style; `None` for every other kind.
     pub(crate) shape: Option<ShapeView>,
+    /// The built-in stamp design and display-space frame; `None` for other
+    /// kinds.
+    pub(crate) stamp: Option<StampView>,
+    /// The stamp frame in PDF user space, which preserves rotation across
+    /// restore; `None` for other kinds.
+    pub(crate) stamp_frame: Option<StampFrame>,
 }
 
 impl AnnotationSnapshot {
-    fn view(&self) -> AnnotationView {
+    fn view(&self, geometry: &DisplayGeometry) -> AnnotationView {
         AnnotationView {
             name: self.name.clone(),
             page_index: self.page_index,
@@ -308,8 +420,24 @@ impl AnnotationSnapshot {
             created_at: self.created_at.clone(),
             color: self.color.clone(),
             opacity: self.opacity,
+            line_width: self.line_width,
+            text: self.text.clone(),
             rects: self.rects.clone(),
+            strokes: self
+                .strokes
+                .iter()
+                .map(|stroke| {
+                    stroke
+                        .iter()
+                        .map(|&(x, y)| {
+                            let (x, y) = geometry.point(x, y);
+                            InkPoint { x, y }
+                        })
+                        .collect()
+                })
+                .collect(),
             shape: self.shape.clone(),
+            stamp: self.stamp,
         }
     }
 }
@@ -361,6 +489,25 @@ fn normalize_author(author: &str) -> Result<String, CommandError> {
     Ok(author.to_owned())
 }
 
+/// Validates a note body. Newlines and tabs are legal; other control
+/// characters are not printable and would corrupt the `/Contents` value.
+fn normalize_note_text(text: &str) -> Result<String, CommandError> {
+    if text.chars().count() > MAX_NOTE_CHARS {
+        return Err(invalid_argument(format!(
+            "the note text must not exceed {MAX_NOTE_CHARS} characters"
+        )));
+    }
+    if text
+        .chars()
+        .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+    {
+        return Err(invalid_argument(
+            "the note text must not contain control characters",
+        ));
+    }
+    Ok(text.to_owned())
+}
+
 fn parse_color(color: &str) -> Result<(u8, u8, u8), CommandError> {
     let hex = color
         .strip_prefix('#')
@@ -384,13 +531,40 @@ fn alpha_to_opacity(alpha: u8) -> u8 {
     ((u32::from(alpha) * 100 + 127) / 255) as u8
 }
 
-fn validate_request(request: &CreateTextMarkupRequest) -> Result<(u8, u8, u8), CommandError> {
-    let rgb = parse_color(&request.color)?;
-    if request.opacity > 100 {
+fn validate_color_opacity(color: &str, opacity: u8) -> Result<(u8, u8, u8), CommandError> {
+    let rgb = parse_color(color)?;
+    if opacity > 100 {
         return Err(invalid_argument(
             "the annotation opacity must be between 0 and 100",
         ));
     }
+    Ok(rgb)
+}
+
+fn validate_rect(rect: TextMarkupRect, context: &str) -> Result<(), CommandError> {
+    let finite = rect.x.is_finite()
+        && rect.y.is_finite()
+        && rect.width.is_finite()
+        && rect.height.is_finite();
+    if !finite || rect.width < MIN_NOTE_SIZE || rect.height < MIN_NOTE_SIZE {
+        return Err(invalid_argument(format!(
+            "{context} needs finite geometry of at least {MIN_NOTE_SIZE} points"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_ink_line_width(width: f32) -> Result<(), CommandError> {
+    if !width.is_finite() || !(MIN_INK_LINE_WIDTH..=MAX_INK_LINE_WIDTH).contains(&width) {
+        return Err(invalid_argument(format!(
+            "the ink line width must be between {MIN_INK_LINE_WIDTH} and {MAX_INK_LINE_WIDTH} points"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_request(request: &CreateTextMarkupRequest) -> Result<(u8, u8, u8), CommandError> {
+    let rgb = validate_color_opacity(&request.color, request.opacity)?;
     if request.rects.is_empty() {
         return Err(invalid_argument(
             "a text markup needs at least one rectangle",
@@ -406,6 +580,37 @@ fn validate_request(request: &CreateTextMarkupRequest) -> Result<(u8, u8, u8), C
                 "annotation rectangles need finite, positive geometry",
             ));
         }
+    }
+    Ok(rgb)
+}
+
+fn validate_ink_request(request: &CreateInkRequest) -> Result<(u8, u8, u8), CommandError> {
+    let rgb = validate_color_opacity(&request.color, request.opacity)?;
+    validate_ink_line_width(request.line_width)?;
+    if request.strokes.is_empty() {
+        return Err(invalid_argument(
+            "an ink annotation needs at least one stroke",
+        ));
+    }
+    let mut total = 0usize;
+    for stroke in &request.strokes {
+        if stroke.is_empty() {
+            return Err(invalid_argument("an ink stroke needs at least one point"));
+        }
+        total += stroke.len();
+        if stroke
+            .iter()
+            .any(|point| !point.x.is_finite() || !point.y.is_finite())
+        {
+            return Err(invalid_argument(
+                "ink points need finite display coordinates",
+            ));
+        }
+    }
+    if total > MAX_INK_POINTS {
+        return Err(invalid_argument(format!(
+            "an ink annotation must not exceed {MAX_INK_POINTS} points"
+        )));
     }
     Ok(rgb)
 }
@@ -715,6 +920,50 @@ fn bounds_of_quads(quads: &[[f32; 8]]) -> AnnotationRect {
     AnnotationRect::new(bottom, left, top, right)
 }
 
+/// Maps a display-space box to a PDF-space rectangle, including rotation and
+/// CropBox offset.
+fn pdf_rect_for_display(geometry: &DisplayGeometry, rect: TextMarkupRect) -> AnnotationRect {
+    let corners = [
+        (rect.x, rect.y),
+        (rect.x + rect.width, rect.y),
+        (rect.x + rect.width, rect.y + rect.height),
+        (rect.x, rect.y + rect.height),
+    ];
+    let mut left = f32::INFINITY;
+    let mut bottom = f32::INFINITY;
+    let mut right = f32::NEG_INFINITY;
+    let mut top = f32::NEG_INFINITY;
+    for (x, y) in corners {
+        let (x, y) = geometry.point_inverse(x, y);
+        left = left.min(x);
+        right = right.max(x);
+        bottom = bottom.min(y);
+        top = top.max(y);
+    }
+    AnnotationRect::new(bottom, left, top, right)
+}
+
+fn strokes_bounds(strokes: &[Vec<(f32, f32)>], padding: f32) -> AnnotationRect {
+    let mut left = f32::INFINITY;
+    let mut bottom = f32::INFINITY;
+    let mut right = f32::NEG_INFINITY;
+    let mut top = f32::NEG_INFINITY;
+    for stroke in strokes {
+        for &(x, y) in stroke {
+            left = left.min(x);
+            right = right.max(x);
+            bottom = bottom.min(y);
+            top = top.max(y);
+        }
+    }
+    AnnotationRect::new(
+        bottom - padding,
+        left - padding,
+        top + padding,
+        right + padding,
+    )
+}
+
 fn display_rects(geometry: &DisplayGeometry, quads: &[[f32; 8]]) -> Vec<TextMarkupRect> {
     quads
         .iter()
@@ -738,6 +987,16 @@ fn display_rects(geometry: &DisplayGeometry, quads: &[[f32; 8]]) -> Vec<TextMark
         .collect()
 }
 
+fn display_rect(geometry: &DisplayGeometry, rect: AnnotationRect) -> TextMarkupRect {
+    let (x, y, width, height) = geometry.rect(rect.left, rect.bottom, rect.right, rect.top);
+    TextMarkupRect {
+        x,
+        y,
+        width,
+        height,
+    }
+}
+
 fn midpoint(a: (f32, f32), b: (f32, f32)) -> (f32, f32) {
     ((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0)
 }
@@ -759,15 +1018,21 @@ fn quad_point(quad: &[f32; 8], index: usize) -> (f32, f32) {
     (quad[index * 2], quad[index * 2 + 1])
 }
 
-/// Builds the normal appearance stream for an annotation.
+fn color_components(rgb: (u8, u8, u8)) -> (f32, f32, f32) {
+    (
+        f32::from(rgb.0) / 255.0,
+        f32::from(rgb.1) / 255.0,
+        f32::from(rgb.2) / 255.0,
+    )
+}
+
+/// Builds the normal appearance stream for a markup annotation.
 ///
 /// Pdfium interprets the stream in page coordinates with the annotation's
 /// `/Rect` as the Form XObject `/BBox`, so the operators use the same PDF user
 /// space as the quads.
-fn appearance_stream(kind: TextMarkupKind, rgb: (u8, u8, u8), quads: &[[f32; 8]]) -> String {
-    let red = f32::from(rgb.0) / 255.0;
-    let green = f32::from(rgb.1) / 255.0;
-    let blue = f32::from(rgb.2) / 255.0;
+fn markup_appearance_stream(kind: TextMarkupKind, rgb: (u8, u8, u8), quads: &[[f32; 8]]) -> String {
+    let (red, green, blue) = color_components(rgb);
     let mut stream = String::new();
     // Pdfium adds an /ExtGState named /GS carrying the annotation's constant
     // opacity to the Form XObject resources when the appearance is installed.
@@ -818,6 +1083,67 @@ fn appearance_stream(kind: TextMarkupKind, rgb: (u8, u8, u8), quads: &[[f32; 8]]
             stream.push_str("Q\n");
         }
     }
+    stream
+}
+
+/// Builds the sticky-note icon appearance: a coloured page with a folded
+/// corner and a darker border, drawn in page coordinates.
+fn note_appearance_stream(rgb: (u8, u8, u8), rect: AnnotationRect) -> String {
+    let (red, green, blue) = color_components(rgb);
+    let width = rect.right - rect.left;
+    let height = rect.top - rect.bottom;
+    let fold = width.min(height) * 0.32;
+    format!(
+        concat!(
+            "q\n/GS gs\n",
+            "{red:.4} {green:.4} {blue:.4} rg\n",
+            "{left:.4} {bottom:.4} {width:.4} {height:.4} re f\n",
+            "0.30 0.22 0.04 RG 0.8 w\n",
+            "{left:.4} {bottom:.4} {width:.4} {height:.4} re S\n",
+            "0.55 0.40 0.06 rg\n",
+            "{fold_x:.4} {top:.4} m {right:.4} {top:.4} l ",
+            "{right:.4} {fold_y:.4} l h f\n",
+            "Q\n"
+        ),
+        red = red,
+        green = green,
+        blue = blue,
+        left = rect.left,
+        bottom = rect.bottom,
+        width = width,
+        height = height,
+        fold_x = rect.right - fold,
+        top = rect.top,
+        right = rect.right,
+        fold_y = rect.top - fold,
+    )
+}
+
+/// Builds the freehand appearance stream from `/InkList` strokes in PDF user
+/// space. Round caps and joins keep a one-point stroke visible as a dot.
+fn ink_appearance_stream(
+    rgb: (u8, u8, u8),
+    line_width: f32,
+    strokes: &[Vec<(f32, f32)>],
+) -> String {
+    let (red, green, blue) = color_components(rgb);
+    let mut stream =
+        format!("q\n/GS gs\n{red:.4} {green:.4} {blue:.4} RG {line_width:.4} w 1 J 1 j\n");
+    for stroke in strokes {
+        let Some(&(x, y)) = stroke.first() else {
+            continue;
+        };
+        stream.push_str(&format!("{x:.4} {y:.4} m\n"));
+        if stroke.len() == 1 {
+            stream.push_str(&format!("{x:.4} {y:.4} l S\n"));
+            continue;
+        }
+        for &(x, y) in &stroke[1..] {
+            stream.push_str(&format!("{x:.4} {y:.4} l\n"));
+        }
+        stream.push_str("S\n");
+    }
+    stream.push_str("Q\n");
     stream
 }
 
@@ -876,6 +1202,23 @@ fn locate(
     Ok(Some((page_index, target, geometry)))
 }
 
+fn stored_line_width(
+    document: &PdfDocument<'static>,
+    target: AnnotationRef,
+) -> Result<f32, CommandError> {
+    let stored = annotation_string_value(document, target, LINE_WIDTH_KEY)
+        .map_err(map_adapter_error)?
+        .and_then(|value| value.parse::<f32>().ok())
+        .filter(|width| width.is_finite() && *width > 0.0);
+    Ok(stored
+        .or_else(|| {
+            annotation_border_width(document, target)
+                .ok()
+                .filter(|width| width.is_finite() && *width > 0.0)
+        })
+        .unwrap_or(DEFAULT_INK_LINE_WIDTH))
+}
+
 fn capture_snapshot(
     document: &PdfDocument<'static>,
     page_index: u32,
@@ -885,7 +1228,7 @@ fn capture_snapshot(
     let annotation_type = annotation_type(document, target).map_err(map_adapter_error)?;
     let kind = AnnotationKind::from_pdfium(annotation_type).ok_or_else(|| {
         internal_error(format!(
-            "annotation {} on page {page_index} is not a PDFX-managed annotation",
+            "annotation {} on page {page_index} is not a supported annotation",
             target.index
         ))
     })?;
@@ -916,19 +1259,98 @@ fn capture_snapshot(
         );
     }
 
+    if kind == AnnotationKind::Stamp {
+        let stamp_kind = annotation_string_value(document, target, STAMP_KEY)
+            .map_err(map_adapter_error)?
+            .and_then(|value| StampKind::parse(&value))
+            .ok_or_else(|| {
+                internal_error(format!(
+                    "stamp annotation {} on page {page_index} was not created by PDFX",
+                    target.index
+                ))
+            })?;
+        let frame = annotation_string_value(document, target, STAMP_FRAME_KEY)
+            .map_err(map_adapter_error)?
+            .and_then(|value| StampFrame::decode(&value))
+            .unwrap_or_else(|| StampFrame::from_rect(rect));
+        let frame_view = frame.to_view(geometry);
+        let (x, y, width, height) = display_bounds(&frame_view);
+        let measured = annotation_color(document, target).ok();
+        let color = annotation_string_value(document, target, COLOR_KEY)
+            .map_err(map_adapter_error)?
+            .unwrap_or_else(|| stamp_kind.color().to_owned());
+        let opacity = stored_opacity
+            .or_else(|| measured.map(|(_, _, _, alpha)| alpha_to_opacity(alpha)))
+            .unwrap_or(100);
+        return Ok(AnnotationSnapshot {
+            page_index,
+            name,
+            kind,
+            author,
+            created_at,
+            color,
+            opacity,
+            line_width: None,
+            text: None,
+            rect,
+            quads: Vec::new(),
+            rects: vec![TextMarkupRect {
+                x,
+                y,
+                width,
+                height,
+            }],
+            strokes: Vec::new(),
+            shape: None,
+            stamp: Some(StampView {
+                kind: stamp_kind,
+                frame: frame_view,
+            }),
+            stamp_frame: Some(frame),
+        });
+    }
+
     let measured = annotation_color(document, target).ok();
     let color = annotation_string_value(document, target, COLOR_KEY)
         .map_err(map_adapter_error)?
         .unwrap_or_else(|| {
             measured
                 .map(|(red, green, blue, _)| format_color(red, green, blue))
-                .unwrap_or_else(|| DEFAULT_MARKUP_COLOR.to_owned())
+                .unwrap_or_else(|| default_color_for(kind).to_owned())
         });
     let opacity = stored_opacity
         .or_else(|| measured.map(|(_, _, _, alpha)| alpha_to_opacity(alpha)))
         .unwrap_or(100);
-    let quads = annotation_quads(document, target).map_err(map_adapter_error)?;
-    let rects = display_rects(geometry, &quads);
+
+    let (quads, rects, text, line_width, strokes) = match kind {
+        AnnotationKind::Note => (
+            Vec::new(),
+            vec![display_rect(geometry, rect)],
+            Some(
+                annotation_contents(document, target)
+                    .map_err(map_adapter_error)?
+                    .unwrap_or_default(),
+            ),
+            None,
+            Vec::new(),
+        ),
+        AnnotationKind::Ink => {
+            let strokes = annotation_ink_strokes(document, target).map_err(map_adapter_error)?;
+            (
+                Vec::new(),
+                vec![display_rect(geometry, rect)],
+                None,
+                Some(stored_line_width(document, target)?),
+                strokes,
+            )
+        }
+        _ => {
+            let quads = annotation_quads(document, target).map_err(map_adapter_error)?;
+            let rects = display_rects(geometry, &quads);
+            (quads, rects, None, None, Vec::new())
+        }
+    };
+
     Ok(AnnotationSnapshot {
         page_index,
         name,
@@ -937,11 +1359,24 @@ fn capture_snapshot(
         created_at,
         color,
         opacity,
+        line_width,
+        text,
         rect,
         quads,
         rects,
+        strokes,
         shape: None,
+        stamp: None,
+        stamp_frame: None,
     })
+}
+
+fn default_color_for(kind: AnnotationKind) -> &'static str {
+    match kind {
+        AnnotationKind::Note => DEFAULT_NOTE_COLOR,
+        AnnotationKind::Ink => DEFAULT_INK_COLOR,
+        _ => DEFAULT_MARKUP_COLOR,
+    }
 }
 
 /// Captures a shape annotation, preferring the private keys that preserve the
@@ -984,7 +1419,7 @@ fn capture_shape_snapshot(
         SHAPE_STROKE_KEY,
         annotation_color(document, target).ok(),
     )?;
-    let line_width = annotation_string_value(document, target, SHAPE_LINE_WIDTH_KEY)
+    let line_width = annotation_string_value(document, target, LINE_WIDTH_KEY)
         .map_err(map_adapter_error)?
         .and_then(|value| value.parse::<f32>().ok())
         .filter(|width| width.is_finite() && *width > 0.0)
@@ -1025,10 +1460,15 @@ fn capture_shape_snapshot(
         created_at,
         color,
         opacity,
+        line_width: None,
+        text: None,
         rect,
         quads: Vec::new(),
         rects: Vec::new(),
+        strokes: Vec::new(),
         shape: Some(shape),
+        stamp: None,
+        stamp_frame: None,
     })
 }
 
@@ -1047,33 +1487,18 @@ fn shape_color(
     }
 }
 
-/// Identity and style written onto a newly created (or restored) annotation.
-struct MarkupProperties<'a> {
-    name: &'a str,
-    author: Option<&'a str>,
-    created_at: Option<&'a str>,
-    color: &'a str,
-    opacity: u8,
-    kind: TextMarkupKind,
-}
-
-/// Writes the standard properties every PDFX-created markup annotation carries.
-/// The appearance stream must be installed last: Pdfium fixes the Form XObject
-/// `/BBox` from `/Rect` at that moment.
-fn write_annotation_properties(
+/// Writes the standard identity and colour properties every PDFX-created
+/// annotation carries. The appearance stream must be installed last: Pdfium
+/// fixes the Form XObject `/BBox` from `/Rect` at that moment.
+fn write_common_properties(
     document: &PdfDocument<'static>,
     target: AnnotationRef,
-    properties: MarkupProperties<'_>,
-    quads: &[[f32; 8]],
-) -> Result<(), CommandError> {
-    let MarkupProperties {
-        name,
-        author,
-        created_at,
-        color,
-        opacity,
-        kind,
-    } = properties;
+    name: &str,
+    author: Option<&str>,
+    created_at: Option<&str>,
+    color: &str,
+    opacity: u8,
+) -> Result<(u8, u8, u8), CommandError> {
     let rgb = parse_color(color)?;
     set_annotation_name(document, target, name).map_err(map_adapter_error)?;
     if let Some(author) = author {
@@ -1082,7 +1507,6 @@ fn write_annotation_properties(
     if let Some(created_at) = created_at {
         set_annotation_creation_date(document, target, created_at).map_err(map_adapter_error)?;
     }
-    append_annotation_quads(document, target, quads).map_err(map_adapter_error)?;
     set_annotation_string_value(document, target, COLOR_KEY, color).map_err(map_adapter_error)?;
     set_annotation_string_value(document, target, OPACITY_KEY, &opacity.to_string())
         .map_err(map_adapter_error)?;
@@ -1095,9 +1519,30 @@ fn write_annotation_properties(
         opacity_to_alpha(opacity),
     )
     .map_err(map_adapter_error)?;
-    set_annotation_appearance(document, target, &appearance_stream(kind, rgb, quads))
+    Ok(rgb)
+}
+
+/// Writes the identity, private stamp keys and generated appearance of a stamp
+/// annotation. The appearance is installed last so Pdfium fixes the Form
+/// XObject `/BBox` from the final `/Rect`.
+#[allow(clippy::too_many_arguments)]
+fn write_stamp_properties(
+    document: &PdfDocument<'static>,
+    target: AnnotationRef,
+    name: &str,
+    author: Option<&str>,
+    created_at: Option<&str>,
+    kind: StampKind,
+    frame: &StampFrame,
+    color: &str,
+    opacity: u8,
+) -> Result<(), CommandError> {
+    write_common_properties(document, target, name, author, created_at, color, opacity)?;
+    set_annotation_string_value(document, target, STAMP_KEY, kind.key())
         .map_err(map_adapter_error)?;
-    Ok(())
+    set_annotation_string_value(document, target, STAMP_FRAME_KEY, &frame.encode())
+        .map_err(map_adapter_error)?;
+    set_annotation_appearance(document, target, &frame.appearance(kind)).map_err(map_adapter_error)
 }
 
 /// Writes the identity, style and appearance of a shape annotation.
@@ -1145,7 +1590,7 @@ fn write_shape_properties(
     set_annotation_string_value(
         document,
         target,
-        SHAPE_LINE_WIDTH_KEY,
+        LINE_WIDTH_KEY,
         &format!("{:.4}", shape.style.line_width),
     )
     .map_err(map_adapter_error)?;
@@ -1192,7 +1637,8 @@ fn write_shape_properties(
 /// Recreates the annotation described by `snapshot`, first removing any
 /// annotation with the same name. Recreating rather than mutating is deliberate:
 /// Pdfium cannot change `/C`/`/CA` or colours once an appearance stream exists,
-/// and the generated appearance depends on all of them.
+/// moving a note must rebuild the Form XObject `/BBox` from its new `/Rect`,
+/// and the generated shape appearance depends on all of them.
 pub(crate) fn restore_annotation_snapshot(
     document: &PdfDocument<'static>,
     snapshot: &AnnotationSnapshot,
@@ -1200,6 +1646,29 @@ pub(crate) fn restore_annotation_snapshot(
     if let Some(existing) = find_target(document, &snapshot.name)? {
         remove_annotation(document, existing).map_err(map_adapter_error)?;
     }
+    if let Some(frame) = snapshot.stamp_frame {
+        let stamp = snapshot.stamp.ok_or_else(|| {
+            internal_error(format!(
+                "annotation {} has no stamp design to restore",
+                snapshot.name
+            ))
+        })?;
+        let target =
+            create_stamp_pdf_annotation(document, snapshot.page_index as i32, snapshot.rect)
+                .map_err(map_adapter_error)?;
+        return write_stamp_properties(
+            document,
+            target,
+            &snapshot.name,
+            snapshot.author.as_deref(),
+            snapshot.created_at.as_deref(),
+            stamp.kind,
+            &frame,
+            &snapshot.color,
+            snapshot.opacity,
+        );
+    }
+
     if let Some(shape) = snapshot.shape.as_ref() {
         let page = page_geometry(document, snapshot.page_index)?;
         let appearance = shape_appearance(&page, shape.kind, &shape.geometry, &shape.style)?;
@@ -1220,32 +1689,93 @@ pub(crate) fn restore_annotation_snapshot(
             &appearance.appearance,
         );
     }
-    let kind = snapshot.kind.text_markup().ok_or_else(|| {
-        internal_error(format!(
-            "annotation {} has neither markup nor shape data",
-            snapshot.name
-        ))
-    })?;
-    let target = create_markup_annotation(
-        document,
-        snapshot.page_index as i32,
-        kind.into(),
-        snapshot.rect,
-    )
-    .map_err(map_adapter_error)?;
-    write_annotation_properties(
-        document,
-        target,
-        MarkupProperties {
-            name: &snapshot.name,
-            author: snapshot.author.as_deref(),
-            created_at: snapshot.created_at.as_deref(),
-            color: &snapshot.color,
-            opacity: snapshot.opacity,
-            kind,
-        },
-        &snapshot.quads,
-    )
+
+    match snapshot.kind {
+        AnnotationKind::Note => {
+            let text = snapshot.text.as_deref().unwrap_or_default();
+            let target = create_native_text_annotation(
+                document,
+                snapshot.page_index as i32,
+                text,
+                snapshot.rect,
+            )
+            .map_err(map_adapter_error)?;
+            let rgb = write_common_properties(
+                document,
+                target,
+                &snapshot.name,
+                snapshot.author.as_deref(),
+                snapshot.created_at.as_deref(),
+                &snapshot.color,
+                snapshot.opacity,
+            )?;
+            set_annotation_contents(document, target, text).map_err(map_adapter_error)?;
+            set_annotation_appearance(
+                document,
+                target,
+                &note_appearance_stream(rgb, snapshot.rect),
+            )
+            .map_err(map_adapter_error)?;
+        }
+        AnnotationKind::Ink => {
+            let line_width = snapshot.line_width.unwrap_or(DEFAULT_INK_LINE_WIDTH);
+            let target =
+                create_native_ink_annotation(document, snapshot.page_index as i32, snapshot.rect)
+                    .map_err(map_adapter_error)?;
+            let rgb = write_common_properties(
+                document,
+                target,
+                &snapshot.name,
+                snapshot.author.as_deref(),
+                snapshot.created_at.as_deref(),
+                &snapshot.color,
+                snapshot.opacity,
+            )?;
+            set_annotation_string_value(document, target, LINE_WIDTH_KEY, &line_width.to_string())
+                .map_err(map_adapter_error)?;
+            set_annotation_border_width(document, target, line_width).map_err(map_adapter_error)?;
+            append_ink_strokes(document, target, &snapshot.strokes).map_err(map_adapter_error)?;
+            set_annotation_appearance(
+                document,
+                target,
+                &ink_appearance_stream(rgb, line_width, &snapshot.strokes),
+            )
+            .map_err(map_adapter_error)?;
+        }
+        _ => {
+            let markup_kind = snapshot.kind.text_markup().ok_or_else(|| {
+                internal_error(format!(
+                    "annotation {} has neither markup, shape, note nor ink data",
+                    snapshot.name
+                ))
+            })?;
+            let target = create_markup_annotation(
+                document,
+                snapshot.page_index as i32,
+                markup_kind.into(),
+                snapshot.rect,
+            )
+            .map_err(map_adapter_error)?;
+            let rgb = write_common_properties(
+                document,
+                target,
+                &snapshot.name,
+                snapshot.author.as_deref(),
+                snapshot.created_at.as_deref(),
+                &snapshot.color,
+                snapshot.opacity,
+            )?;
+            append_annotation_quads(document, target, &snapshot.quads)
+                .map_err(map_adapter_error)?;
+            set_annotation_appearance(
+                document,
+                target,
+                &markup_appearance_stream(markup_kind, rgb, &snapshot.quads),
+            )
+            .map_err(map_adapter_error)?;
+        }
+    }
+    Ok(())
 }
 
 /// Removes the annotation with `name`. Used by undo/redo for actions with no
@@ -1290,22 +1820,25 @@ pub fn create_text_markup_with_author(
             bounds,
         )
         .map_err(map_adapter_error)?;
-        write_annotation_properties(
+        let written = write_common_properties(
             &entry.document,
             target,
-            MarkupProperties {
-                name: &name,
-                author: Some(&author),
-                created_at: Some(&created_at),
-                color: &color,
-                opacity: request.opacity,
-                kind: request.kind,
-            },
-            &quads,
+            &name,
+            Some(&author),
+            Some(&created_at),
+            &color,
+            request.opacity,
         )?;
+        append_annotation_quads(&entry.document, target, &quads).map_err(map_adapter_error)?;
+        set_annotation_appearance(
+            &entry.document,
+            target,
+            &markup_appearance_stream(request.kind, written, &quads),
+        )
+        .map_err(map_adapter_error)?;
 
         let snapshot = capture_snapshot(&entry.document, request.page_index, target, &geometry)?;
-        let view = snapshot.view();
+        let view = snapshot.view(&geometry);
         let history = push_annotation_action(entry, request.page_index, name, None, Some(snapshot));
         Ok(AnnotationMutationView {
             annotation: Some(view),
@@ -1324,6 +1857,143 @@ pub fn create_text_markup_from_settings(
     create_text_markup_with_author(document_id, settings.annotation_author.clone(), request)
 }
 
+/// Creates a sticky note attributed to `author`.
+pub fn create_note_with_author(
+    document_id: String,
+    author: String,
+    request: CreateNoteRequest,
+) -> Result<AnnotationMutationView, CommandError> {
+    let author = normalize_author(&author)?;
+    let rgb = validate_color_opacity(&request.color, request.opacity)?;
+    let color = format_color(rgb.0, rgb.1, rgb.2);
+    validate_rect(request.rect, "a sticky note")?;
+    let text = normalize_note_text(&request.text)?;
+    with_open_document(&document_id, |entry| {
+        ensure_annotation_editable(&entry.document)?;
+        let geometry = page_geometry(&entry.document, request.page_index)?;
+        let bounds = pdf_rect_for_display(&geometry, request.rect);
+        let name = next_annotation_name();
+        let created_at = pdf_date_now();
+
+        let target = create_native_text_annotation(
+            &entry.document,
+            request.page_index as i32,
+            &text,
+            bounds,
+        )
+        .map_err(map_adapter_error)?;
+        let written = write_common_properties(
+            &entry.document,
+            target,
+            &name,
+            Some(&author),
+            Some(&created_at),
+            &color,
+            request.opacity,
+        )?;
+        set_annotation_contents(&entry.document, target, &text).map_err(map_adapter_error)?;
+        set_annotation_appearance(
+            &entry.document,
+            target,
+            &note_appearance_stream(written, bounds),
+        )
+        .map_err(map_adapter_error)?;
+
+        let snapshot = capture_snapshot(&entry.document, request.page_index, target, &geometry)?;
+        let view = snapshot.view(&geometry);
+        let history = push_annotation_action(entry, request.page_index, name, None, Some(snapshot));
+        Ok(AnnotationMutationView {
+            annotation: Some(view),
+            page_index: request.page_index,
+            history,
+        })
+    })
+}
+
+/// Creates a sticky note using the author from persisted settings.
+pub fn create_note_from_settings(
+    document_id: String,
+    settings: &Settings,
+    request: CreateNoteRequest,
+) -> Result<AnnotationMutationView, CommandError> {
+    create_note_with_author(document_id, settings.annotation_author.clone(), request)
+}
+
+/// Creates a freehand ink annotation attributed to `author`.
+pub fn create_ink_with_author(
+    document_id: String,
+    author: String,
+    request: CreateInkRequest,
+) -> Result<AnnotationMutationView, CommandError> {
+    let author = normalize_author(&author)?;
+    let rgb = validate_ink_request(&request)?;
+    let color = format_color(rgb.0, rgb.1, rgb.2);
+    with_open_document(&document_id, |entry| {
+        ensure_annotation_editable(&entry.document)?;
+        let geometry = page_geometry(&entry.document, request.page_index)?;
+        let strokes: Vec<Vec<(f32, f32)>> = request
+            .strokes
+            .iter()
+            .map(|stroke| {
+                stroke
+                    .iter()
+                    .map(|point| geometry.point_inverse(point.x, point.y))
+                    .collect()
+            })
+            .collect();
+        let bounds = strokes_bounds(&strokes, request.line_width / 2.0 + 1.0);
+        let name = next_annotation_name();
+        let created_at = pdf_date_now();
+
+        let target =
+            create_native_ink_annotation(&entry.document, request.page_index as i32, bounds)
+                .map_err(map_adapter_error)?;
+        let written = write_common_properties(
+            &entry.document,
+            target,
+            &name,
+            Some(&author),
+            Some(&created_at),
+            &color,
+            request.opacity,
+        )?;
+        set_annotation_string_value(
+            &entry.document,
+            target,
+            LINE_WIDTH_KEY,
+            &request.line_width.to_string(),
+        )
+        .map_err(map_adapter_error)?;
+        set_annotation_border_width(&entry.document, target, request.line_width)
+            .map_err(map_adapter_error)?;
+        append_ink_strokes(&entry.document, target, &strokes).map_err(map_adapter_error)?;
+        set_annotation_appearance(
+            &entry.document,
+            target,
+            &ink_appearance_stream(written, request.line_width, &strokes),
+        )
+        .map_err(map_adapter_error)?;
+
+        let snapshot = capture_snapshot(&entry.document, request.page_index, target, &geometry)?;
+        let view = snapshot.view(&geometry);
+        let history = push_annotation_action(entry, request.page_index, name, None, Some(snapshot));
+        Ok(AnnotationMutationView {
+            annotation: Some(view),
+            page_index: request.page_index,
+            history,
+        })
+    })
+}
+
+/// Creates ink using the author from persisted settings.
+pub fn create_ink_from_settings(
+    document_id: String,
+    settings: &Settings,
+    request: CreateInkRequest,
+) -> Result<AnnotationMutationView, CommandError> {
+    create_ink_with_author(document_id, settings.annotation_author.clone(), request)
+}
+
 /// The `create_text_markup_annotation` command. The author is read from
 /// settings at creation time and never accepted from the frontend.
 #[tauri::command]
@@ -1334,6 +2004,78 @@ pub fn create_text_markup_annotation(
 ) -> Result<AnnotationMutationView, CommandError> {
     let settings = crate::commands::settings_store(&app)?.load();
     create_text_markup_from_settings(document_id, &settings, request)
+}
+
+/// Places one built-in stamp attributed to `author`.
+///
+/// The stamp is a native Stamp annotation with a generated appearance; like
+/// markup creation, the command layer supplies the author from settings.
+pub fn create_stamp_with_author(
+    document_id: String,
+    author: String,
+    request: CreateStampRequest,
+) -> Result<AnnotationMutationView, CommandError> {
+    let author = normalize_author(&author)?;
+    validate_frame(&request.frame)?;
+    if request.opacity > 100 {
+        return Err(invalid_argument(
+            "the annotation opacity must be between 0 and 100",
+        ));
+    }
+    with_open_document(&document_id, |entry| {
+        ensure_annotation_editable(&entry.document)?;
+        let geometry = page_geometry(&entry.document, request.page_index)?;
+        let frame = StampFrame::from_view(&geometry, request.frame)?;
+        let name = next_annotation_name();
+        let created_at = pdf_date_now();
+        let color = request.kind.color();
+
+        let target =
+            create_stamp_pdf_annotation(&entry.document, request.page_index as i32, frame.bounds())
+                .map_err(map_adapter_error)?;
+        write_stamp_properties(
+            &entry.document,
+            target,
+            &name,
+            Some(&author),
+            Some(&created_at),
+            request.kind,
+            &frame,
+            color,
+            request.opacity,
+        )?;
+
+        let snapshot = capture_snapshot(&entry.document, request.page_index, target, &geometry)?;
+        let view = snapshot.view(&geometry);
+        let history = push_annotation_action(entry, request.page_index, name, None, Some(snapshot));
+        Ok(AnnotationMutationView {
+            annotation: Some(view),
+            page_index: request.page_index,
+            history,
+        })
+    })
+}
+
+/// The `create_note_annotation` command. The author is read from settings.
+#[tauri::command]
+pub fn create_note_annotation(
+    app: AppHandle,
+    document_id: String,
+    request: CreateNoteRequest,
+) -> Result<AnnotationMutationView, CommandError> {
+    let settings = crate::commands::settings_store(&app)?.load();
+    create_note_from_settings(document_id, &settings, request)
+}
+
+/// The `create_ink_annotation` command. The author is read from settings.
+#[tauri::command]
+pub fn create_ink_annotation(
+    app: AppHandle,
+    document_id: String,
+    request: CreateInkRequest,
+) -> Result<AnnotationMutationView, CommandError> {
+    let settings = crate::commands::settings_store(&app)?.load();
+    create_ink_from_settings(document_id, &settings, request)
 }
 
 /// Creates a rectangle or ellipse attributed to `author`.
@@ -1378,11 +2120,81 @@ pub fn create_shape_with_author(
         )?;
 
         let snapshot = capture_snapshot(&entry.document, request.page_index, target, &page)?;
-        let view = snapshot.view();
+        let view = snapshot.view(&page);
         let history = push_annotation_action(entry, request.page_index, name, None, Some(snapshot));
         Ok(AnnotationMutationView {
             annotation: Some(view),
             page_index: request.page_index,
+            history,
+        })
+    })
+}
+
+/// Creates a stamp using the author from persisted settings.
+pub fn create_stamp_from_settings(
+    document_id: String,
+    settings: &Settings,
+    request: CreateStampRequest,
+) -> Result<AnnotationMutationView, CommandError> {
+    create_stamp_with_author(document_id, settings.annotation_author.clone(), request)
+}
+
+/// The `create_stamp_annotation` command. The author is read from settings at
+/// creation time and never accepted from the frontend.
+#[tauri::command]
+pub fn create_stamp_annotation(
+    app: AppHandle,
+    document_id: String,
+    request: CreateStampRequest,
+) -> Result<AnnotationMutationView, CommandError> {
+    let settings = crate::commands::settings_store(&app)?.load();
+    create_stamp_from_settings(document_id, &settings, request)
+}
+
+/// Moves, resizes or rotates a stamp in one undoable step.
+#[tauri::command]
+pub fn transform_stamp_annotation(
+    document_id: String,
+    request: TransformStampRequest,
+) -> Result<AnnotationMutationView, CommandError> {
+    validate_frame(&request.frame)?;
+    with_open_document(&document_id, |entry| {
+        ensure_annotation_editable(&entry.document)?;
+        let Some((page_index, target, geometry)) = locate(&entry.document, &request.name)? else {
+            return Err(invalid_argument(format!(
+                "no annotation named {} exists in this document",
+                request.name
+            )));
+        };
+        let before = capture_snapshot(&entry.document, page_index, target, &geometry)?;
+        let Some(stamp) = before.stamp else {
+            return Err(invalid_argument(
+                "only stamp annotations can be moved, resized or rotated",
+            ));
+        };
+        let frame = StampFrame::from_view(&geometry, request.frame)?;
+        let frame_view = frame.to_view(&geometry);
+        let (x, y, width, height) = display_bounds(&frame_view);
+        let mut after = before.clone();
+        after.rect = frame.bounds();
+        after.rects = vec![TextMarkupRect {
+            x,
+            y,
+            width,
+            height,
+        }];
+        after.stamp = Some(StampView {
+            kind: stamp.kind,
+            frame: frame_view,
+        });
+        after.stamp_frame = Some(frame);
+        restore_annotation_snapshot(&entry.document, &after)?;
+        let view = after.view(&geometry);
+        let history =
+            push_annotation_action(entry, page_index, request.name, Some(before), Some(after));
+        Ok(AnnotationMutationView {
+            annotation: Some(view),
+            page_index,
             history,
         })
     })
@@ -1434,7 +2246,7 @@ fn update_shape(
         shape.geometry = normalize_shape_geometry(shape.geometry)?;
         shape.style = normalize_shape_style(shape.style.clone())?;
         restore_annotation_snapshot(&entry.document, &after)?;
-        let view = after.view();
+        let view = after.view(&geometry);
         let history = push_annotation_action(entry, page_index, name, Some(before), Some(after));
         Ok(AnnotationMutationView {
             annotation: Some(view),
@@ -1442,6 +2254,25 @@ fn update_shape(
             history,
         })
     })
+}
+
+/// Whether an annotation is one PDFX can list and manage. Foreign stamps have
+/// no `/PDFXStamp` identity and are rendered by Pdfium but not listed.
+fn is_managed_annotation(
+    document: &PdfDocument<'static>,
+    target: AnnotationRef,
+    annotation_type: PdfPageAnnotationType,
+) -> Result<bool, CommandError> {
+    let Some(kind) = AnnotationKind::from_pdfium(annotation_type) else {
+        return Ok(false);
+    };
+    if kind != AnnotationKind::Stamp {
+        return Ok(true);
+    }
+    Ok(annotation_string_value(document, target, STAMP_KEY)
+        .map_err(map_adapter_error)?
+        .and_then(|value| StampKind::parse(&value))
+        .is_some())
 }
 
 /// Moves, resizes or rotates a shape as one undoable action.
@@ -1494,7 +2325,7 @@ pub fn list_annotations(document_id: String) -> Result<Vec<AnnotationView>, Comm
                 let Ok(annotation_type) = annotation_type(document, target) else {
                     continue;
                 };
-                if AnnotationKind::from_pdfium(annotation_type).is_none() {
+                if !is_managed_annotation(document, target, annotation_type)? {
                     continue;
                 }
                 let named = annotation_name(document, target)
@@ -1505,29 +2336,28 @@ pub fn list_annotations(document_id: String) -> Result<Vec<AnnotationView>, Comm
                     continue;
                 }
                 let snapshot = capture_snapshot(document, page_index as u32, target, &geometry)?;
-                views.push(snapshot.view());
+                views.push(snapshot.view(&geometry));
             }
         }
         Ok(views)
     })
 }
 
-/// Changes the colour and opacity of an existing annotation. Creates a new
-/// undo step; the annotation keeps its name, author and creation time.
+/// Changes the colour, opacity and (for ink) line width of an annotation.
+/// Creates a new undo step; the annotation keeps its name, author, creation
+/// time, text and strokes.
 #[tauri::command]
 pub fn update_annotation_style(
     document_id: String,
     name: String,
     color: String,
     opacity: u8,
+    line_width: Option<f32>,
 ) -> Result<AnnotationMutationView, CommandError> {
-    let rgb = parse_color(&color)?;
-    if opacity > 100 {
-        return Err(invalid_argument(
-            "the annotation opacity must be between 0 and 100",
-        ));
+    validate_color_opacity(&color, opacity)?;
+    if let Some(line_width) = line_width {
+        validate_ink_line_width(line_width)?;
     }
-    let color = format_color(rgb.0, rgb.1, rgb.2);
     with_open_document(&document_id, |entry| {
         ensure_annotation_editable(&entry.document)?;
         let Some((page_index, target, geometry)) = locate(&entry.document, &name)? else {
@@ -1541,11 +2371,107 @@ pub fn update_annotation_style(
                 "annotation {name} is a shape; use update_shape_style"
             )));
         }
+        if line_width.is_some() && before.kind != AnnotationKind::Ink {
+            return Err(invalid_argument("only ink annotations have a line width"));
+        }
         let mut after = before.clone();
-        after.color = color;
+        // A stamp's ink is part of its built-in design, so the panel only
+        // changes its opacity. Markup keeps the requested colour.
+        after.color = if before.stamp.is_some() {
+            before.color.clone()
+        } else {
+            color
+        };
         after.opacity = opacity;
+        if let Some(line_width) = line_width {
+            after.line_width = Some(line_width);
+        }
         restore_annotation_snapshot(&entry.document, &after)?;
-        let view = after.view();
+        let after = locate(&entry.document, &name)?
+            .and_then(|(_, target, geometry)| {
+                capture_snapshot(&entry.document, page_index, target, &geometry).ok()
+            })
+            .unwrap_or(after);
+        let view = after.view(&geometry);
+        let history = push_annotation_action(entry, page_index, name, Some(before), Some(after));
+        Ok(AnnotationMutationView {
+            annotation: Some(view),
+            page_index,
+            history,
+        })
+    })
+}
+
+/// Replaces a sticky note's body. The annotation keeps its name, author,
+/// creation time, colour and position.
+#[tauri::command]
+pub fn update_note_text(
+    document_id: String,
+    name: String,
+    text: String,
+) -> Result<AnnotationMutationView, CommandError> {
+    let text = normalize_note_text(&text)?;
+    with_open_document(&document_id, |entry| {
+        ensure_annotation_editable(&entry.document)?;
+        let Some((page_index, target, geometry)) = locate(&entry.document, &name)? else {
+            return Err(invalid_argument(format!(
+                "no annotation named {name} exists in this document"
+            )));
+        };
+        let before = capture_snapshot(&entry.document, page_index, target, &geometry)?;
+        if before.kind != AnnotationKind::Note {
+            return Err(invalid_argument("only sticky notes have editable text"));
+        }
+        let mut after = before.clone();
+        after.text = Some(text);
+        restore_annotation_snapshot(&entry.document, &after)?;
+        let after = locate(&entry.document, &name)?
+            .and_then(|(_, target, geometry)| {
+                capture_snapshot(&entry.document, page_index, target, &geometry).ok()
+            })
+            .unwrap_or(after);
+        let view = after.view(&geometry);
+        let history = push_annotation_action(entry, page_index, name, Some(before), Some(after));
+        Ok(AnnotationMutationView {
+            annotation: Some(view),
+            page_index,
+            history,
+        })
+    })
+}
+
+/// Moves and resizes a sticky note as one undoable action. The appearance is
+/// rebuilt so the icon keeps filling the new `/Rect`.
+#[tauri::command]
+pub fn transform_note_annotation(
+    document_id: String,
+    name: String,
+    rect: TextMarkupRect,
+) -> Result<AnnotationMutationView, CommandError> {
+    validate_rect(rect, "a sticky note")?;
+    with_open_document(&document_id, |entry| {
+        ensure_annotation_editable(&entry.document)?;
+        let Some((page_index, target, geometry)) = locate(&entry.document, &name)? else {
+            return Err(invalid_argument(format!(
+                "no annotation named {name} exists in this document"
+            )));
+        };
+        let before = capture_snapshot(&entry.document, page_index, target, &geometry)?;
+        if before.kind != AnnotationKind::Note {
+            return Err(invalid_argument(
+                "only sticky notes can be moved or resized",
+            ));
+        }
+        let mut after = before.clone();
+        after.rect = pdf_rect_for_display(&geometry, rect);
+        after.rects = vec![rect];
+        restore_annotation_snapshot(&entry.document, &after)?;
+        let after = locate(&entry.document, &name)?
+            .and_then(|(_, target, geometry)| {
+                capture_snapshot(&entry.document, page_index, target, &geometry).ok()
+            })
+            .unwrap_or(after);
+        let view = after.view(&geometry);
         let history = push_annotation_action(entry, page_index, name, Some(before), Some(after));
         Ok(AnnotationMutationView {
             annotation: Some(view),
@@ -1556,7 +2482,7 @@ pub fn update_annotation_style(
 }
 
 /// Deletes an annotation. The undo step recreates it, including its original
-/// author and creation time.
+/// author, creation time, note text, ink strokes and shape style.
 #[tauri::command]
 pub fn delete_annotation(
     document_id: String,

@@ -466,15 +466,21 @@ export type TextMarkupKind = "highlight" | "underline" | "strikeout";
 /** The geometric shape kinds PDFX creates. */
 export type ShapeKind = "square" | "circle";
 
-/** Every annotation kind the list and overlay render. */
-export type AnnotationKind = TextMarkupKind | ShapeKind;
+/** Every annotation kind the list, overlays and style panel manage. */
+export type AnnotationKind = TextMarkupKind | ShapeKind | "note" | "ink" | "stamp";
 
-/** A display-space rectangle of a markup selection. */
+/** A display-space rectangle of a markup selection, note icon or ink bounds. */
 export interface TextMarkupRect {
   x: number;
   y: number;
   width: number;
   height: number;
+}
+
+/** One freehand point in display-space points. */
+export interface InkPoint {
+  x: number;
+  y: number;
 }
 
 /** Creates a native text markup annotation over the selected rectangles. */
@@ -489,12 +495,73 @@ export interface CreateTextMarkupRequest {
   rects: TextMarkupRect[];
 }
 
+/** The four built-in stamps. */
+export type StampKind = "approved" | "draft" | "confidential" | "rejected";
+
 /**
- * A native text markup annotation read back from the in-memory document.
+ * A stamp frame in display-space page points: top-left origin and clockwise
+ * rotation in degrees, the same convention as the Text Box overlay.
+ */
+export interface StampFrameView {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  rotation: number;
+}
+
+/** The built-in design and editable frame of a stamp annotation. */
+export interface StampView {
+  kind: StampKind;
+  frame: StampFrameView;
+}
+
+/** Places one built-in stamp with the given opacity percentage. */
+export interface CreateStampRequest {
+  pageIndex: number;
+  kind: StampKind;
+  /** Constant opacity in percent (0-100); the ink colour comes from the kind. */
+  opacity: number;
+  /** Display-space frame. */
+  frame: StampFrameView;
+}
+
+/** Moves, resizes or rotates a stamp as one undoable action. */
+export interface TransformStampRequest {
+  name: string;
+  frame: StampFrameView;
+}
+
+/** Places a native sticky note with its icon box in display space. */
+export interface CreateNoteRequest {
+  pageIndex: number;
+  /** Icon colour as `#rrggbb`. */
+  color: string;
+  /** Constant opacity in percent (0-100). */
+  opacity: number;
+  /** Note body; edited later through `updateNoteText`. */
+  text: string;
+  rect: TextMarkupRect;
+}
+
+/** Draws one native freehand ink annotation. */
+export interface CreateInkRequest {
+  pageIndex: number;
+  color: string;
+  /** Constant opacity in percent (0-100). */
+  opacity: number;
+  /** Stroke width in display points. */
+  lineWidth: number;
+  /** Display-space strokes; one entry per pen-down/pen-up gesture. */
+  strokes: InkPoint[][];
+}
+
+/**
+ * A native annotation read back from the in-memory document.
  *
- * `name` is the stable `/NM` identity used by locate, restyle and delete.
- * `author` and `createdAt` are copied into the PDF at creation time; `createdAt`
- * is the PDF date string (`D:YYYYMMDDHHmmSSZ`).
+ * `name` is the stable `/NM` identity used by locate, restyle, transform and
+ * delete. `author` and `createdAt` are copied into the PDF at creation time;
+ * `createdAt` is the PDF date string (`D:YYYYMMDDHHmmSSZ`).
  */
 export interface AnnotationView {
   name: string;
@@ -504,9 +571,18 @@ export interface AnnotationView {
   createdAt: string | null;
   color: string;
   opacity: number;
+  /** Ink stroke width in display points; null for other kinds. */
+  lineWidth: number | null;
+  /** Sticky-note body; null for other kinds. */
+  text: string | null;
+  /** Display-space boxes: one per markup quad, or the stamp's display bounds. */
   rects: TextMarkupRect[];
-  /** Shape geometry and style; null for text markup. */
+  /** Display-space ink strokes; empty for other kinds. */
+  strokes: InkPoint[][];
+  /** Shape geometry and style; null for every other kind. */
   shape: ShapeView | null;
+  /** Set only for stamp annotations. */
+  stamp: StampView | null;
 }
 
 /** A shape's unrotated display-space geometry plus clockwise rotation. */
@@ -1126,11 +1202,50 @@ export async function createTextMarkupAnnotation(
   });
 }
 
-/** Lists every text markup annotation in the document, in page order. */
+/**
+ * Places one built-in stamp on a page as a native Stamp annotation. The author
+ * comes from the persisted settings on the Rust side.
+ */
+export async function createStampAnnotation(
+  documentId: string,
+  request: CreateStampRequest,
+): Promise<AnnotationMutationView> {
+  return invoke<AnnotationMutationView>("create_stamp_annotation", {
+    documentId,
+    request,
+  });
+}
+
+/** Moves, resizes or rotates a stamp in one undoable step. */
+export async function transformStampAnnotation(
+  documentId: string,
+  request: TransformStampRequest,
+): Promise<AnnotationMutationView> {
+  return invoke<AnnotationMutationView>("transform_stamp_annotation", {
+    documentId,
+    request,
+  });
+}
+
+/** Lists every annotation in the document, in page order. */
 export async function listAnnotations(
   documentId: string,
 ): Promise<AnnotationView[]> {
   return invoke<AnnotationView[]>("list_annotations", { documentId });
+}
+
+/**
+ * Places a sticky note. The author comes from persisted settings on the Rust
+ * side, exactly like text markup.
+ */
+export async function createNoteAnnotation(
+  documentId: string,
+  request: CreateNoteRequest,
+): Promise<AnnotationMutationView> {
+  return invoke<AnnotationMutationView>("create_note_annotation", {
+    documentId,
+    request,
+  });
 }
 
 /**
@@ -1144,6 +1259,49 @@ export async function createShapeAnnotation(
   return invoke<AnnotationMutationView>("create_shape_annotation", {
     documentId,
     request,
+  });
+}
+
+/**
+ * Draws a native ink annotation. The author comes from persisted settings on
+ * the Rust side.
+ */
+export async function createInkAnnotation(
+  documentId: string,
+  request: CreateInkRequest,
+): Promise<AnnotationMutationView> {
+  return invoke<AnnotationMutationView>("create_ink_annotation", {
+    documentId,
+    request,
+  });
+}
+
+/** Replaces a sticky note's body as one undoable action. */
+export async function updateNoteText(
+  documentId: string,
+  name: string,
+  text: string,
+): Promise<AnnotationMutationView> {
+  return invoke<AnnotationMutationView>("update_note_text", {
+    documentId,
+    name,
+    text,
+  });
+}
+
+/**
+ * Moves and resizes a sticky note as one undoable action. `rect` is in
+ * display-space points.
+ */
+export async function transformNoteAnnotation(
+  documentId: string,
+  name: string,
+  rect: TextMarkupRect,
+): Promise<AnnotationMutationView> {
+  return invoke<AnnotationMutationView>("transform_note_annotation", {
+    documentId,
+    name,
+    rect,
   });
 }
 
@@ -1173,18 +1331,23 @@ export async function updateShapeStyle(
   });
 }
 
-/** Changes an existing annotation's colour and opacity as one undoable action. */
+/**
+ * Changes an existing annotation's colour and opacity (and, for ink only, its
+ * line width) as one undoable action.
+ */
 export async function updateAnnotationStyle(
   documentId: string,
   name: string,
   color: string,
   opacity: number,
+  lineWidth: number | null = null,
 ): Promise<AnnotationMutationView> {
   return invoke<AnnotationMutationView>("update_annotation_style", {
     documentId,
     name,
     color,
     opacity,
+    lineWidth,
   });
 }
 

@@ -50,7 +50,7 @@ safe wrapper lives in `src-tauri/src/pdfium_adapter.rs`.
 
 ## Patch scope
 
-Eleven files change. Each hunk is additive; no upstream behaviour changes.
+Thirteen files change. Each hunk is additive; no upstream behaviour changes.
 
 ### `src/pdf/document.rs`
 
@@ -88,6 +88,10 @@ Eleven files change. Each hunk is additive; no upstream behaviour changes.
   `FPDFAnnot_AddInkStroke()`; returns the new zero-based stroke index.
 - Added `PdfPageInkAnnotation::ink_stroke_count()` calling
   `FPDFAnnot_GetInkListCount()`.
+- Added `PdfPageInkAnnotation::ink_strokes()` reading every stroke back
+  through `FPDFAnnot_GetInkListPath()` (two calls per stroke: point count with
+  a null buffer, then the points). Undo and style changes recreate the
+  stroke-based snapshot from `/InkList` rather than a private copy.
 
 ### `src/pdf/document/page/annotation.rs`
 
@@ -108,8 +112,9 @@ Added to the `PdfPageAnnotation` enum (available on every annotation type):
 - `set_appearance(stream)` — `FPDFAnnot_SetAP_str()` with
   `FPDF_ANNOT_APPEARANCEMODE_NORMAL`. Pdfium builds a Form XObject whose
   `/BBox` is the annotation `/Rect` at call time, so bounds must be set first.
-- `add_ink_stroke(points)` / `ink_stroke_count()` — delegate to the ink
-  variant, returning `PdfiumError::UnknownPdfAnnotationType` otherwise.
+- `add_ink_stroke(points)` / `ink_stroke_count()` / `ink_strokes()` — delegate
+  to the ink variant, returning `PdfiumError::UnknownPdfAnnotationType`
+  otherwise.
 
 ### `src/pdf/document/page/annotation/highlight.rs`
 
@@ -125,6 +130,16 @@ Added to the `PdfPageAnnotation` enum (available on every annotation type):
 
 - Added `PdfPageStrikeoutAnnotation::close(self)` calling
   `FPDFPage_CloseAnnot()`.
+
+### `src/pdf/document/page/annotation/stamp.rs`
+
+- Added `PdfPageStampAnnotation::close(self)` calling
+  `FPDFPage_CloseAnnot()`.
+
+### `src/pdf/document/page/annotation/text.rs`
+
+- Added `PdfPageTextAnnotation::close(self)` calling
+  `FPDFPage_CloseAnnot()`, for the same reason as the other annotation types.
 
 ### `src/pdf/document/fonts.rs`
 
@@ -195,9 +210,9 @@ cargo test --test cjk_fonts
    sha256 here.
 2. Replace everything in this directory with the new crate contents plus
    `LICENSE.md`, keeping `PDFX-PATCH.md`.
-3. Re-apply the hunks above (eleven files). `diff -u` against the pristine crate
-   source (cargo registry unpack directory or a fresh extract of the `.crate`)
-   is the authoritative patch; keep the diff to those eleven files.
+3. Re-apply the hunks above (thirteen files). `diff -u` against the pristine
+   crate source (cargo registry unpack directory or a fresh extract of the
+   `.crate`) is the authoritative patch; keep the diff to those thirteen files.
 4. Update `src-tauri/Cargo.toml` version if the patched range changes, then
    build. `pdfium-render` tracks the PDFium API, so re-run the adapter tests
    against the pinned PDFium build first.
@@ -209,9 +224,10 @@ cargo test --test cjk_fonts
 
 - Upstream concrete annotation types (e.g. `PdfPageCircleAnnotation`) have no
   `Drop`; only the `PdfPageAnnotation` enum closes its annotation handle. The
-  patch adds `close(self)` to the six types PDFX creates (circle, square, ink,
-  highlight, underline, strikeout), and the adapter calls it immediately after
-  setting bounds. Other concrete annotation types keep upstream behaviour, so
+  patch adds `close(self)` to the eight types PDFX creates (circle, square,
+  ink, highlight, underline, strikeout, text, stamp), and the adapter calls it
+  immediately after setting bounds. Other concrete annotation types keep
+  upstream behaviour, so
   callers creating them directly must close them explicitly if the patch is
   extended to expose them. Later adapter operations fetch the annotation
   through the enum, which does close the handle.

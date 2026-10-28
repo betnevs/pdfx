@@ -13,6 +13,7 @@ import {
   type PageImageView,
   type PageInfo,
   type PageRegionView,
+  type StampKind,
 } from "../lib/backend";
 import { onDocumentChanged } from "../lib/documentEvents";
 import {
@@ -28,6 +29,7 @@ import { LineLayer } from "./LineLayer";
 import { PageImageLayer } from "./PageImageLayer";
 import { PageTextLayer } from "./PageTextLayer";
 import { ShapeLayer } from "./ShapeLayer";
+import { StampLayer } from "./StampLayer";
 
 /** Fixed cell height keeps thumbnail virtualization independent of page sizes. */
 const THUMBNAIL_ITEM_HEIGHT = 168;
@@ -396,7 +398,11 @@ export function PageSurface({
   canModifyContent = false,
   annotations,
   selectedAnnotation,
+  armedStamp,
   onSelectAnnotation,
+  onStampPlaced,
+  onArmedStampChange,
+  onAnnotationsChanged,
   surfaceRef,
   canFillForms = false,
   formFocusFieldId = null,
@@ -415,7 +421,11 @@ export function PageSurface({
   canModifyContent?: boolean;
   annotations: AnnotationView[];
   selectedAnnotation: AnnotationView | null;
+  armedStamp: StampKind | null;
   onSelectAnnotation: (annotation: AnnotationView | null) => void;
+  onStampPlaced: (annotation: AnnotationView) => void;
+  onArmedStampChange: (kind: StampKind | null) => void;
+  onAnnotationsChanged: () => void;
   surfaceRef: RefObject<HTMLDivElement | null>;
   /** Permission Restrictions allow filling existing form fields. */
   canFillForms?: boolean;
@@ -483,7 +493,9 @@ export function PageSurface({
         pageIndex={pageIndex}
         readOnly={readOnly}
         canAnnotate={canAnnotate}
+        annotations={annotations}
         selectedAnnotation={selectedAnnotation}
+        onSelectAnnotation={onSelectAnnotation}
         scale={scale}
       />
       {info && (
@@ -522,6 +534,23 @@ export function PageSurface({
           annotations={annotations}
           selectedAnnotation={selectedAnnotation}
           onSelectAnnotation={onSelectAnnotation}
+        />
+      )}
+      {info && (
+        <StampLayer
+          documentId={documentId}
+          pageIndex={pageIndex}
+          pageWidth={info.width}
+          pageHeight={info.height}
+          readOnly={readOnly}
+          canAnnotate={canAnnotate}
+          annotations={annotations}
+          selectedName={selectedAnnotation?.name ?? null}
+          armed={armedStamp}
+          onSelect={onSelectAnnotation}
+          onPlaced={onStampPlaced}
+          onArmedChange={onArmedStampChange}
+          onChanged={onAnnotationsChanged}
         />
       )}
       {info && (

@@ -3,10 +3,10 @@
 //! The adapter always operates on the same `PdfDocument` handle that holds
 //! high-level `pdfium-render` edits. It adds only the capabilities PDFium
 //! supports but `pdfium-render` 0.9.4 does not expose: flags-aware saves,
-//! circle-annotation creation, ink strokes, annotation border width, text
-//! markup annotations, annotation identity and custom appearance streams. The
-//! patch itself lives in `vendor/pdfium-render/PDFX-PATCH.md`; callers of this
-//! module never need `unsafe` and never touch a PDFium handle.
+//! circle- and stamp-annotation creation, ink strokes, annotation border
+//! width, text markup annotations, annotation identity and custom appearance
+//! streams. The patch itself lives in `vendor/pdfium-render/PDFX-PATCH.md`;
+//! callers of this module never need `unsafe` and never touch a PDFium handle.
 //!
 //! Saving is explicit: callers choose [SaveMode::Incremental] (append a
 //! revision whose output begins with the source bytes), [SaveMode::FullRewrite]
@@ -260,6 +260,66 @@ pub fn create_text_markup_annotation(
     Ok(AnnotationRef::new(page_index, annotations.len() - 1))
 }
 
+/// Creates a stamp annotation with `rect` bounds.
+///
+/// Pdfium does not generate an appearance for the annotation; callers install
+/// one with [`set_annotation_appearance`] before saving.
+pub fn create_stamp_annotation(
+    document: &PdfDocument<'_>,
+    page_index: i32,
+    rect: AnnotationRect,
+) -> Result<AnnotationRef, AdapterError> {
+    let pages = document.pages();
+    let mut page = pages.get(page_index)?;
+    let annotations = page.annotations_mut();
+    let mut annotation = annotations.create_stamp_annotation()?;
+    let result = annotation.set_bounds(rect.to_pdf_rect());
+    annotation.close();
+    result?;
+    Ok(AnnotationRef::new(page_index, annotations.len() - 1))
+}
+
+/// Creates a sticky-note annotation (`/Subtype /Text`) with `text` contents and
+/// `rect` bounds.
+///
+/// Pdfium does not generate an icon appearance for the annotation in this
+/// build, so callers install one with [`set_annotation_appearance`] before
+/// saving.
+pub fn create_text_annotation(
+    document: &PdfDocument<'_>,
+    page_index: i32,
+    text: &str,
+    rect: AnnotationRect,
+) -> Result<AnnotationRef, AdapterError> {
+    let pages = document.pages();
+    let mut page = pages.get(page_index)?;
+    let annotations = page.annotations_mut();
+    let mut annotation = annotations.create_text_annotation(text)?;
+    let result = annotation.set_bounds(rect.to_pdf_rect());
+    annotation.close();
+    result?;
+    Ok(AnnotationRef::new(page_index, annotations.len() - 1))
+}
+
+/// Creates an ink annotation (`/Subtype /Ink`) with `rect` bounds.
+///
+/// Add strokes with [`append_ink_strokes`]; Pdfium does not generate an
+/// appearance, so callers install one with [`set_annotation_appearance`].
+pub fn create_ink_annotation(
+    document: &PdfDocument<'_>,
+    page_index: i32,
+    rect: AnnotationRect,
+) -> Result<AnnotationRef, AdapterError> {
+    let pages = document.pages();
+    let mut page = pages.get(page_index)?;
+    let annotations = page.annotations_mut();
+    let mut annotation = annotations.create_ink_annotation()?;
+    let result = annotation.set_bounds(rect.to_pdf_rect());
+    annotation.close();
+    result?;
+    Ok(AnnotationRef::new(page_index, annotations.len() - 1))
+}
+
 /// Creates a square or circle annotation with `rect` bounds.
 ///
 /// Pdfium does not generate an appearance for the annotation; callers install
@@ -341,6 +401,28 @@ pub fn set_annotation_author(
 ) -> Result<(), AdapterError> {
     with_annotation_on(document, target, |annotation| {
         annotation.set_creator(author)
+    })
+}
+
+/// Returns the annotation contents (`/Contents`), if any.
+///
+/// Sticky notes keep their text here; the value is also a human-readable
+/// description for every other annotation type.
+pub fn annotation_contents(
+    document: &PdfDocument<'_>,
+    target: AnnotationRef,
+) -> Result<Option<String>, AdapterError> {
+    with_annotation_on(document, target, |annotation| Ok(annotation.contents()))
+}
+
+/// Sets the annotation contents (`/Contents`).
+pub fn set_annotation_contents(
+    document: &PdfDocument<'_>,
+    target: AnnotationRef,
+    contents: &str,
+) -> Result<(), AdapterError> {
+    with_annotation_on(document, target, |annotation| {
+        annotation.set_contents(contents)
     })
 }
 
@@ -465,10 +547,10 @@ pub fn annotation_border_width(
     with_annotation_on(document, target, |annotation| annotation.border_width())
 }
 
-/// Sets the annotation border width in default user space units.
+/// Sets the annotation border width (`/BS /W`).
 ///
-/// Pdfium drops any existing appearance stream when the border is set, so call
-/// this before [`set_annotation_appearance`].
+/// Pdfium drops any existing appearance stream when the border is set, so this
+/// must run before [`set_annotation_appearance`].
 pub fn set_annotation_border_width(
     document: &PdfDocument<'_>,
     target: AnnotationRef,
@@ -476,6 +558,28 @@ pub fn set_annotation_border_width(
 ) -> Result<(), AdapterError> {
     with_annotation_on(document, target, |annotation| {
         annotation.set_border_width(width)
+    })
+}
+
+/// Returns every `/InkList` stroke of an ink annotation as page-space points.
+pub fn annotation_ink_strokes(
+    document: &PdfDocument<'_>,
+    target: AnnotationRef,
+) -> Result<Vec<Vec<(f32, f32)>>, AdapterError> {
+    with_annotation_on(document, target, |annotation| annotation.ink_strokes())
+}
+
+/// Appends ink strokes to an ink annotation.
+pub fn append_ink_strokes(
+    document: &PdfDocument<'_>,
+    target: AnnotationRef,
+    strokes: &[Vec<(f32, f32)>],
+) -> Result<(), AdapterError> {
+    with_annotation_on(document, target, |annotation| {
+        for stroke in strokes {
+            annotation.add_ink_stroke(stroke)?;
+        }
+        Ok(())
     })
 }
 

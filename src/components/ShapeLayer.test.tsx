@@ -36,12 +36,16 @@ const createdRectangle: AnnotationView = {
   createdAt: "D:20261028123456Z",
   color: "#000000",
   opacity: 100,
+  lineWidth: null,
+  text: null,
+  strokes: [],
   rects: [],
   shape: {
     kind: "square",
     geometry: { x: 100, y: 200, width: 200, height: 60, rotation: 0 },
     style: style(),
   },
+  stamp: null,
 };
 
 const selectedRectangle: AnnotationView = {
@@ -52,12 +56,16 @@ const selectedRectangle: AnnotationView = {
   createdAt: "D:20261028123456Z",
   color: "#000000",
   opacity: 80,
+  lineWidth: null,
+  text: null,
+  strokes: [],
   rects: [],
   shape: {
     kind: "square",
     geometry: { x: 100, y: 100, width: 200, height: 100, rotation: 0 },
     style: style({ opacity: 80, lineWidth: 3 }),
   },
+  stamp: null,
 };
 
 function mockCommands(
