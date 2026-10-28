@@ -42,6 +42,8 @@ export type CommandErrorCode =
   | "no_output_document"
   | "unencrypted_output_confirmation_required"
   | "read_only_document"
+  | "recovery_failed"
+  | "recovery_not_found"
   | "form_field_not_found"
   | "form_field_read_only"
   | "form_fill_not_permitted"
@@ -82,6 +84,14 @@ export interface DocumentView {
   /** Permission Restrictions deny every editing capability. */
   readOnly: boolean;
   permissions: DocumentPermissions;
+  /**
+   * Output Document this Document will save to, when one exists. A document
+   * restored from a Recovery File reuses the previous Output Document only
+   * while it still exists and is not the Source Document.
+   */
+  outputPath?: string | null;
+  /** Opened from a Recovery File; `path` is the original Source Document. */
+  recovered?: boolean;
 }
 
 export interface PageImageView {
@@ -879,7 +889,7 @@ export interface SaveDocumentRequest {
   confirmUnencryptedOutput: boolean;
 }
 
-/** The outcome of a completed save. */
+/** The outcome of one completed save. */
 export interface SaveResultView {
   documentId: string;
   outputPath: string;
@@ -889,6 +899,44 @@ export interface SaveResultView {
   backupPath: string | null;
   /** Clean state after the write; undo/redo history is untouched. */
   history: EditHistoryView;
+}
+
+/**
+ * Metadata for one Recovery File.
+ *
+ * The sidecar never contains document text or passwords: only provenance,
+ * revision counters and a timestamp. `sourceEncrypted` warns that the snapshot
+ * is an unencrypted local copy of an encrypted Source Document (ADR-0007).
+ */
+export interface RecoverySnapshotView {
+  formatVersion: number;
+  sessionId: string;
+  /** Original Source Document path; never written when restoring. */
+  sourcePath: string;
+  outputPath: string | null;
+  displayName: string;
+  sourceEncrypted: boolean;
+  sourceReadOnly: boolean;
+  sourcePermissions: DocumentPermissions | null;
+  dirty: boolean;
+  revision: number;
+  savedRevision: number;
+  createdAtMillis: number;
+  appVersion: string;
+}
+
+/** The result of one throttled Recovery File tick. */
+export interface RecoverySnapshotOutcome {
+  written: boolean;
+  sessionId: string | null;
+  bytes: number;
+}
+
+/** One entry of the locally persisted recent-files list. */
+export interface RecentFileView {
+  path: string;
+  name: string;
+  lastOpenedMillis: number;
 }
 
 /** Tauri event carrying save progress for the window that started the save. */
@@ -926,6 +974,8 @@ const COMMAND_ERROR_CODES: ReadonlySet<string> = new Set<CommandErrorCode>([
   "no_output_document",
   "unencrypted_output_confirmation_required",
   "read_only_document",
+  "recovery_failed",
+  "recovery_not_found",
   "form_field_not_found",
   "form_field_read_only",
   "form_fill_not_permitted",
@@ -1815,6 +1865,52 @@ export function onSaveProgress(
 /** Releases a document from the backend registry. Unknown ids are ignored. */
 export async function closeDocument(documentId: string): Promise<void> {
   return invoke<void>("close_document", { documentId });
+}
+
+/**
+ * Runs one throttled Recovery File tick.
+ *
+ * The backend decides whether anything is written (debounce plus a maximum
+ * interval); repeated calls while editing are cheap and never write per
+ * keystroke. The command is async so serialization does not block the UI.
+ */
+export async function recoverySnapshot(
+  documentId: string,
+): Promise<RecoverySnapshotOutcome> {
+  return invoke<RecoverySnapshotOutcome>("recovery_snapshot", { documentId });
+}
+
+/**
+ * Lists Recovery Files left by an abnormal exit, newest first. Reading the
+ * list never opens a document; the start-up prompt decides what to do.
+ */
+export async function listRecoveryCandidates(): Promise<RecoverySnapshotView[]> {
+  return invoke<RecoverySnapshotView[]>("recovery_candidates");
+}
+
+/**
+ * Opens a Recovery File as the Document. Unsaved edits are restored, the
+ * original Source path is provenance only, and saving uses the normal pipeline.
+ */
+export async function restoreRecovery(sessionId: string): Promise<DocumentView> {
+  return invoke<DocumentView>("restore_recovery", { sessionId });
+}
+
+/** Removes one Recovery File without opening it. */
+export async function discardRecovery(sessionId: string): Promise<void> {
+  return invoke<void>("discard_recovery", { sessionId });
+}
+
+/** Reads the locally persisted recent-files list (missing files pruned). */
+export async function listRecentFiles(): Promise<RecentFileView[]> {
+  return invoke<RecentFileView[]>("list_recent_files");
+}
+
+/** Removes one path from the recent-files list and returns the new list. */
+export async function forgetRecentFile(
+  path: string,
+): Promise<RecentFileView[]> {
+  return invoke<RecentFileView[]>("forget_recent_file", { path });
 }
 
 /** Sets the native window title (the native menu shows the same name). */

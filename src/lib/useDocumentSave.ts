@@ -51,6 +51,11 @@ export interface DocumentSaveOptions {
    * once per blocked attempt, in tab order.
    */
   onMissingRequired?: (fields: FormFieldView[]) => void;
+  /**
+   * A save finished writing its Output Document. The workspace refreshes the
+   * recent-files list from this notification.
+   */
+  onSaved?: (outputPath: string) => void;
 }
 
 /** Everything the save UI needs for the open document. */
@@ -148,8 +153,10 @@ export function useDocumentSave(
     setError(null);
     setConfirmation(null);
     setRequiredFields(null);
-    setLastSavedPath(null);
-    hasOutputRef.current = false;
+    setLastSavedPath(documentRef.current?.outputPath ?? null);
+    // A restored Document may already have an Output Document from before the
+    // crash; Save Changes overwrites it instead of forcing another Save As.
+    hasOutputRef.current = Boolean(documentRef.current?.outputPath);
     busyRef.current = false;
 
     if (!documentId) {
@@ -248,6 +255,7 @@ export function useDocumentSave(
         setHistory(result.history);
         setLastSavedPath(result.outputPath);
         setRequiredFields(null);
+        optionsRef.current.onSaved?.(result.outputPath);
         return "saved";
       } catch (saveError) {
         setError({ error: toCommandError(saveError), kind, request });
