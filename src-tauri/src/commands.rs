@@ -59,6 +59,11 @@ pub enum CommandErrorCode {
     PageOutOfRange,
     InvalidScale,
     InvalidArgument,
+    /// The page has no text layer, so there is nothing to edit here.
+    NoEditableText,
+    /// The clicked Text Object uses a font that cannot represent the
+    /// replacement text without emitting missing glyphs.
+    UnsupportedFont,
     RenderFailed,
     WindowFailed,
     Internal,
@@ -225,12 +230,16 @@ pub struct TextLayerView {
     pub chars: Vec<TextCharView>,
 }
 
-struct OpenDocument {
+pub(crate) struct OpenDocument {
     /// The unmodified bytes read from disk, kept for the incremental-save
     /// pipeline. PDFium owns its own copy of the input buffer.
     #[allow(dead_code)]
-    source_bytes: Vec<u8>,
-    document: PdfDocument<'static>,
+    pub(crate) source_bytes: Vec<u8>,
+    /// Session-level edit state for this Document. Declared before `document`
+    /// so detached page-object snapshots held by undo/redo are destroyed
+    /// before PDFium closes the owning document.
+    pub(crate) edit: crate::text_edit::EditSession,
+    pub(crate) document: PdfDocument<'static>,
 }
 
 #[derive(Default)]
@@ -249,6 +258,23 @@ static OPEN_LOCK: Mutex<()> = Mutex::new(());
 
 fn registry() -> &'static Mutex<Registry> {
     REGISTRY.get_or_init(|| Mutex::new(Registry::default()))
+}
+
+/// Runs `action` against the open Document with the given id while holding the
+/// registry lock. Text editing borrows both the PDFium document and the
+/// session history, so it needs mutable access to the whole entry.
+pub(crate) fn with_open_document<R>(
+    document_id: &str,
+    action: impl FnOnce(&mut OpenDocument) -> Result<R, CommandError>,
+) -> Result<R, CommandError> {
+    let mut registry = registry().lock().expect("document registry poisoned");
+    let entry = registry.documents.get_mut(document_id).ok_or_else(|| {
+        CommandError::new(
+            CommandErrorCode::DocumentNotFound,
+            format!("no open document with id {document_id}"),
+        )
+    })?;
+    action(entry)
 }
 
 /// The `open_document` command.
@@ -272,6 +298,12 @@ pub fn open_document(path: String, password: Option<String>) -> Result<DocumentV
 
     let engine = Engine::shared()
         .map_err(|message| CommandError::new(CommandErrorCode::PdfiumUnavailable, message))?;
+
+    // PDFium's API is not thread-safe, and tests (and multiple windows) open
+    // documents concurrently. The registry lock already serializes every
+    // command that uses an open document's PDFium handles; hold it here too so
+    // reading page dimensions and permissions cannot overlap those commands.
+    let mut registry = registry().lock().expect("document registry poisoned");
 
     let document = {
         let _load_guard = OPEN_LOCK.lock().expect("PDFium open lock poisoned");
@@ -297,30 +329,27 @@ pub fn open_document(path: String, password: Option<String>) -> Result<DocumentV
 
     let (encrypted, read_only, permissions) = document_permissions(&document);
 
-    let view = {
-        let mut registry = registry().lock().expect("document registry poisoned");
-        registry.next_id += 1;
-        let document_id = format!("doc-{}", registry.next_id);
-        let view = DocumentView {
-            document_id: document_id.clone(),
-            name: document_name(&path),
-            path: path.to_string_lossy().into_owned(),
-            page_count: page_count as u32,
-            page_width,
-            page_height,
-            encrypted,
-            read_only,
-            permissions,
-        };
-        registry.documents.insert(
-            document_id,
-            OpenDocument {
-                source_bytes: bytes,
-                document,
-            },
-        );
-        view
+    registry.next_id += 1;
+    let document_id = format!("doc-{}", registry.next_id);
+    let view = DocumentView {
+        document_id: document_id.clone(),
+        name: document_name(&path),
+        path: path.to_string_lossy().into_owned(),
+        page_count: page_count as u32,
+        page_width,
+        page_height,
+        encrypted,
+        read_only,
+        permissions,
     };
+    registry.documents.insert(
+        document_id,
+        OpenDocument {
+            source_bytes: bytes,
+            edit: crate::text_edit::EditSession::default(),
+            document,
+        },
+    );
 
     Ok(view)
 }
@@ -372,6 +401,24 @@ pub fn close_document(document_id: String) -> Result<(), CommandError> {
     let mut registry = registry().lock().expect("document registry poisoned");
     registry.documents.remove(&document_id);
     Ok(())
+}
+
+/// Serializes the current in-memory document, including every applied edit.
+///
+/// This is the save-pipeline seam ticket 10 builds on. It returns the bytes an
+/// output file must contain without closing or reloading the Document, so the
+/// session's undo/redo history keeps working afterwards. Callers that write
+/// the bytes should then call [`crate::text_edit::mark_document_saved`] to move
+/// the dirty baseline without clearing that history.
+pub fn save_document_bytes(document_id: &str) -> Result<Vec<u8>, CommandError> {
+    with_open_document(document_id, |entry| {
+        entry.document.save_to_bytes().map_err(|error| {
+            CommandError::new(
+                CommandErrorCode::Internal,
+                format!("could not serialize the document: {error:?}"),
+            )
+        })
+    })
 }
 
 static WINDOW_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -635,10 +682,15 @@ fn lookup_document<'a>(
     })
 }
 
-fn load_page<'a>(
-    document: &'a PdfDocument<'static>,
+/// Loads a page with the document's own lifetime.
+///
+/// Returning `PdfPage<'static>` rather than a page tied to the borrow of
+/// `document` lets callers keep a page across other borrows, and lets the edit
+/// session store detached page-object snapshots for undo/redo.
+pub(crate) fn load_page(
+    document: &PdfDocument<'static>,
     page_index: u32,
-) -> Result<PdfPage<'a>, CommandError> {
+) -> Result<PdfPage<'static>, CommandError> {
     let pages = document.pages();
     if page_index as i32 >= pages.len() {
         return Err(CommandError::new(
@@ -792,7 +844,7 @@ pub fn extract_text_layer(
 
 /// Display-space transform for one page: the box PDFium renders and the
 /// intrinsic rotation it applies.
-struct DisplayGeometry {
+pub(crate) struct DisplayGeometry {
     left: f32,
     bottom: f32,
     width: f32,
@@ -803,7 +855,11 @@ struct DisplayGeometry {
 }
 
 impl DisplayGeometry {
-    fn new(page: &PdfPage<'_>, rotation: u16) -> Result<Self, CommandError> {
+    pub(crate) fn rotation(&self) -> u16 {
+        self.rotation
+    }
+
+    pub(crate) fn new(page: &PdfPage<'_>, rotation: u16) -> Result<Self, CommandError> {
         // FPDF_GetPageBoundingBox is the MediaBox/CropBox intersection, which
         // is exactly the region PDFium renders. A page without a CropBox
         // reports its MediaBox here. The box is in unrotated page coordinates;
@@ -839,7 +895,7 @@ impl DisplayGeometry {
 
     /// Maps a point from PDF user space to display-space points with a
     /// top-left origin. The four cases are clockwise page rotations.
-    fn point(&self, x: f32, y: f32) -> (f32, f32) {
+    pub(crate) fn point(&self, x: f32, y: f32) -> (f32, f32) {
         let u = x - self.left;
         let v = y - self.bottom;
         match self.rotation {
@@ -850,8 +906,28 @@ impl DisplayGeometry {
         }
     }
 
+    /// Maps a display-space point (top-left origin) back to PDF user space.
+    ///
+    /// Overlay tools that create content (Text Boxes, shapes) need the inverse
+    /// of [`Self::point`] to place page objects in the document's own
+    /// coordinate system, including crop offset and intrinsic rotation.
+    pub(crate) fn point_inverse(&self, x: f32, y: f32) -> (f32, f32) {
+        match self.rotation {
+            90 => (self.left + y, self.bottom + x),
+            180 => (self.left + self.width - x, self.bottom + y),
+            270 => (self.left + self.width - y, self.bottom + self.height - x),
+            _ => (self.left + x, self.bottom + self.height - y),
+        }
+    }
+
     /// Maps a PDF user-space box to a display-space box, clamped to the page.
-    fn rect(&self, left: f32, bottom: f32, right: f32, top: f32) -> (f32, f32, f32, f32) {
+    pub(crate) fn rect(
+        &self,
+        left: f32,
+        bottom: f32,
+        right: f32,
+        top: f32,
+    ) -> (f32, f32, f32, f32) {
         let (mut min_x, mut min_y) = (f32::INFINITY, f32::INFINITY);
         let (mut max_x, mut max_y) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
         for (x, y) in [(left, bottom), (left, top), (right, bottom), (right, top)] {
@@ -895,6 +971,20 @@ fn is_low_surrogate(value: u32) -> bool {
 
 /// Builds the positioned text layer for one loaded page.
 fn build_text_layer(page: &PdfPage<'_>, page_index: u32) -> Result<TextLayerView, CommandError> {
+    build_text_layer_with_raw_indices(page, page_index).map(|(view, _)| view)
+}
+
+/// Builds the text layer and, alongside it, the PDFium raw character index for
+/// each returned layer character.
+///
+/// The two index spaces differ: PDFium drops characters without a Unicode
+/// mapping and stores surrogate pairs as two code units, so callers that need
+/// to address a PDFium character (text editing does) cannot use the layer
+/// index directly.
+pub(crate) fn build_text_layer_with_raw_indices(
+    page: &PdfPage<'_>,
+    page_index: u32,
+) -> Result<(TextLayerView, Vec<usize>), CommandError> {
     let rotation = page
         .rotation()
         .map_err(|error| {
@@ -917,22 +1007,27 @@ fn build_text_layer(page: &PdfPage<'_>, page_index: u32) -> Result<TextLayerView
     // failure to page the text the same way so the UI can show the
     // "no editable text" state instead of an error.
     let Some(text_page) = page.text().ok() else {
-        return Ok(empty_text_layer(
-            page_index,
-            page_width,
-            page_height,
-            rotation,
-            crop_x,
-            crop_y,
+        return Ok((
+            empty_text_layer(
+                page_index,
+                page_width,
+                page_height,
+                rotation,
+                crop_x,
+                crop_y,
+            ),
+            Vec::new(),
         ));
     };
 
     let raw_chars = text_page.chars();
     let count = raw_chars.len();
     let mut chars = Vec::with_capacity(count);
+    let mut raw_indices = Vec::with_capacity(count);
     let mut index = 0;
 
     while index < count {
+        let raw_index = index;
         let character = raw_chars.get(index).map_err(|error| {
             CommandError::new(
                 CommandErrorCode::RenderFailed,
@@ -1031,6 +1126,7 @@ fn build_text_layer(page: &PdfPage<'_>, page_index: u32) -> Result<TextLayerView
             font_size,
             generated,
         });
+        raw_indices.push(raw_index);
     }
 
     let text: String = chars
@@ -1039,17 +1135,20 @@ fn build_text_layer(page: &PdfPage<'_>, page_index: u32) -> Result<TextLayerView
         .collect();
     let has_text = !text.trim().is_empty();
 
-    Ok(TextLayerView {
-        page_index,
-        page_width,
-        page_height,
-        rotation,
-        crop_x,
-        crop_y,
-        has_text,
-        text,
-        chars,
-    })
+    Ok((
+        TextLayerView {
+            page_index,
+            page_width,
+            page_height,
+            rotation,
+            crop_x,
+            crop_y,
+            has_text,
+            text,
+            chars,
+        },
+        raw_indices,
+    ))
 }
 
 fn empty_text_layer(
