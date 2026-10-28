@@ -3903,6 +3903,58 @@ describe("PDFX workspace", () => {
     const dialog = await screen.findByRole("dialog", { name: "保存选项" });
     expect(within(dialog).getByText("保存会使数字签名失效")).toBeInTheDocument();
   });
+
+  it("routes the save menu through the signature confirmation", async () => {
+    installDocumentBackend({
+      open_document: () => signedDocumentView,
+      edit_history: () => dirtyHistory,
+    });
+    openDialogMock.mockResolvedValueOnce("/tmp/signed.pdf");
+    saveDialogMock.mockResolvedValueOnce("/tmp/copy.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("signed.pdf");
+    await waitFor(() => expect(menuHandler).toBeDefined());
+
+    act(() => menuHandler?.({ payload: "file.save" }));
+    const dialog = await screen.findByRole("dialog", { name: "保存选项" });
+    expect(within(dialog).getByText("保存会使数字签名失效")).toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "取消" }));
+
+    expect(commandCalls("save_document")).toHaveLength(0);
+    expect(screen.getByText("未保存")).toBeInTheDocument();
+  });
+
+  it("keeps a signed document open when the close save confirmation is cancelled", async () => {
+    installDocumentBackend({
+      open_document: () => signedDocumentView,
+      edit_history: () => dirtyHistory,
+    });
+    openDialogMock.mockResolvedValueOnce("/tmp/signed.pdf");
+    saveDialogMock.mockResolvedValueOnce("/tmp/copy.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("signed.pdf");
+
+    await triggerWindowClose();
+    await user.click(
+      within(closeConfirmDialog()).getByRole("button", { name: "保存" }),
+    );
+
+    const dialog = await screen.findByRole("dialog", { name: "保存选项" });
+    expect(within(dialog).getByText("保存会使数字签名失效")).toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "取消" }));
+
+    expect(commandCalls("save_document")).toHaveLength(0);
+    expect(commandCalls("close_document")).toHaveLength(0);
+    expect(destroyWindowMock).not.toHaveBeenCalled();
+    expect(closeConfirmDialog()).toBeInTheDocument();
+    expect(screen.getByText("未保存")).toBeInTheDocument();
+  });
 });
 
 describe("page operations", () => {
