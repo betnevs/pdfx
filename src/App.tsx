@@ -1,19 +1,16 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
+import { DocumentToolbar, PageSurface, ThumbnailRail } from "./components/PageViewer";
 import {
   choosePdfFile,
   closeDocument,
-  DEFAULT_SCALE,
   getAppInfo,
   initialDocumentPath,
-  MAX_SCALE,
-  MIN_SCALE,
   onFileDrop,
   onMenuEvent,
   onWindowCloseRequested,
   openDocument,
   openDocumentInNewWindow,
-  renderPage,
   setWindowTitle,
   toCommandError,
   ZOOM_STEP,
@@ -21,8 +18,9 @@ import {
   type CommandError,
   type CommandErrorCode,
   type DocumentView,
-  type PageImageView,
 } from "./lib/backend";
+import { scaleToPercent } from "./lib/pageGeometry";
+import { useDocumentViewer } from "./lib/useDocumentViewer";
 
 type AppInfoState =
   | { status: "loading" }
@@ -32,7 +30,7 @@ type AppInfoState =
 type EditorState =
   | { status: "empty" }
   | { status: "loading" }
-  | { status: "open"; document: DocumentView; page: PageImageView; zoom: number }
+  | { status: "open"; document: DocumentView }
   | { status: "error"; error: CommandError; retryPath: string | null };
 
 const ERROR_MESSAGES: Partial<Record<CommandErrorCode, string>> = {
@@ -62,11 +60,6 @@ function statusText(state: AppInfoState): string {
   }
 }
 
-function clampScale(scale: number): number {
-  const bounded = Math.min(MAX_SCALE, Math.max(MIN_SCALE, scale));
-  return Math.round(bounded * 1000) / 1000;
-}
-
 export function App() {
   const [appInfo, setAppInfo] = useState<AppInfoState>({ status: "loading" });
   const [editor, setEditor] = useState<EditorState>({ status: "empty" });
@@ -81,6 +74,25 @@ export function App() {
   const dirtyRef = useRef(dirty);
   dirtyRef.current = dirty;
   const openingRef = useRef(false);
+
+  const handleViewerError = useCallback((error: CommandError) => {
+    const current = editorRef.current;
+    if (current.status !== "open") {
+      return;
+    }
+    void closeDocument(current.document.documentId).catch(() => {});
+    setNotice(null);
+    setEditor({
+      status: "error",
+      error,
+      retryPath: current.document.path,
+    });
+  }, []);
+
+  const openDocumentView = editor.status === "open" ? editor.document : null;
+  const viewer = useDocumentViewer(openDocumentView, handleViewerError);
+  const viewerRef = useRef(viewer);
+  viewerRef.current = viewer;
 
   useEffect(() => {
     let cancelled = false;
@@ -131,8 +143,7 @@ export function App() {
         // The title is cosmetic; a missing window capability must not fail open.
       });
 
-      const page = await renderPage(document.documentId, 0, DEFAULT_SCALE);
-      setEditor({ status: "open", document, page, zoom: DEFAULT_SCALE });
+      setEditor({ status: "open", document });
     } catch (error) {
       if (openedDocumentId) {
         await closeDocument(openedDocumentId).catch(() => {});
@@ -161,57 +172,29 @@ export function App() {
     })();
   }
 
-  async function zoomTo(requested: number) {
-    const current = editorRef.current;
-    if (current.status !== "open") {
-      return;
-    }
-
-    const scale = clampScale(requested);
-    if (scale === current.zoom) {
-      return;
-    }
-
-    try {
-      const page = await renderPage(current.document.documentId, 0, scale);
-      const latest = editorRef.current;
-      if (
-        latest.status === "open" &&
-        latest.document.documentId === current.document.documentId
-      ) {
-        setEditor({ ...latest, page, zoom: scale });
-      }
-    } catch (error) {
-      await closeDocument(current.document.documentId).catch(() => {});
-      setNotice(null);
-      setEditor({
-        status: "error",
-        error: toCommandError(error),
-        retryPath: current.document.path,
-      });
-    }
-  }
-
-  function zoomBy(factor: number) {
-    const current = editorRef.current;
-    if (current.status === "open") {
-      void zoomTo(current.zoom * factor);
-    }
-  }
-
   function handleMenu(menuId: string) {
+    const current = viewerRef.current;
     switch (menuId) {
       case "file.open":
         promptOpen();
         break;
       case "view.zoom_in":
-        zoomBy(ZOOM_STEP);
+        current.zoomBy(ZOOM_STEP);
         break;
       case "view.zoom_out":
-        zoomBy(1 / ZOOM_STEP);
+        current.zoomBy(1 / ZOOM_STEP);
         break;
       case "view.actual_size":
-        void zoomTo(DEFAULT_SCALE);
+        current.actualSize();
+        break;
+      case "view.fit_width":
+        current.fit("width");
+        break;
+      case "view.fit_page":
+        current.fit("page");
+        break;
+      case "view.fullscreen":
+        current.toggleFullscreen();
         break;
       default:
         break;
@@ -354,20 +337,46 @@ export function App() {
 
         {open && (
           <section className="document-view" aria-label="文档视图">
-            <div className="document-toolbar">
-              <button type="button" onClick={() => zoomBy(1 / ZOOM_STEP)}>
-                缩小
-              </button>
-              <span className="zoom-value">{Math.round(open.zoom * 100)}%</span>
-              <button type="button" onClick={() => zoomBy(ZOOM_STEP)}>
-                放大
-              </button>
-              <button type="button" onClick={() => void zoomTo(DEFAULT_SCALE)}>
-                实际大小
-              </button>
-            </div>
-            <div className="page-stage">
-              <PageCanvas page={open.page} />
+            <DocumentToolbar
+              pageIndex={viewer.pageIndex}
+              pageCount={open.document.pageCount}
+              scale={viewer.scale}
+              zoomMode={viewer.zoomMode}
+              fullscreen={viewer.fullscreen}
+              onSelectPage={viewer.goToPage}
+              onZoomTo={viewer.zoomTo}
+              onZoomIn={() => viewer.zoomBy(ZOOM_STEP)}
+              onZoomOut={() => viewer.zoomBy(1 / ZOOM_STEP)}
+              onFit={viewer.fit}
+              onActualSize={viewer.actualSize}
+              onToggleFullscreen={viewer.toggleFullscreen}
+            />
+            <div className="document-body">
+              <ThumbnailRail
+                documentId={open.document.documentId}
+                pageCount={open.document.pageCount}
+                currentPageIndex={viewer.pageIndex}
+                onSelectPage={viewer.goToPage}
+              />
+              <div
+                ref={viewer.viewportRef}
+                className="page-stage"
+                role="region"
+                aria-label="页面视口"
+                tabIndex={0}
+                onScroll={viewer.handleScroll}
+                onKeyDown={viewer.handleViewportKeyDown}
+              >
+                <div className="page-stage-inner">
+                  <PageSurface
+                    pageIndex={viewer.pageIndex}
+                    info={viewer.info}
+                    scale={viewer.scale}
+                    render={viewer.render}
+                    surfaceRef={viewer.surfaceRef}
+                  />
+                </div>
+              </div>
             </div>
           </section>
         )}
@@ -377,51 +386,12 @@ export function App() {
         <span role="status">{statusText(appInfo)}</span>
         {open && (
           <span className="document-status">
-            第 {open.page.pageIndex + 1} / {open.document.pageCount} 页 ·{" "}
-            {Math.round(open.zoom * 100)}%
+            第 {viewer.pageIndex + 1} / {open.document.pageCount} 页 ·{" "}
+            {scaleToPercent(viewer.scale)}%
           </span>
         )}
         <span>离线 · 无遥测</span>
       </footer>
     </div>
-  );
-}
-
-function PageCanvas({ page }: { page: PageImageView }) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) {
-      return;
-    }
-
-    const image = new Image();
-    image.onload = () => {
-      const context = canvas.getContext("2d");
-      if (!context) {
-        return;
-      }
-      canvas.width = page.width;
-      canvas.height = page.height;
-      context.clearRect(0, 0, page.width, page.height);
-      context.drawImage(image, 0, 0, page.width, page.height);
-    };
-    image.src = `data:image/png;base64,${page.pngBase64}`;
-
-    return () => {
-      image.onload = null;
-    };
-  }, [page]);
-
-  return (
-    <canvas
-      ref={canvasRef}
-      className="page-canvas"
-      role="img"
-      aria-label={`第 ${page.pageIndex + 1} 页`}
-      width={page.width}
-      height={page.height}
-    />
   );
 }
