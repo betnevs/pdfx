@@ -143,6 +143,22 @@ describe("PageTextLayer", () => {
     expect(screen.queryByRole("region", { name: "文本层" })).not.toBeInTheDocument();
   });
 
+  it("positions highlights relative to the page box so zoom keeps alignment", async () => {
+    invokeMock.mockResolvedValue(textLayer);
+
+    render(<PageTextLayer documentId="doc-1" pageIndex={2} />);
+    const region = await screen.findByRole("region", { name: "文本层" });
+
+    fireEvent.pointerDown(region, { clientX: 102, clientY: 105, button: 0, pointerId: 1 });
+    fireEvent.pointerUp(region, { clientX: 102, clientY: 105, pointerId: 1 });
+
+    const highlight = screen.getByTestId("text-highlight");
+    expect(parseFloat(highlight.style.left)).toBeCloseTo((100 / 612) * 100, 5);
+    expect(parseFloat(highlight.style.top)).toBeCloseTo((100 / 792) * 100, 5);
+    expect(parseFloat(highlight.style.width)).toBeCloseTo((12 / 612) * 100, 5);
+    expect(parseFloat(highlight.style.height)).toBeCloseTo((20 / 792) * 100, 5);
+  });
+
   it("selects characters by dragging and copies the selection", async () => {
     invokeMock.mockResolvedValue(textLayer);
 
