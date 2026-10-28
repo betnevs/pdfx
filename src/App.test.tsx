@@ -17,7 +17,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
 vi.mock("@tauri-apps/api/webview", () => ({ getCurrentWebview: vi.fn() }));
 vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: vi.fn() }));
-vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
+vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn(), save: vi.fn() }));
 
 const invokeMock = vi.mocked(invoke);
 const openDialogMock = vi.mocked(openDialog);
@@ -105,6 +105,14 @@ function installBackend(overrides: Record<string, CommandHandler> = {}) {
   invokeMock.mockImplementation(async (command: string, args?: unknown) => {
     if (command === "app_info") {
       return { name: "PDFX", version: "0.1.0" };
+    }
+    if (command === "get_settings") {
+      return {
+        language: "zh-CN",
+        theme: "system",
+        annotationAuthor: "PDFX 用户",
+        fileAssociationEnabled: false,
+      };
     }
     const handler = overrides[command];
     if (handler) {
@@ -1153,5 +1161,21 @@ describe("PDFX workspace", () => {
     expect(commandCalls("close_document")).toEqual([
       ["close_document", { documentId: "doc-1" }],
     ]);
+  });
+
+  it("opens settings from the header button and the app menu", async () => {
+    installBackend();
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "设置" }));
+    expect(await screen.findByRole("dialog", { name: "设置" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "关闭设置" }));
+    expect(screen.queryByRole("dialog", { name: "设置" })).not.toBeInTheDocument();
+
+    await waitFor(() => expect(menuHandler).toBeDefined());
+    act(() => menuHandler?.({ payload: "app.settings" }));
+    expect(await screen.findByRole("dialog", { name: "设置" })).toBeInTheDocument();
   });
 });

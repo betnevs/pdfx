@@ -1,7 +1,10 @@
 pub mod commands;
 pub mod engine;
+pub mod file_association;
+pub mod logging;
 mod menu;
 pub mod pdfium_adapter;
+pub mod settings;
 pub mod text_edit;
 
 use tauri::{Emitter, Manager};
@@ -55,12 +58,33 @@ pub fn run() {
             text_edit::undo_text_edit,
             text_edit::redo_text_edit,
             text_edit::mark_document_saved,
+            commands::get_settings,
+            commands::update_settings,
+            commands::export_diagnostics,
         ])
         .setup(|app| {
+            // Logging is local-only and must never prevent the shell from
+            // starting; a failure falls back to stderr.
+            match app.path().app_log_dir() {
+                Ok(directory) => {
+                    if let Err(error) = logging::initialize(directory) {
+                        eprintln!("[pdfx] could not initialize local logging: {error}");
+                    }
+                }
+                Err(error) => {
+                    eprintln!("[pdfx] could not resolve the log directory: {error}");
+                }
+            }
+            logging::event(
+                "app.start",
+                &format!("version={}", env!("CARGO_PKG_VERSION")),
+            );
+
             // A missing library must not stop the shell from starting; opening a
             // document reports the setup instructions through the command error.
             if let Err(error) = engine::Engine::initialize(Some(app.handle())) {
                 eprintln!("[pdfx] PDF engine unavailable: {error}");
+                logging::error("engine.unavailable", &error);
             }
             eprintln!("[pdfx] workspace ready");
             Ok(())

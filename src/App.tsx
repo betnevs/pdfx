@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { DocumentAccess } from "./components/DocumentAccess";
 import { DocumentToolbar, PageSurface, ThumbnailRail } from "./components/PageViewer";
+import { SettingsPanel } from "./components/SettingsPanel";
 import { PasswordPrompt } from "./components/PasswordPrompt";
 import {
   choosePdfFile,
@@ -23,6 +24,7 @@ import {
 } from "./lib/backend";
 import { scaleToPercent } from "./lib/pageGeometry";
 import { useDocumentViewer } from "./lib/useDocumentViewer";
+import { useSettings } from "./lib/useSettings";
 
 type AppInfoState =
   | { status: "loading" }
@@ -81,6 +83,8 @@ export function App() {
   const [appInfo, setAppInfo] = useState<AppInfoState>({ status: "loading" });
   const [editor, setEditor] = useState<EditorState>({ status: "empty" });
   const [notice, setNotice] = useState<CommandError | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const settings = useSettings();
   const [passwordPrompt, setPasswordPrompt] = useState<PasswordPromptState | null>(null);
 
   // Editing arrives in a later ticket; the scaffold tracks dirty state and the
@@ -251,6 +255,9 @@ export function App() {
       case "view.fullscreen":
         current.toggleFullscreen();
         break;
+      case "app.settings":
+        setSettingsOpen(true);
+        break;
       default:
         break;
     }
@@ -338,6 +345,13 @@ export function App() {
             </span>
           )}
           <span className="app-mode">本地 PDF 编辑器</span>
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={() => setSettingsOpen(true)}
+          >
+            设置
+          </button>
           <button type="button" className="open-button" onClick={promptOpen}>
             打开 PDF…
           </button>
@@ -460,6 +474,13 @@ export function App() {
         )}
         <span>离线 · 无遥测</span>
       </footer>
+
+      <SettingsPanel
+        open={settingsOpen}
+        settings={settings.settings}
+        onClose={() => setSettingsOpen(false)}
+        onSave={settings.update}
+      />
     </div>
   );
 }
