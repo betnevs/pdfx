@@ -274,7 +274,7 @@ pub fn delete_page(
         let before = entry.pages.clone();
         before.physical(page_index)?;
         if before.order.len() <= 1 {
-            return Err(invalid_argument("a document must keep at least one page"));
+            return Err(invalid_argument("文档至少需要保留一页，不能删除最后一页。"));
         }
         let mut after = before.clone();
         after.order.remove(page_index as usize);

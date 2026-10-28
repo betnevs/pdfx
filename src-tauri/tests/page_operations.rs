@@ -11,8 +11,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use pdfx_lib::annotations::{
-    create_shape_with_author, list_annotations, AnnotationKind, CreateShapeRequest, ShapeGeometry,
-    ShapeKind, ShapeStyle,
+    create_free_text_with_author, create_shape_with_author, list_annotations, AnnotationKind,
+    CreateFreeTextRequest, CreateShapeRequest, FreeTextAlign, FreeTextKind, ShapeGeometry,
+    ShapeKind, ShapeStyle, TextMarkupRect,
 };
 use pdfx_lib::commands::{
     close_document, extract_text_layer, open_document, page_info, CommandErrorCode, DocumentView,
@@ -906,6 +907,137 @@ fn delete_page_hides_and_undo_restores_its_form_field() {
 }
 
 #[test]
+fn free_text_and_created_form_field_share_one_save_revision() {
+    let pdf = synthetic::page_operations_pdf();
+    let document = open(Path::new(&pdf.path_string()));
+    let document_id = document.document_id.clone();
+
+    // Both lopdf passes touch the same page's `/Annots`: free text needs its
+    // `/Q`/`/IT` dictionary entries rewritten, while a created form widget is
+    // appended to the same array. One must not overwrite the other.
+    create_free_text_with_author(
+        document_id.clone(),
+        "PDFX QA".to_owned(),
+        CreateFreeTextRequest {
+            page_index: 0,
+            kind: FreeTextKind::FreeText,
+            rect: TextMarkupRect {
+                x: 60.0,
+                y: 80.0,
+                width: 220.0,
+                height: 70.0,
+            },
+            color: "#2e7d32".to_owned(),
+            opacity: 100,
+            text: "Free text beside a field".to_owned(),
+            font_size: 12.0,
+            align: FreeTextAlign::Left,
+        },
+    )
+    .expect("create free text");
+    create_form_field(
+        document_id.clone(),
+        0,
+        CreateFormFieldRequest::Text {
+            rect: FormFieldRect {
+                x: 72.0,
+                y: 200.0,
+                width: 180.0,
+                height: 24.0,
+            },
+            name: Some("same_page_field".to_owned()),
+            tooltip: None,
+            required: false,
+            multiline: false,
+            font_size: None,
+        },
+    )
+    .expect("create form field");
+
+    let dir = TempDir::new("freetext-form");
+    let output = dir.path().join("shared-annots.pdf");
+    save(&document_id, &output);
+
+    // Independent parse: the page keeps both annotations, and the free text
+    // still carries the translated standard entries.
+    let parsed = lopdf::Document::load(&output).expect("parse output");
+    let page = page_dict(&parsed, 1);
+    let annots = page
+        .get(b"Annots")
+        .expect("/Annots")
+        .as_array()
+        .expect("/Annots array");
+    let mut widget_names = Vec::new();
+    let mut free_text = None;
+    for object in annots {
+        let dictionary = dict_of(&parsed, object);
+        let subtype = dictionary
+            .get(b"Subtype")
+            .and_then(lopdf::Object::as_name)
+            .unwrap_or_default();
+        if subtype == b"Widget" {
+            if let Ok(title) = dictionary.get(b"T").and_then(lopdf::Object::as_str) {
+                widget_names.push(String::from_utf8_lossy(title).into_owned());
+            }
+        } else if subtype == b"FreeText" {
+            free_text = Some(dictionary);
+        }
+    }
+    assert_eq!(widget_names, vec!["same_page_field".to_owned()]);
+    let free_text = free_text.expect("free text annotation survives the save");
+    assert_eq!(
+        free_text.get(b"Q").and_then(lopdf::Object::as_i64).ok(),
+        Some(0),
+        "left-aligned free text writes /Q"
+    );
+    assert_eq!(
+        free_text.get(b"IT").and_then(lopdf::Object::as_name).ok(),
+        Some(b"FreeText".as_slice())
+    );
+
+    // A fresh PDFium open sees the field attached to its page and the free
+    // text listed, so nothing was detached by the other pass.
+    let reopened = open(&output);
+    let fields = form_fields(reopened.document_id.clone()).unwrap();
+    assert!(
+        fields.iter().any(|field| field.name == "same_page_field"),
+        "widget must stay attached to its page: {fields:?}"
+    );
+    let annotations = list_annotations(reopened.document_id.clone()).unwrap();
+    assert!(
+        annotations
+            .iter()
+            .any(|annotation| annotation.kind == AnnotationKind::FreeText),
+        "free text must still be listed: {annotations:?}"
+    );
+    close_document(reopened.document_id).expect("close reopened");
+    close_document(document_id).expect("close document");
+}
+
+#[test]
+fn deleting_the_last_page_is_refused_in_chinese_without_history_change() {
+    let pdf = synthetic::page_operations_pdf();
+    let document = open(Path::new(&pdf.path_string()));
+    let document_id = document.document_id.clone();
+
+    pdfx_lib::page_ops::delete_page(document_id.clone(), 0).expect("delete first page");
+    pdfx_lib::page_ops::delete_page(document_id.clone(), 0).expect("delete second page");
+    let before = edit_history(document_id.clone()).unwrap();
+
+    let error = pdfx_lib::page_ops::delete_page(document_id.clone(), 0).unwrap_err();
+    assert_eq!(error.code, CommandErrorCode::InvalidArgument);
+    assert!(
+        error.message.contains("至少需要保留一页"),
+        "error should be Chinese: {}",
+        error.message
+    );
+    assert_eq!(edit_history(document_id.clone()).unwrap(), before);
+    assert_eq!(page_info(document_id.clone(), 0).unwrap().rotation, 0);
+
+    close_document(document_id).expect("close document");
+}
+
+#[test]
 fn restricted_documents_refuse_page_operations_without_touching_history() {
     let dir = TempDir::new("page-permissions");
     let source = fixture_copy("encrypted-owner-restrictions", &dir, "restricted.pdf");
@@ -940,6 +1072,124 @@ fn restricted_documents_refuse_page_operations_without_touching_history() {
     assert!(!after.dirty);
     assert_eq!(page_info(document_id.clone(), 0).unwrap().rotation, 0);
     assert_eq!(fs::read(&source).expect("reread source"), source_bytes);
+
+    close_document(document_id).expect("close document");
+}
+
+#[test]
+fn deleting_the_page_of_an_existing_form_field_does_not_leak_it() {
+    let manifest = support::fixtures::load_manifest();
+    let fixture = support::fixtures::fixture(&manifest, "form").expect("form fixture");
+    let source = support::fixtures::fixture_path(fixture);
+    let document = open(&source);
+    let document_id = document.document_id.clone();
+    assert_eq!(document.page_count, 2);
+    let before = form_fields(document_id.clone()).expect("list fields");
+    assert!(before
+        .iter()
+        .any(|field| field.name == "notes" && field.page_index == 1));
+    assert!(before
+        .iter()
+        .any(|field| field.name == "full_name" && field.page_index == 0));
+
+    pdfx_lib::page_ops::delete_page(document_id.clone(), 1).expect("delete page 2");
+    let after = form_fields(document_id.clone()).expect("list fields after delete");
+    assert!(
+        after.iter().all(|field| field.name != "notes"),
+        "deleted page field must be hidden: {after:?}"
+    );
+    assert!(
+        after.iter().any(|field| field.name == "full_name"),
+        "a field on a kept page must stay listed: {after:?}"
+    );
+
+    let dir = TempDir::new("delete-existing-form");
+    let output = dir.path().join("deleted.pdf");
+    save(&document_id, &output);
+
+    let parsed = lopdf::Document::load(&output).expect("parse output");
+    assert_eq!(page_ids(&parsed).len(), 1);
+    let saved_fields = form_field_names(&parsed);
+    for removed in ["notes", "agree", "js_guard", "readonly_note"] {
+        assert!(
+            !saved_fields.contains(&removed.to_owned()),
+            "a field whose page was deleted must not stay in /Fields: {saved_fields:?}"
+        );
+    }
+    for kept in [
+        "full_name",
+        "email",
+        "subscribe",
+        "gender",
+        "country",
+        "department",
+    ] {
+        assert!(
+            saved_fields.contains(&kept.to_owned()),
+            "a field on a kept page must be preserved: {saved_fields:?}"
+        );
+    }
+
+    let reopened = open(&output);
+    let fields = form_fields(reopened.document_id.clone()).expect("list reopened fields");
+    assert!(!fields.is_empty(), "kept fields must remain fillable");
+    assert!(
+        fields
+            .iter()
+            .all(|field| field.page_index == 0 && field.name != "notes"),
+        "reopened fields must all belong to the kept page: {fields:?}"
+    );
+    close_document(reopened.document_id).expect("close reopened");
+
+    // A field created on a kept page is appended to the pruned `/Fields`
+    // array, and the deleted page's field still stays out of the output.
+    let created = create_form_field(
+        document_id.clone(),
+        0,
+        CreateFormFieldRequest::Text {
+            rect: FormFieldRect {
+                x: 72.0,
+                y: 200.0,
+                width: 180.0,
+                height: 24.0,
+            },
+            name: Some("kept_page_field".to_owned()),
+            tooltip: None,
+            required: false,
+            multiline: false,
+            font_size: None,
+        },
+    )
+    .expect("create a field on the kept page");
+    assert!(created
+        .fields
+        .iter()
+        .any(|field| field.name == "kept_page_field"));
+    save_changes(&document_id);
+    let parsed = lopdf::Document::load(&output).expect("parse output with a created field");
+    let saved_fields = form_field_names(&parsed);
+    assert!(
+        saved_fields.contains(&"kept_page_field".to_owned()),
+        "a created field must be appended to the pruned array: {saved_fields:?}"
+    );
+    assert!(
+        !saved_fields.contains(&"notes".to_owned()),
+        "the pruned field must stay out: {saved_fields:?}"
+    );
+    assert!(saved_fields.contains(&"full_name".to_owned()));
+
+    // Undo the created field and then the deletion: the next save writes the
+    // deleted page's fields again.
+    undo_text_edit(document_id.clone()).expect("undo created field");
+    undo_text_edit(document_id.clone()).expect("undo delete");
+    save_changes(&document_id);
+    let parsed = lopdf::Document::load(&output).expect("parse restored output");
+    let saved_fields = form_field_names(&parsed);
+    assert!(
+        saved_fields.contains(&"notes".to_owned()),
+        "undo must restore the deleted page's field: {saved_fields:?}"
+    );
+    assert_eq!(parsed.get_pages().len(), 2);
 
     close_document(document_id).expect("close document");
 }

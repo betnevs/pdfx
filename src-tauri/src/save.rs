@@ -348,18 +348,21 @@ fn finalize_lopdf_revision(
     })?;
     let (page_edits, referenced_edits) = free_text_dictionary_edits(&previous);
     let page_tree = page_tree_edit(&previous, pages)?;
+    let form_fields_prune = form_fields_prune(&previous, pages)?;
     if edits.is_empty()
         && page_edits.is_empty()
         && referenced_edits.is_empty()
         && page_tree.is_none()
+        && form_fields_prune.is_none()
     {
         return Ok(base);
     }
 
     let mut incremental = lopdf::IncrementalDocument::create_from(base, previous);
-    for edit in edits {
-        apply_object_edit(&mut incremental, edit)?;
-    }
+    // Annotation dictionaries are rewritten first: the array comes from the
+    // PDFium revision, so created form widgets appended by the object edits
+    // below must come after it or they would be overwritten on pages that
+    // also carry a PDFX free text annotation.
     for edit in &page_edits {
         incremental
             .opt_clone_object_to_new_document(edit.page_id)
@@ -385,6 +388,15 @@ fn finalize_lopdf_revision(
             dictionary.set(b"Q".to_vec(), lopdf::Object::Integer(q));
         }
         dictionary.set(b"IT".to_vec(), lopdf::Object::Name(edit.edit.it.clone()));
+    }
+    // Pruning comes before the object edits: created fields are appended to
+    // this `/Fields` array by `CreateFormFields`, so an earlier prune is not
+    // overwritten, and fields on deleted pages never reach the output.
+    if let Some(prune) = &form_fields_prune {
+        apply_form_fields_prune(&mut incremental, prune)?;
+    }
+    for edit in edits {
+        apply_object_edit(&mut incremental, edit)?;
     }
     if let Some(page_tree) = &page_tree {
         apply_page_tree_edit(&mut incremental, page_tree)?;
@@ -467,6 +479,156 @@ fn page_tree_edit(
         kids,
         blanks,
     }))
+}
+
+/// A `/AcroForm /Fields` rewrite that leaves out fields whose widgets only
+/// lived on pages the saved arrangement removes. The AcroForm may sit inline
+/// in the catalog or behind a reference; both forms are carried here.
+struct FormFieldsPrune {
+    catalog: lopdf::ObjectId,
+    acro_form: Option<lopdf::ObjectId>,
+    dictionary: lopdf::Dictionary,
+}
+
+/// Plans dropping root form fields that no longer have a widget on a kept
+/// page. Without this, deleting a page would leave its field in the saved
+/// AcroForm and readers would still list it even though its page is gone.
+/// Fields carrying no `/P` are kept: without a page reference there is no
+/// evidence they belong to a removed page.
+fn form_fields_prune(
+    document: &lopdf::Document,
+    model: &crate::page_ops::PageModel,
+) -> Result<Option<FormFieldsPrune>, CommandError> {
+    let physical: Vec<lopdf::ObjectId> = document.get_pages().values().copied().collect();
+    if model.order.len() == physical.len() {
+        // No page was removed, so no field can have lost its only widget.
+        return Ok(None);
+    }
+    let included: std::collections::HashSet<lopdf::ObjectId> = model
+        .order
+        .iter()
+        .filter_map(|index| physical.get(*index as usize).copied())
+        .collect();
+    let catalog = document.catalog().map_err(|error| {
+        lopdf_error(
+            "could not read the document catalog to prune form fields",
+            error,
+        )
+    })?;
+    let catalog_id = document
+        .trailer
+        .get(b"Root")
+        .and_then(lopdf::Object::as_reference)
+        .map_err(|error| lopdf_error("the saved document has no /Root reference", error))?;
+    let (acro_form_id, acro_form) = match catalog.get(b"AcroForm").ok() {
+        Some(lopdf::Object::Reference(id)) => match document.get_dictionary(*id) {
+            Ok(dictionary) => (Some(*id), dictionary.clone()),
+            Err(_) => return Ok(None),
+        },
+        Some(lopdf::Object::Dictionary(dictionary)) => (None, dictionary.clone()),
+        // No AcroForm: nothing to prune.
+        _ => return Ok(None),
+    };
+    let Ok(fields_object) = acro_form.get_deref(b"Fields", document) else {
+        return Ok(None);
+    };
+    let Ok(fields) = fields_object.as_array() else {
+        return Ok(None);
+    };
+    let kept: Vec<lopdf::Object> = fields
+        .iter()
+        .filter(|field| field_uses_kept_page(document, field, &included, 0))
+        .cloned()
+        .collect();
+    if kept.len() == fields.len() {
+        return Ok(None);
+    }
+    let mut dictionary = acro_form;
+    dictionary.set(b"Fields".to_vec(), lopdf::Object::Array(kept));
+    Ok(Some(FormFieldsPrune {
+        catalog: catalog_id,
+        acro_form: acro_form_id,
+        dictionary,
+    }))
+}
+
+/// Whether a field or any of its `/Kids` has a widget on a kept page. A
+/// radio group keeps one widget per option, so a group survives while at
+/// least one option's page remains.
+fn field_uses_kept_page(
+    document: &lopdf::Document,
+    object: &lopdf::Object,
+    included: &std::collections::HashSet<lopdf::ObjectId>,
+    depth: usize,
+) -> bool {
+    if depth > 32 {
+        // Malformed nesting: keep the field rather than risk dropping data.
+        return true;
+    }
+    let dictionary = match object {
+        lopdf::Object::Reference(id) => match document.get_dictionary(*id) {
+            Ok(dictionary) => dictionary,
+            Err(_) => return true,
+        },
+        lopdf::Object::Dictionary(dictionary) => dictionary,
+        _ => return true,
+    };
+    if let Ok(kids) = dictionary.get_deref(b"Kids", document) {
+        if let Ok(kids) = kids.as_array() {
+            if !kids.is_empty() {
+                return kids
+                    .iter()
+                    .any(|kid| field_uses_kept_page(document, kid, included, depth + 1));
+            }
+        }
+    }
+    match dictionary
+        .get(b"P")
+        .ok()
+        .and_then(|page| page.as_reference().ok())
+    {
+        Some(page) => included.contains(&page),
+        None => true,
+    }
+}
+
+fn apply_form_fields_prune(
+    incremental: &mut lopdf::IncrementalDocument,
+    edit: &FormFieldsPrune,
+) -> Result<(), CommandError> {
+    match edit.acro_form {
+        Some(acro_form) => {
+            incremental
+                .opt_clone_object_to_new_document(acro_form)
+                .map_err(|error| {
+                    lopdf_error("could not clone the AcroForm for field pruning", error)
+                })?;
+            *incremental
+                .new_document
+                .get_dictionary_mut(acro_form)
+                .map_err(|error| {
+                    lopdf_error("could not edit the AcroForm for field pruning", error)
+                })? = edit.dictionary.clone();
+        }
+        None => {
+            incremental
+                .opt_clone_object_to_new_document(edit.catalog)
+                .map_err(|error| {
+                    lopdf_error("could not clone the catalog for field pruning", error)
+                })?;
+            let catalog = incremental
+                .new_document
+                .get_dictionary_mut(edit.catalog)
+                .map_err(|error| {
+                    lopdf_error("could not edit the catalog for field pruning", error)
+                })?;
+            catalog.set(
+                b"AcroForm".to_vec(),
+                lopdf::Object::Dictionary(edit.dictionary.clone()),
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Resolves a page attribute through the `/Parent` chain, matching the PDF
