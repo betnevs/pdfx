@@ -24,6 +24,7 @@ import {
 } from "../lib/pageGeometry";
 import type { PageRender, ZoomMode } from "../lib/useDocumentViewer";
 import { FormLayer } from "./FormLayer";
+import { LineLayer } from "./LineLayer";
 import { PageImageLayer } from "./PageImageLayer";
 import { PageTextLayer } from "./PageTextLayer";
 import { ShapeLayer } from "./ShapeLayer";
@@ -392,6 +393,7 @@ export function PageSurface({
   render,
   readOnly,
   canAnnotate,
+  canModifyContent = false,
   annotations,
   selectedAnnotation,
   onSelectAnnotation,
@@ -409,6 +411,8 @@ export function PageSurface({
   render: PageRender;
   readOnly: boolean;
   canAnnotate: boolean;
+  /** Permission Restrictions allow changing page content (lines, images…). */
+  canModifyContent?: boolean;
   annotations: AnnotationView[];
   selectedAnnotation: AnnotationView | null;
   onSelectAnnotation: (annotation: AnnotationView | null) => void;
@@ -518,6 +522,18 @@ export function PageSurface({
           annotations={annotations}
           selectedAnnotation={selectedAnnotation}
           onSelectAnnotation={onSelectAnnotation}
+        />
+      )}
+      {info && (
+        <LineLayer
+          key={`${documentId}:${pageIndex}:lines`}
+          documentId={documentId}
+          pageIndex={pageIndex}
+          pageWidth={info.width}
+          pageHeight={info.height}
+          scale={scale}
+          readOnly={readOnly}
+          canModifyContent={canModifyContent}
         />
       )}
     </div>

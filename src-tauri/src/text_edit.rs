@@ -562,9 +562,29 @@ pub(crate) struct ImageEditAction {
     pub(crate) after_objects: Option<Vec<PdfPageObject<'static>>>,
 }
 
+/// One committed line or arrow change (creation, transform, restyle or
+/// deletion).
+///
+/// Lines are page content objects, so they use the same detached page-object
+/// snapshot model as [`ImageEditAction`]: the snapshots hold the path objects
+/// that were on the page before and after the change, which is what lets undo
+/// restore the exact stroke without re-deriving it.
+pub(crate) struct LineEditAction {
+    pub(crate) page_index: u32,
+    pub(crate) line_id: u64,
+    pub(crate) start: usize,
+    pub(crate) before_state: u64,
+    pub(crate) after_state: u64,
+    pub(crate) before_record: Option<crate::line_edit::LineSnapshot>,
+    pub(crate) before_objects: Option<Vec<PdfPageObject<'static>>>,
+    pub(crate) after_record: Option<crate::line_edit::LineSnapshot>,
+    pub(crate) after_objects: Option<Vec<PdfPageObject<'static>>>,
+}
+
 pub(crate) enum EditAction {
     Box(BoxEditAction),
     Image(ImageEditAction),
+    Line(LineEditAction),
     Field(FieldEditAction),
     Annotation(AnnotationEditAction),
 }
@@ -700,6 +720,11 @@ pub struct EditSession {
     /// Images inserted by this session, per page.
     pub(crate) images: HashMap<u32, Vec<crate::image_edit::ImageRecord>>,
     pub(crate) next_image_id: u64,
+    /// Lines and arrows drawn by this session, per page. They are page
+    /// content objects, not annotations, so they live beside images and Text
+    /// Boxes rather than in the annotation dictionary.
+    pub(crate) lines: HashMap<u32, Vec<crate::line_edit::LineRecord>>,
+    pub(crate) next_line_id: u64,
     pub(crate) undo_stack: Vec<EditAction>,
     pub(crate) redo_stack: Vec<EditAction>,
     /// Id of the document state currently on the page.
@@ -1864,11 +1889,12 @@ fn find_record(session: &EditSession, page_index: u32, box_id: u64) -> Result<us
 pub(crate) enum ObjectRef {
     TextBox(u64),
     Image(u64),
+    Line(u64),
 }
 
 /// Updates every tracked page-object range after objects at `start` changed
-/// count. Text Boxes and images share one page-object list, so a change in
-/// either must keep the other's indices correct.
+/// count. Text Boxes, images and lines share one page-object list, so a change
+/// in any of them must keep the others' indices correct.
 ///
 /// When objects are inserted (`delta > 0`), a later record may already sit at
 /// exactly `start` (this happens when undoing a deletion, where the deleted
@@ -1908,6 +1934,16 @@ pub(crate) fn shift_object_indexes(
             }
             if moves(image.start) {
                 image.start = (image.start as isize + delta).max(0) as usize;
+            }
+        }
+    }
+    if let Some(lines) = session.lines.get_mut(&page_index) {
+        for line in lines.iter_mut() {
+            if matches!(keep, ObjectRef::Line(id) if line.line_id == id) {
+                continue;
+            }
+            if moves(line.start) {
+                line.start = (line.start as isize + delta).max(0) as usize;
             }
         }
     }
@@ -2078,7 +2114,7 @@ fn undo_for(entry: &mut OpenDocument) -> Result<EditStepView, CommandError> {
     // action needs form-filling permission, an annotation action needs
     // annotation permission.
     match entry.edit.undo_stack.last() {
-        Some(EditAction::Box(_)) | Some(EditAction::Image(_)) => {
+        Some(EditAction::Box(_)) | Some(EditAction::Image(_)) | Some(EditAction::Line(_)) => {
             ensure_content_editable(&entry.document)?
         }
         Some(EditAction::Field(_)) => crate::form::ensure_forms_editable(&entry.document)?,
@@ -2096,6 +2132,7 @@ fn undo_for(entry: &mut OpenDocument) -> Result<EditStepView, CommandError> {
     match action {
         EditAction::Box(action) => undo_box(entry, action),
         EditAction::Image(action) => crate::image_edit::undo_image(entry, action),
+        EditAction::Line(action) => crate::line_edit::undo_line(entry, action),
         EditAction::Field(action) => undo_field(entry, action),
         EditAction::Annotation(action) => undo_annotation(entry, action),
     }
@@ -2182,7 +2219,7 @@ fn redo_for(entry: &mut OpenDocument) -> Result<EditStepView, CommandError> {
     // action needs form-filling permission, an annotation action needs
     // annotation permission.
     match entry.edit.redo_stack.last() {
-        Some(EditAction::Box(_)) | Some(EditAction::Image(_)) => {
+        Some(EditAction::Box(_)) | Some(EditAction::Image(_)) | Some(EditAction::Line(_)) => {
             ensure_content_editable(&entry.document)?
         }
         Some(EditAction::Field(_)) => crate::form::ensure_forms_editable(&entry.document)?,
@@ -2200,6 +2237,7 @@ fn redo_for(entry: &mut OpenDocument) -> Result<EditStepView, CommandError> {
     match action {
         EditAction::Box(action) => redo_box(entry, action),
         EditAction::Image(action) => crate::image_edit::redo_image(entry, action),
+        EditAction::Line(action) => crate::line_edit::redo_line(entry, action),
         EditAction::Field(action) => redo_field(entry, action),
         EditAction::Annotation(action) => redo_annotation(entry, action),
     }

@@ -5,6 +5,7 @@ pub mod file_association;
 mod fonts;
 pub mod form;
 pub mod image_edit;
+pub mod line_edit;
 pub mod logging;
 mod menu;
 pub mod pdfium_adapter;
@@ -72,6 +73,11 @@ pub fn run() {
             image_edit::page_images,
             image_edit::transform_image,
             image_edit::delete_image,
+            line_edit::create_line_object,
+            line_edit::page_line_objects,
+            line_edit::transform_line_object,
+            line_edit::update_line_style,
+            line_edit::delete_line_object,
             annotations::create_text_markup_annotation,
             annotations::create_shape_annotation,
             annotations::update_shape_geometry,

@@ -574,6 +574,7 @@ export function App() {
                     render={viewer.render}
                     readOnly={open.document.readOnly}
                     canAnnotate={open.document.permissions.canAnnotate}
+                    canModifyContent={open.document.permissions.canModifyContent}
                     annotations={annotations.annotations}
                     selectedAnnotation={selectedAnnotation}
                     onSelectAnnotation={selectAnnotation}

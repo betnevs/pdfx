@@ -1157,6 +1157,181 @@ button {
   border-color: var(--pdfx-blue);
 }
 
+/* Straight line and arrow overlay. Lines are page content objects, so the
+   overlay uses the same page-relative coordinate system as the other tools but
+   keeps its own stroke-only property panel. */
+.line-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  pointer-events: none;
+}
+
+.line-layer-svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.line-hit {
+  pointer-events: stroke;
+  cursor: move;
+}
+
+.line-layer--drawing .line-hit {
+  cursor: crosshair;
+}
+
+.line-draw-surface {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  cursor: crosshair;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.line-selection-outline,
+.line-create-preview {
+  pointer-events: none;
+}
+
+.line-controls {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  z-index: 8;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  max-width: calc(100% - 16px);
+  pointer-events: none;
+}
+
+.line-toolbar,
+.line-properties {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--pdfx-pill-bg);
+  color: var(--pdfx-pill-text);
+  font-size: 12px;
+  line-height: 1.4;
+  user-select: none;
+  pointer-events: auto;
+}
+
+.line-properties {
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.line-toolbar-title {
+  font-weight: 600;
+}
+
+.line-toolbar button,
+.line-actions button {
+  padding: 2px 8px;
+  border: 1px solid var(--pdfx-pill-border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--pdfx-pill-text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.line-toolbar button:hover:enabled,
+.line-actions button:hover:enabled {
+  background: var(--pdfx-pill-hover);
+}
+
+.line-toolbar button[aria-pressed="true"] {
+  background: var(--pdfx-pill-active);
+}
+
+.line-toolbar button:disabled,
+.line-actions button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.line-toolbar-control {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.line-toolbar-control input[type="color"] {
+  width: 24px;
+  height: 18px;
+  padding: 1px;
+}
+
+.line-toolbar-control input[type="number"] {
+  width: 48px;
+}
+
+.line-toolbar-control input[type="range"] {
+  width: 72px;
+}
+
+.line-meta,
+.line-note {
+  margin: 0;
+}
+
+.line-note {
+  opacity: 0.75;
+}
+
+.line-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.line-delete {
+  color: var(--pdfx-status-danger);
+}
+
+.line-notice--info {
+  color: var(--pdfx-status-success);
+}
+
+.line-notice--error {
+  color: var(--pdfx-status-danger);
+}
+
+.line-handle {
+  position: absolute;
+  z-index: 7;
+  box-sizing: border-box;
+  width: 10px;
+  height: 10px;
+  padding: 0;
+  border: 1px solid var(--pdfx-page);
+  border-radius: 50%;
+  background: var(--pdfx-blue);
+  box-shadow: 0 0 0 1px var(--pdfx-blue);
+  transform: translate(-50%, -50%);
+  cursor: crosshair;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.line-handle--rotate {
+  cursor: grab;
+  background: var(--pdfx-page);
+  border-color: var(--pdfx-blue);
+}
+
 .image-edit-reason {
   color: var(--pdfx-status-warning);
 }
