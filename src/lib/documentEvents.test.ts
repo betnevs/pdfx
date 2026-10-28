@@ -57,6 +57,36 @@ describe("document change events", () => {
     unsubscribe();
   });
 
+  it("passes page-structure changes through so caches can be cleared", () => {
+    const handler = vi.fn();
+    const unsubscribe = onDocumentChanged(handler);
+
+    notifyDocumentChanged({
+      documentId: "doc-1",
+      pageIndex: 1,
+      pageCount: 4,
+      pageStructureChanged: true,
+    });
+    window.dispatchEvent(
+      new CustomEvent(DOCUMENT_CHANGED_EVENT, {
+        detail: { documentId: "doc-1", pageIndex: 2, pageStructureChanged: false },
+      }),
+    );
+
+    expect(handler).toHaveBeenNthCalledWith(1, {
+      documentId: "doc-1",
+      pageIndex: 1,
+      pageCount: 4,
+      pageStructureChanged: true,
+    });
+    // A false flag is not a structure change; unknown page counts are dropped.
+    expect(handler).toHaveBeenNthCalledWith(2, {
+      documentId: "doc-1",
+      pageIndex: 2,
+    });
+    unsubscribe();
+  });
+
   it("ignores malformed events and stops after unsubscribe", () => {
     const handler = vi.fn();
     const unsubscribe = onDocumentChanged(handler);

@@ -291,6 +291,10 @@ pub(crate) struct OpenDocument {
     pub(crate) source_bytes: Vec<u8>,
     /// Save target state: the Output Document path and object-level edits.
     pub(crate) save: crate::save::SaveState,
+    /// Visible page arrangement over the physical PDFium page tree. Rotation,
+    /// deletion, reordering and blank-page insertion update it; the save
+    /// pipeline rewrites the page tree from it.
+    pub(crate) pages: crate::page_ops::PageModel,
     /// Session-level edit state for this Document. Declared before `document`
     /// so detached page-object snapshots held by undo/redo are destroyed
     /// before PDFium closes the owning document.
@@ -428,6 +432,7 @@ fn open_document_impl(
             source_path: path,
             source_bytes: bytes,
             save: crate::save::SaveState::default(),
+            pages: crate::page_ops::PageModel::new(page_count as u32),
             edit: crate::text_edit::EditSession::default(),
             document,
         },
@@ -543,12 +548,13 @@ pub fn open_document_window(app: AppHandle, path: String) -> Result<(), CommandE
 pub fn page_info(document_id: String, page_index: u32) -> Result<PageInfoView, CommandError> {
     let registry = registry().lock().expect("document registry poisoned");
     let entry = lookup_document(&registry, &document_id)?;
-    let page = load_page(&entry.document, page_index)?;
+    let physical_index = entry.physical_page(page_index)?;
+    let page = load_page(&entry.document, physical_index)?;
 
     let rotation = page.rotation().map_err(|error| {
         CommandError::new(
             CommandErrorCode::RenderFailed,
-            format!("could not read page {page_index} rotation: {error:?}"),
+            format!("could not read page {physical_index} rotation: {error:?}"),
         )
     })?;
 
@@ -581,7 +587,8 @@ pub fn render_page(
 
     let registry = registry().lock().expect("document registry poisoned");
     let entry = lookup_document(&registry, &document_id)?;
-    let page = load_page(&entry.document, page_index)?;
+    let physical_index = entry.physical_page(page_index)?;
+    let page = load_page(&entry.document, physical_index)?;
 
     let (pixel_width, pixel_height) = checked_page_pixels(&page, page_index, scale)?;
     let png = render_full_page_png(&page, page_index, pixel_width, pixel_height)?;
@@ -617,7 +624,8 @@ pub fn render_thumbnail(
 
     let registry = registry().lock().expect("document registry poisoned");
     let entry = lookup_document(&registry, &document_id)?;
-    let page = load_page(&entry.document, page_index)?;
+    let physical_index = entry.physical_page(page_index)?;
+    let page = load_page(&entry.document, physical_index)?;
 
     let long_edge = page.width().value.max(page.height().value);
     if !long_edge.is_finite() || long_edge <= 0.0 {
@@ -666,7 +674,8 @@ pub fn render_page_region(
 
     let registry = registry().lock().expect("document registry poisoned");
     let entry = lookup_document(&registry, &document_id)?;
-    let page = load_page(&entry.document, page_index)?;
+    let physical_index = entry.physical_page(page_index)?;
+    let page = load_page(&entry.document, physical_index)?;
 
     let (full_width, full_height) = page_pixel_size(&page, scale);
     if full_width > i32::MAX as u32 || full_height > i32::MAX as u32 {
@@ -875,20 +884,8 @@ pub fn extract_text(
         )
     })?;
 
-    let pages = entry.document.pages();
-    if page_index as i32 >= pages.len() {
-        return Err(CommandError::new(
-            CommandErrorCode::PageOutOfRange,
-            format!("page {page_index} is outside 0..{}", pages.len()),
-        ));
-    }
-
-    let page = pages.get(page_index as i32).map_err(|error| {
-        CommandError::new(
-            CommandErrorCode::RenderFailed,
-            format!("could not load page {page_index}: {error:?}"),
-        )
-    })?;
+    let physical_index = entry.physical_page(page_index)?;
+    let page = load_page(&entry.document, physical_index)?;
 
     // A missing text layer is normal for scanned documents.
     let text = page
@@ -922,20 +919,8 @@ pub fn extract_text_layer(
         )
     })?;
 
-    let pages = entry.document.pages();
-    if page_index as i32 >= pages.len() {
-        return Err(CommandError::new(
-            CommandErrorCode::PageOutOfRange,
-            format!("page {page_index} is outside 0..{}", pages.len()),
-        ));
-    }
-
-    let page = pages.get(page_index as i32).map_err(|error| {
-        CommandError::new(
-            CommandErrorCode::RenderFailed,
-            format!("could not load page {page_index}: {error:?}"),
-        )
-    })?;
+    let physical_index = entry.physical_page(page_index)?;
+    let page = load_page(&entry.document, physical_index)?;
 
     build_text_layer(&page, page_index)
 }

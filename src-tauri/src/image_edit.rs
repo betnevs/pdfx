@@ -882,6 +882,8 @@ fn delete_for(
     );
     Ok(EditStepView {
         page_index,
+        page_count: entry.pages.len(),
+        page_structure_changed: false,
         history: entry.edit.history_view(),
     })
 }
@@ -946,6 +948,8 @@ pub(crate) fn undo_image(
     entry.edit.redo_stack.push(EditAction::Image(action));
     Ok(EditStepView {
         page_index,
+        page_count: entry.pages.len(),
+        page_structure_changed: false,
         history: entry.edit.history_view(),
     })
 }
@@ -1006,6 +1010,8 @@ pub(crate) fn redo_image(
     entry.edit.undo_stack.push(EditAction::Image(action));
     Ok(EditStepView {
         page_index,
+        page_count: entry.pages.len(),
+        page_structure_changed: false,
         history: entry.edit.history_view(),
     })
 }
@@ -1019,7 +1025,14 @@ pub fn insert_image(
     path: String,
 ) -> Result<ImageEditResultView, CommandError> {
     let loaded = load_image(&path)?;
-    with_open_document(&document_id, |entry| insert_for(entry, page_index, loaded))
+    with_open_document(&document_id, |entry| {
+        let physical = entry.physical_page(page_index)?;
+        let mut view = insert_for(entry, physical, loaded)?;
+        let logical = entry.logical_page(physical).unwrap_or(0);
+        view.page_index = logical;
+        view.image.page_index = logical;
+        Ok(view)
+    })
 }
 
 /// The `page_images` command: every image this session inserted on the Page,
@@ -1029,7 +1042,15 @@ pub fn page_images(
     document_id: String,
     page_index: u32,
 ) -> Result<Vec<ImageObjectView>, CommandError> {
-    with_open_document(&document_id, |entry| images_for(entry, page_index))
+    with_open_document(&document_id, |entry| {
+        let physical = entry.physical_page(page_index)?;
+        let mut views = images_for(entry, physical)?;
+        let logical = entry.logical_page(physical).unwrap_or(0);
+        for view in &mut views {
+            view.page_index = logical;
+        }
+        Ok(views)
+    })
 }
 
 /// The `transform_image` command: moves, resizes or rotates an image around
@@ -1042,7 +1063,12 @@ pub fn transform_image(
     transform: ImageTransformRequest,
 ) -> Result<ImageEditResultView, CommandError> {
     with_open_document(&document_id, |entry| {
-        transform_for(entry, page_index, image_id, transform)
+        let physical = entry.physical_page(page_index)?;
+        let mut view = transform_for(entry, physical, image_id, transform)?;
+        let logical = entry.logical_page(physical).unwrap_or(0);
+        view.page_index = logical;
+        view.image.page_index = logical;
+        Ok(view)
     })
 }
 
@@ -1055,6 +1081,9 @@ pub fn delete_image(
     image_id: u64,
 ) -> Result<EditStepView, CommandError> {
     with_open_document(&document_id, |entry| {
-        delete_for(entry, page_index, image_id)
+        let physical = entry.physical_page(page_index)?;
+        let mut step = delete_for(entry, physical, image_id)?;
+        step.page_index = entry.logical_page(physical).unwrap_or(0);
+        Ok(step)
     })
 }

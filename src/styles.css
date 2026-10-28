@@ -272,10 +272,27 @@ button {
 }
 
 .page-nav,
-.zoom-controls {
+.zoom-controls,
+.page-ops {
   display: flex;
   align-items: center;
   gap: 6px;
+}
+
+.page-ops {
+  flex-wrap: wrap;
+}
+
+.page-ops-hint {
+  flex-basis: 100%;
+  color: var(--pdfx-muted);
+  font-size: 11px;
+  text-align: center;
+}
+
+.page-ops button:disabled {
+  color: var(--pdfx-disabled-text);
+  cursor: default;
 }
 
 .page-input,
@@ -618,6 +635,67 @@ button {
 .thumbnail[aria-current="page"] .thumbnail-number {
   color: var(--pdfx-accent-text);
   font-weight: 600;
+}
+
+.thumbnail[draggable="true"] {
+  cursor: grab;
+}
+
+.thumbnail--dragging {
+  opacity: 0.45;
+}
+
+.thumbnail--drop-target .thumbnail-frame {
+  box-shadow: 0 0 0 2px var(--pdfx-accent);
+}
+
+.page-operation-dialog {
+  width: min(420px, 100%);
+}
+
+.page-dialog-options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 2px 0 6px;
+}
+
+.page-dialog-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border: 1px solid var(--pdfx-border-control);
+  border-radius: 7px;
+  background: var(--pdfx-raised);
+  color: var(--pdfx-text);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.page-dialog-option:has(input:checked) {
+  border-color: var(--pdfx-accent);
+  background: var(--pdfx-accent-soft);
+  color: var(--pdfx-accent-text);
+}
+
+.page-dialog-option input {
+  margin: 0;
+}
+
+.page-dialog-danger {
+  padding: 7px 14px;
+  border: 0;
+  border-radius: 7px;
+  background: var(--pdfx-danger-strong);
+  color: var(--pdfx-on-accent);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.page-dialog-danger:hover {
+  opacity: 0.9;
 }
 
 .page-stage {
