@@ -746,6 +746,56 @@ fn history_survives_saving_and_dirty_tracks_the_saved_state() {
     close_document(document_id).expect("close document");
 }
 
+/**
+ * The close guard asks `edit_history` at the command boundary immediately
+ * before deciding, so an edit whose frontend event has not arrived yet must
+ * still be visible. It then relies on the same dirty transitions as the title
+ * marker: a save is clean, undo past it is dirty, redo back is clean.
+ */
+#[test]
+fn a_fresh_history_read_tracks_the_state_the_close_guard_asks_about() {
+    let pdf = synthetic::single_line_pdf();
+    let document_id = open_synthetic(&pdf);
+
+    let initial = edit_history(document_id.clone()).expect("initial history");
+    assert!(
+        !initial.dirty && !initial.can_undo,
+        "a freshly opened document has nothing to save: {initial:?}"
+    );
+
+    let layer = extract_text_layer(document_id.clone(), 0).expect("text layer");
+    let target = text_edit_target(
+        document_id.clone(),
+        0,
+        char_index_of(&layer, "Original") as u32,
+    )
+    .expect("target");
+    apply_text_edit(
+        document_id.clone(),
+        0,
+        target.box_id,
+        "Unsaved edit.".to_owned(),
+    )
+    .expect("apply text edit");
+
+    // No command result is used here: this is exactly the fresh read the close
+    // guard performs after the edit has been committed.
+    let edited = edit_history(document_id.clone()).expect("fresh history after edit");
+    assert!(edited.dirty, "an edit immediately before close is dirty");
+    assert_eq!(edited.saved_revision, 0);
+
+    mark_document_saved(document_id.clone()).expect("save baseline");
+    let saved = edit_history(document_id.clone()).expect("fresh history after save");
+    assert!(!saved.dirty, "a written state closes without asking");
+
+    let undone = undo_text_edit(document_id.clone()).expect("undo past the save");
+    assert!(undone.history.dirty, "undo past the baseline is dirty");
+    let redone = redo_text_edit(document_id.clone()).expect("redo back to the save");
+    assert!(!redone.history.dirty, "the saved revision is clean again");
+
+    close_document(document_id).expect("close document");
+}
+
 #[test]
 fn undo_restores_deleted_text_and_redo_removes_it_again() {
     let document_id = open_fixture("text");

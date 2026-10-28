@@ -85,6 +85,17 @@ body {
   white-space: nowrap;
 }
 
+.dirty-indicator {
+  padding: 2px 7px;
+  border: 1px solid var(--pdfx-warning-border);
+  border-radius: 999px;
+  background: var(--pdfx-warning-soft);
+  color: var(--pdfx-warning-strong-text);
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
 button {
   font: inherit;
 }
@@ -2184,7 +2195,10 @@ button {
 .password-overlay {
   position: fixed;
   inset: 0;
-  z-index: 20;
+  /* Password, save-confirmation and unsaved-changes dialogs are system-modal:
+   * the close guard can run while Settings (50) or Print/Export (30) is open,
+   * and the question must stay visible above those panels. */
+  z-index: 60;
   display: flex;
   align-items: center;
   justify-content: center;

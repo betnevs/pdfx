@@ -315,6 +315,29 @@ describe.each(componentCss)("%s theming", (_file, css) => {
   });
 });
 
+/** The z-index a stylesheet gives the first rule for `selector` that sets one. */
+function zIndexOf(css: string, selector: string): number {
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const rule = new RegExp(`${escaped}\\s*\\{([^}]*)\\}`, "g");
+  for (const match of stripComments(css).matchAll(rule)) {
+    const zIndex = /z-index:\s*(\d+)\s*;/.exec(match[1]);
+    if (zIndex) {
+      return Number(zIndex[1]);
+    }
+  }
+  throw new Error(`no z-index declared for ${selector}`);
+}
+
+describe("modal overlay stacking", () => {
+  it("keeps the unsaved-changes question above the settings and print panels", () => {
+    // The close guard can run while Settings or Print/Export is open; the
+    // confirmation must not be painted underneath those panels.
+    const confirmation = zIndexOf(stylesCss, ".password-overlay");
+    expect(confirmation).toBeGreaterThan(zIndexOf(settingsCss, ".settings-backdrop"));
+    expect(confirmation).toBeGreaterThan(zIndexOf(stylesCss, ".print-export-overlay"));
+  });
+});
+
 describe("theme token references", () => {
   it("only references tokens that every theme defines", () => {
     const defined = new Set(Object.keys(light));

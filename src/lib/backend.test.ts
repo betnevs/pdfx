@@ -14,6 +14,7 @@ import {
   createFormTextField,
   deleteFormField,
   deleteFormTextField,
+  destroyWindow,
   exportPage,
   extractTextLayer,
   fillFormField,
@@ -352,6 +353,17 @@ describe("backend command seam", () => {
     await setWindowTitle("report.pdf — PDFX");
 
     expect(setTitle).toHaveBeenCalledWith("report.pdf — PDFX");
+  });
+
+  it("destroys the current window after the close guard releases the document", async () => {
+    const destroy = vi.fn().mockResolvedValue(undefined);
+    vi.mocked(getCurrentWindow).mockReturnValue({
+      destroy,
+    } as unknown as ReturnType<typeof getCurrentWindow>);
+
+    await destroyWindow();
+
+    expect(destroy).toHaveBeenCalledTimes(1);
   });
 
   it("forwards menu payloads and unsubscribes", async () => {

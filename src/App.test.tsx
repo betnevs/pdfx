@@ -12,6 +12,7 @@ import {
   READ_ONLY_REASON,
   UNENCRYPTED_OUTPUT_WARNING,
 } from "./lib/document-policy";
+import { notifyDocumentChanged } from "./lib/documentEvents";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
@@ -51,6 +52,14 @@ const idleHistory = {
   revision: 0,
   savedRevision: 0,
   dirty: false,
+};
+
+const dirtyHistory = {
+  canUndo: true,
+  canRedo: false,
+  revision: 1,
+  savedRevision: 0,
+  dirty: true,
 };
 
 const cleanHistory = {
@@ -231,8 +240,30 @@ function setViewportSize(width: number, height: number) {
   Object.defineProperty(viewport, "clientHeight", { configurable: true, value: height });
 }
 
+type CloseHandler = (event: { preventDefault: () => void }) => Promise<void>;
+
+/** The guard the app registered for the current window's close event. */
+function windowCloseHandler(): CloseHandler {
+  return onCloseRequested.mock.calls[0][0] as CloseHandler;
+}
+
+/** Delivers one OS close request and waits for the guard to decide. */
+async function triggerWindowClose(): Promise<ReturnType<typeof vi.fn>> {
+  await waitFor(() => expect(onCloseRequested).toHaveBeenCalled());
+  const preventDefault = vi.fn();
+  await act(async () => {
+    await windowCloseHandler()({ preventDefault });
+  });
+  return preventDefault;
+}
+
+function closeConfirmDialog(): HTMLElement {
+  return screen.getByRole("dialog", { name: "关闭前保存更改？" });
+}
+
 let setTitle: ReturnType<typeof vi.fn>;
 let onCloseRequested: ReturnType<typeof vi.fn>;
+let destroyWindowMock: ReturnType<typeof vi.fn>;
 let onDragDropEvent: ReturnType<typeof vi.fn>;
 let setFullscreenMock: ReturnType<typeof vi.fn>;
 let isFullscreenMock: ReturnType<typeof vi.fn>;
@@ -243,6 +274,7 @@ let saveProgressHandler: ((event: { payload: unknown }) => void) | undefined;
 beforeEach(() => {
   setTitle = vi.fn().mockResolvedValue(undefined);
   onCloseRequested = vi.fn().mockResolvedValue(() => {});
+  destroyWindowMock = vi.fn().mockResolvedValue(undefined);
   setFullscreenMock = vi.fn().mockResolvedValue(undefined);
   isFullscreenMock = vi.fn().mockResolvedValue(false);
   dragDropHandler = undefined;
@@ -256,6 +288,7 @@ beforeEach(() => {
   vi.mocked(getCurrentWindow).mockReturnValue({
     setTitle,
     onCloseRequested,
+    destroy: destroyWindowMock,
     setFullscreen: setFullscreenMock,
     isFullscreen: isFullscreenMock,
   } as unknown as ReturnType<typeof getCurrentWindow>);
@@ -1487,7 +1520,7 @@ describe("PDFX workspace", () => {
     expect(await screen.findByText("report.pdf")).toBeInTheDocument();
   });
 
-  it("registers a close guard that releases the document when it is not dirty", async () => {
+  it("closes a clean document without a confirmation dialog", async () => {
     installDocumentBackend();
     openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
     const user = userEvent.setup();
@@ -1496,18 +1529,522 @@ describe("PDFX workspace", () => {
     await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
     await screen.findByText("report.pdf");
 
-    await waitFor(() => expect(onCloseRequested).toHaveBeenCalled());
-    const handler = onCloseRequested.mock.calls[0][0] as (event: {
-      preventDefault: () => void;
-    }) => void;
-    const preventDefault = vi.fn();
+    const preventDefault = await triggerWindowClose();
 
-    handler({ preventDefault });
-
-    expect(preventDefault).not.toHaveBeenCalled();
+    expect(preventDefault).toHaveBeenCalled();
+    expect(
+      screen.queryByRole("dialog", { name: "关闭前保存更改？" }),
+    ).not.toBeInTheDocument();
     expect(commandCalls("close_document")).toEqual([
       ["close_document", { documentId: "doc-1" }],
     ]);
+    expect(destroyWindowMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows the unsaved marker from backend history and clears it on undo to the saved revision", async () => {
+    let history = idleHistory;
+    installDocumentBackend({ edit_history: () => history });
+    openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("report.pdf");
+    expect(screen.queryByText("未保存")).not.toBeInTheDocument();
+    expect(setTitle).toHaveBeenLastCalledWith("report.pdf — PDFX");
+
+    // The edit commits in the backend; its page-change event asks the save
+    // hook to re-read the command-boundary history.
+    history = dirtyHistory;
+    act(() => {
+      notifyDocumentChanged({ documentId: "doc-1", pageIndex: 0 });
+    });
+    expect(await screen.findByText("未保存")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(setTitle).toHaveBeenLastCalledWith("report.pdf（未保存） — PDFX"),
+    );
+
+    // Undoing back to the saved revision is clean again without another save.
+    history = cleanHistory;
+    act(() => {
+      notifyDocumentChanged({ documentId: "doc-1", pageIndex: 0 });
+    });
+    await waitFor(() =>
+      expect(screen.queryByText("未保存")).not.toBeInTheDocument(),
+    );
+    expect(setTitle).toHaveBeenLastCalledWith("report.pdf — PDFX");
+
+    // Redo past the saved revision restores the marker.
+    history = { ...dirtyHistory, revision: 3, savedRevision: 2 };
+    act(() => {
+      notifyDocumentChanged({ documentId: "doc-1", pageIndex: 0 });
+    });
+    expect(await screen.findByText("未保存")).toBeInTheDocument();
+  });
+
+  it("clears the unsaved marker after a successful save and restores it after another edit", async () => {
+    let history = dirtyHistory;
+    installDocumentBackend({
+      edit_history: () => history,
+      save_document: () => {
+        history = { ...cleanHistory, revision: 1 };
+        return savedResult({ history });
+      },
+    });
+    openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+    saveDialogMock.mockResolvedValueOnce("/tmp/copy.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("report.pdf");
+    expect(await screen.findByText("未保存")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "另存为…" }));
+    await screen.findByText(/已保存到/);
+    await waitFor(() =>
+      expect(screen.queryByText("未保存")).not.toBeInTheDocument(),
+    );
+    expect(setTitle).toHaveBeenLastCalledWith("report.pdf — PDFX");
+
+    history = { ...dirtyHistory, revision: 2, savedRevision: 1 };
+    act(() => {
+      notifyDocumentChanged({ documentId: "doc-1", pageIndex: 0 });
+    });
+    expect(await screen.findByText("未保存")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(setTitle).toHaveBeenLastCalledWith("report.pdf（未保存） — PDFX"),
+    );
+  });
+
+  it("asks before closing an unsaved document and keeps the window open on cancel", async () => {
+    installDocumentBackend({ edit_history: () => dirtyHistory });
+    openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("report.pdf");
+
+    await triggerWindowClose();
+
+    const dialog = closeConfirmDialog();
+    expect(
+      within(dialog).getByRole("button", { name: "保存" }),
+    ).toBeEnabled();
+    expect(
+      within(dialog).getByRole("button", { name: "不保存" }),
+    ).toBeEnabled();
+    const cancel = within(dialog).getByRole("button", { name: "取消" });
+    expect(cancel).toHaveFocus();
+
+    await user.click(cancel);
+
+    expect(
+      screen.queryByRole("dialog", { name: "关闭前保存更改？" }),
+    ).not.toBeInTheDocument();
+    expect(commandCalls("save_document")).toHaveLength(0);
+    expect(commandCalls("close_document")).toHaveLength(0);
+    expect(destroyWindowMock).not.toHaveBeenCalled();
+  });
+
+  it("ignores save accelerators while the close question is open", async () => {
+    installDocumentBackend({ edit_history: () => dirtyHistory });
+    openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("report.pdf");
+
+    await triggerWindowClose();
+    await waitFor(() => expect(menuHandler).toBeDefined());
+    act(() => menuHandler?.({ payload: "file.save" }));
+    act(() => menuHandler?.({ payload: "file.save_as" }));
+
+    expect(commandCalls("save_document")).toHaveLength(0);
+    expect(closeConfirmDialog()).toBeInTheDocument();
+
+    await user.click(
+      within(closeConfirmDialog()).getByRole("button", { name: "取消" }),
+    );
+    expect(
+      screen.queryByRole("dialog", { name: "关闭前保存更改？" }),
+    ).not.toBeInTheDocument();
+    expect(destroyWindowMock).not.toHaveBeenCalled();
+  });
+
+  it("closes without saving when the user chooses not to save", async () => {
+    installDocumentBackend({ edit_history: () => dirtyHistory });
+    openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("report.pdf");
+
+    await triggerWindowClose();
+    await user.click(
+      within(closeConfirmDialog()).getByRole("button", { name: "不保存" }),
+    );
+
+    await waitFor(() => expect(destroyWindowMock).toHaveBeenCalledTimes(1));
+    expect(commandCalls("save_document")).toHaveLength(0);
+    expect(commandCalls("close_document")).toEqual([
+      ["close_document", { documentId: "doc-1" }],
+    ]);
+  });
+
+  it("saves through the normal Save As flow when closing and closes after the write", async () => {
+    let history = dirtyHistory;
+    installDocumentBackend({
+      edit_history: () => history,
+      save_document: () => {
+        history = { ...cleanHistory, revision: 1 };
+        return savedResult({ history });
+      },
+    });
+    openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+    saveDialogMock.mockResolvedValueOnce("/tmp/copy.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("report.pdf");
+
+    await triggerWindowClose();
+    await user.click(
+      within(closeConfirmDialog()).getByRole("button", { name: "保存" }),
+    );
+
+    await waitFor(() => {
+      expect(commandCalls("save_document")).toEqual([
+        [
+          "save_document",
+          {
+            documentId: "doc-1",
+            request: {
+              saveAsPath: "/tmp/copy.pdf",
+              confirmUnencryptedOutput: false,
+            },
+          },
+        ],
+      ]);
+    });
+    await waitFor(() => expect(destroyWindowMock).toHaveBeenCalledTimes(1));
+    expect(commandCalls("close_document")).toEqual([
+      ["close_document", { documentId: "doc-1" }],
+    ]);
+    expect(
+      screen.queryByRole("dialog", { name: "关闭前保存更改？" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("saves changes over the existing output when closing after a first save", async () => {
+    let history = idleHistory;
+    installDocumentBackend({
+      edit_history: () => history,
+      save_document: (args) => {
+        history = { ...cleanHistory, revision: 2 };
+        return savedResult({
+          kind: (args as { request: { saveAsPath: string | null } }).request
+            .saveAsPath
+            ? "save_as"
+            : "save_changes",
+          history,
+        });
+      },
+    });
+    openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+    saveDialogMock.mockResolvedValueOnce("/tmp/copy.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("report.pdf");
+
+    // First save establishes the Output Document, exactly as the toolbar does.
+    await user.click(screen.getByRole("button", { name: "另存为…" }));
+    await screen.findByText(/已保存到/);
+
+    history = { ...dirtyHistory, revision: 3, savedRevision: 2 };
+    act(() => {
+      notifyDocumentChanged({ documentId: "doc-1", pageIndex: 0 });
+    });
+    expect(await screen.findByText("未保存")).toBeInTheDocument();
+
+    await triggerWindowClose();
+    await user.click(
+      within(closeConfirmDialog()).getByRole("button", { name: "保存" }),
+    );
+
+    await waitFor(() => {
+      const requests = commandCalls("save_document").map(
+        ([, args]) =>
+          (args as { request: { saveAsPath: string | null } }).request,
+      );
+      expect(requests).toEqual([
+        { saveAsPath: "/tmp/copy.pdf", confirmUnencryptedOutput: false },
+        { saveAsPath: null, confirmUnencryptedOutput: false },
+      ]);
+    });
+    await waitFor(() => expect(destroyWindowMock).toHaveBeenCalledTimes(1));
+    expect(saveDialogMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the window open when the close-triggered save fails", async () => {
+    installDocumentBackend({
+      edit_history: () => dirtyHistory,
+      save_document: () => {
+        throw { code: "save_failed", message: "磁盘空间不足" };
+      },
+    });
+    openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+    saveDialogMock.mockResolvedValueOnce("/tmp/copy.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("report.pdf");
+
+    await triggerWindowClose();
+    await user.click(
+      within(closeConfirmDialog()).getByRole("button", { name: "保存" }),
+    );
+
+    expect(
+      await screen.findByText("保存失败，窗口未关闭。请取消后重试保存。"),
+    ).toBeInTheDocument();
+    expect(
+      within(closeConfirmDialog()).getByRole("button", { name: "保存" }),
+    ).toBeEnabled();
+    expect(destroyWindowMock).not.toHaveBeenCalled();
+    expect(commandCalls("close_document")).toHaveLength(0);
+
+    // The normal retryable save error is available once the question closes.
+    await user.click(
+      within(closeConfirmDialog()).getByRole("button", { name: "取消" }),
+    );
+    expect(screen.getByText("重试保存")).toBeInTheDocument();
+  });
+
+  it("keeps the window open when the Save As dialog is cancelled during close", async () => {
+    installDocumentBackend({ edit_history: () => dirtyHistory });
+    openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+    saveDialogMock.mockResolvedValueOnce(null);
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("report.pdf");
+
+    await triggerWindowClose();
+    await user.click(
+      within(closeConfirmDialog()).getByRole("button", { name: "保存" }),
+    );
+
+    await waitFor(() => expect(saveDialogMock).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(
+        within(closeConfirmDialog()).getByRole("button", { name: "保存" }),
+      ).toBeEnabled(),
+    );
+    expect(commandCalls("save_document")).toHaveLength(0);
+    expect(commandCalls("close_document")).toHaveLength(0);
+    expect(destroyWindowMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps the window open when required fields block the close-triggered save", async () => {
+    const requiredField = {
+      fieldId: "1:1",
+      name: "notes",
+      kind: "text",
+      pageIndex: 0,
+      order: 0,
+      rect: { x: 72, y: 72, width: 300, height: 60 },
+      value: null,
+      checked: false,
+      options: [],
+      selectedIndex: null,
+      required: true,
+      readOnly: false,
+      multiline: true,
+      radioGroup: null,
+      exportValue: null,
+    };
+    installDocumentBackend({
+      edit_history: () => dirtyHistory,
+      form_fields: () => [requiredField],
+      missing_required_fields: () => [requiredField],
+    });
+    openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("report.pdf");
+
+    await triggerWindowClose();
+    await user.click(
+      within(closeConfirmDialog()).getByRole("button", { name: "保存" }),
+    );
+
+    expect(
+      await screen.findByText(
+        "有必填字段尚未填写，窗口未关闭。请取消后补全再试。",
+      ),
+    ).toBeInTheDocument();
+    expect(saveDialogMock).not.toHaveBeenCalled();
+    expect(commandCalls("save_document")).toHaveLength(0);
+    expect(destroyWindowMock).not.toHaveBeenCalled();
+  });
+
+  it("confirms the unencrypted output before closing an encrypted document", async () => {
+    let history = dirtyHistory;
+    installDocumentBackend({
+      open_document: () => ({ ...documentView, encrypted: true }),
+      edit_history: () => history,
+      save_document: (args) => {
+        expect(
+          (args as { request: { confirmUnencryptedOutput: boolean } }).request
+            .confirmUnencryptedOutput,
+        ).toBe(true);
+        history = { ...cleanHistory, revision: 1 };
+        return savedResult({ history });
+      },
+    });
+    openDialogMock.mockResolvedValueOnce("/tmp/encrypted.pdf");
+    saveDialogMock.mockResolvedValueOnce("/tmp/copy.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("report.pdf");
+
+    await triggerWindowClose();
+    await user.click(
+      within(closeConfirmDialog()).getByRole("button", { name: "保存" }),
+    );
+
+    const confirmation = await screen.findByRole("dialog", {
+      name: "输出将不加密",
+    });
+    // The close question waits behind the confirmation and cannot be answered.
+    expect(
+      within(closeConfirmDialog()).getByRole("button", { name: "取消" }),
+    ).toBeDisabled();
+
+    await user.click(
+      within(confirmation).getByRole("button", {
+        name: "继续保存（不加密）",
+      }),
+    );
+
+    await waitFor(() => expect(destroyWindowMock).toHaveBeenCalledTimes(1));
+    expect(commandCalls("save_document")).toHaveLength(1);
+    expect(commandCalls("close_document")).toHaveLength(1);
+  });
+
+  it("reads the dirty state from the backend on close even before its change event arrives", async () => {
+    let history = idleHistory;
+    installDocumentBackend({ edit_history: () => history });
+    openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("report.pdf");
+    expect(screen.queryByText("未保存")).not.toBeInTheDocument();
+
+    // The edit committed in the backend, but its page-change event has not been
+    // delivered yet. The close guard must not miss it.
+    history = dirtyHistory;
+    await triggerWindowClose();
+
+    expect(closeConfirmDialog()).toBeInTheDocument();
+    expect(commandCalls("close_document")).toHaveLength(0);
+    expect(destroyWindowMock).not.toHaveBeenCalled();
+  });
+
+  it("ignores repeated close requests while the confirmation is open", async () => {
+    installDocumentBackend({ edit_history: () => dirtyHistory });
+    openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("report.pdf");
+
+    await triggerWindowClose();
+    const preventDefault = vi.fn();
+    await act(async () => {
+      await windowCloseHandler()({ preventDefault });
+    });
+
+    expect(preventDefault).toHaveBeenCalled();
+    expect(screen.getAllByRole("dialog", { name: "关闭前保存更改？" })).toHaveLength(
+      1,
+    );
+    expect(commandCalls("close_document")).toHaveLength(0);
+    expect(destroyWindowMock).not.toHaveBeenCalled();
+  });
+
+  it("cancels the close confirmation with Escape", async () => {
+    installDocumentBackend({ edit_history: () => dirtyHistory });
+    openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("report.pdf");
+
+    await triggerWindowClose();
+    await user.keyboard("{Escape}");
+
+    expect(
+      screen.queryByRole("dialog", { name: "关闭前保存更改？" }),
+    ).not.toBeInTheDocument();
+    expect(commandCalls("close_document")).toHaveLength(0);
+    expect(destroyWindowMock).not.toHaveBeenCalled();
+  });
+
+  it("waits for an in-flight save before closing a document it cleaned", async () => {
+    let history = dirtyHistory;
+    let resolveSave: ((value: unknown) => void) | undefined;
+    const pendingSave = new Promise((resolve) => {
+      resolveSave = resolve;
+    });
+    installDocumentBackend({
+      edit_history: () => history,
+      save_document: () => pendingSave,
+    });
+    openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+    saveDialogMock.mockResolvedValueOnce("/tmp/copy.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("report.pdf");
+
+    await user.click(screen.getByRole("button", { name: "另存为…" }));
+    await waitFor(() =>
+      expect(commandCalls("save_document")).toHaveLength(1),
+    );
+
+    const closePromise = windowCloseHandler()({ preventDefault: vi.fn() });
+    history = { ...cleanHistory, revision: 1 };
+    await act(async () => {
+      resolveSave?.(savedResult({ history }));
+      await closePromise;
+    });
+
+    expect(
+      screen.queryByRole("dialog", { name: "关闭前保存更改？" }),
+    ).not.toBeInTheDocument();
+    expect(commandCalls("close_document")).toEqual([
+      ["close_document", { documentId: "doc-1" }],
+    ]);
+    expect(destroyWindowMock).toHaveBeenCalledTimes(1);
   });
 
   it("saves a new document through the Save As dialog", async () => {
