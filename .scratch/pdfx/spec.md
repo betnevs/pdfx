@@ -158,7 +158,7 @@ PDFX 是一个 Tauri 2 桌面应用：Rust 负责 PDF 处理与文件系统，Re
 102. 作为 Windows 用户，我想要 Windows 10 1809+ / 11 x64 构建，以便覆盖常见环境。
 103. 作为内部用户，我想要未签名的安装包与绕过说明，以便零成本安装。
 104. 作为内部用户，我想要 macOS `.dmg`、Windows `.msi`、`.exe` 安装器与 portable zip，以便按场景选择。
-105. 作为 Windows 用户，我想要安装包内置 WebView2 Evergreen Bootstrapper，以便离线也能完成安装。
+105. 作为 Windows 用户，我想要安装包内置 WebView2 Evergreen 离线安装器，以便离线也能完成安装。
 106. 作为 PDFX 用户，我想要自有品牌的应用名、图标与配色，以便和 iLovePDF 区分。
 
 ### M0 原型与验收
@@ -176,7 +176,7 @@ PDFX 是一个 Tauri 2 桌面应用：Rust 负责 PDF 处理与文件系统，Re
 
 - 桌面壳用 Tauri 2（ADR-0001），前端用 React + TypeScript，Rust 负责 PDF 处理、文件系统与命令编排。
 - 目标平台：macOS 12+（Apple Silicon + Intel，universal）、Windows 10 1809+ / 11 x64。
-- Windows 安装包内置 WebView2 Evergreen Bootstrapper（约 +1.8MB），保证离线安装；不使用需要联网的 0MB bootstrapper。
+- Windows 安装包内置 WebView2 Evergreen 离线安装器（`offlineInstaller`，每个安装包约 +127MB），保证离线安装；不使用需要联网的 bootstrapper。这是“离线可用”优先于安装包体积的取舍；portable zip 不内置 WebView2，文档注明系统需预装。
 - 界面使用原生标题栏与系统菜单；应用内保留编辑器工具栏。主题以浅色为主，M2 跟随系统深色模式。
 
 ### PDF 引擎
