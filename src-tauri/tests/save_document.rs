@@ -10,6 +10,7 @@ mod support;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 use std::time::SystemTime;
 
 use pdfx_lib::commands::{close_document, extract_text, open_document, DocumentView};
@@ -112,6 +113,54 @@ fn saved_temp_files(dir: &Path) -> Vec<PathBuf> {
             name.contains(".pdfx-save-") || name.contains(".pdfx-backup-")
         })
         .collect()
+}
+
+/// The process-wide logger can only be installed once. Every logging
+/// assertion in this binary shares the same directory.
+static LOG_DIRECTORY: OnceLock<PathBuf> = OnceLock::new();
+
+fn log_directory() -> &'static Path {
+    LOG_DIRECTORY.get_or_init(|| {
+        let path = std::env::temp_dir().join(format!("pdfx-save-log-{}", std::process::id()));
+        fs::create_dir_all(&path).expect("create log dir");
+        pdfx_lib::logging::initialize(&path).expect("initialize test logger");
+        path
+    })
+}
+
+#[test]
+fn a_successful_save_is_logged_without_document_content() {
+    let dir = TempDir::new("save-log");
+    let logs = log_directory();
+    let source = copy_fixture("text", &dir, "source.pdf");
+    let output = dir.path().join("logged-output.pdf");
+    let document = open(&source);
+    create_box(&document.document_id, 72.0, 72.0, "SECRET SAVE CONTENT");
+
+    let (result, _) = save(&document.document_id, save_request(Some(&output)));
+
+    let log = fs::read_to_string(logs.join(pdfx_lib::logging::LOG_FILE_NAME))
+        .expect("the save pipeline writes to the installed logger");
+    let line = log
+        .lines()
+        .find(|line| line.contains("document.save") && line.contains(&path_string(&output)))
+        .expect("a document.save event names the output path");
+    assert!(line.contains("outcome=success"), "logged outcome: {line}");
+    assert!(line.contains("kind=SaveAs"), "logged kind: {line}");
+    assert!(
+        line.contains(&format!("documentId={}", document.document_id)),
+        "logged document id: {line}"
+    );
+    assert!(
+        line.contains(&format!("bytes={}", result.bytes_written)),
+        "logged byte count: {line}"
+    );
+    assert!(
+        !log.contains("SECRET SAVE CONTENT"),
+        "document content must never reach the log"
+    );
+
+    close_document(document.document_id).expect("close source");
 }
 
 #[test]
@@ -687,6 +736,11 @@ fn a_failed_save_never_reports_done() {
         ],
         "the failure is reported after the stage that failed, never as Done"
     );
+
+    let history = pdfx_lib::text_edit::edit_history(document.document_id.clone())
+        .expect("history after a failed save");
+    assert!(history.dirty, "a failed save leaves the document dirty");
+    assert!(history.can_undo, "a failed save keeps the edit history");
     close_document(document.document_id).expect("close source");
 }
 
@@ -701,6 +755,17 @@ fn undo_after_save_marks_the_document_dirty_again() {
     let (result, _) = save(&document.document_id, save_request(Some(&output)));
     assert!(!result.history.dirty);
     assert!(result.history.can_undo, "save keeps the undo history");
+
+    let history = pdfx_lib::text_edit::edit_history(document.document_id.clone())
+        .expect("history after a successful save");
+    assert!(
+        !history.dirty,
+        "the command boundary reports the clean baseline"
+    );
+    assert!(
+        history.can_undo,
+        "the command boundary keeps the undo history"
+    );
 
     let undone =
         pdfx_lib::text_edit::undo_text_edit(document.document_id.clone()).expect("undo after save");

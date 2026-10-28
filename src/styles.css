@@ -85,17 +85,6 @@ body {
   white-space: nowrap;
 }
 
-.dirty-indicator {
-  padding: 2px 7px;
-  border: 1px solid var(--pdfx-warning-border);
-  border-radius: 999px;
-  background: var(--pdfx-warning-soft);
-  color: var(--pdfx-warning-strong-text);
-  font-size: 11px;
-  line-height: 1.4;
-  white-space: nowrap;
-}
-
 button {
   font: inherit;
 }

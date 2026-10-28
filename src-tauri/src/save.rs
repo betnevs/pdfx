@@ -197,7 +197,18 @@ pub fn save_document_with_progress(
         // baseline and remember the target. A failure above leaves both dirty
         // state and the previous target untouched.
         entry.save.output_path = Some(target.clone());
-        entry.edit.saved_state = entry.edit.current_state;
+        entry.edit.mark_document_saved();
+
+        // The path and outcome are useful in a diagnostic report; document
+        // content never is, so only the target, kind and size are recorded.
+        logging::event(
+            "document.save",
+            &format!(
+                "documentId={document_id} kind={kind:?} outcome=success path={} bytes={}",
+                target.display(),
+                written.bytes_written
+            ),
+        );
 
         emit(document_id, SaveStage::Done, 4, progress);
 
