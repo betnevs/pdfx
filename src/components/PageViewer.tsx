@@ -23,6 +23,7 @@ import {
   type FitMode,
 } from "../lib/pageGeometry";
 import type { PageRender, ZoomMode } from "../lib/useDocumentViewer";
+import { FormLayer } from "./FormLayer";
 import { PageImageLayer } from "./PageImageLayer";
 import { PageTextLayer } from "./PageTextLayer";
 import { ShapeLayer } from "./ShapeLayer";
@@ -395,6 +396,11 @@ export function PageSurface({
   selectedAnnotation,
   onSelectAnnotation,
   surfaceRef,
+  canFillForms = false,
+  formFocusFieldId = null,
+  onFormFocusHandled,
+  onSelectPage,
+  onFormFocusField,
 }: {
   documentId: string;
   pageIndex: number;
@@ -407,6 +413,13 @@ export function PageSurface({
   selectedAnnotation: AnnotationView | null;
   onSelectAnnotation: (annotation: AnnotationView | null) => void;
   surfaceRef: RefObject<HTMLDivElement | null>;
+  /** Permission Restrictions allow filling existing form fields. */
+  canFillForms?: boolean;
+  /** Widget to focus after the caller navigated to its page. */
+  formFocusFieldId?: string | null;
+  onFormFocusHandled?: () => void;
+  onSelectPage?: (pageIndex: number) => void;
+  onFormFocusField?: (fieldId: string) => void;
 }) {
   const pixel = info ? pagePixelSize(info, scale) : null;
   const ready = pixel !== null && render.scale === scale;
@@ -470,14 +483,28 @@ export function PageSurface({
         scale={scale}
       />
       {info && (
-        <PageImageLayer
-          key={`${documentId}:${pageIndex}:images`}
-          documentId={documentId}
-          pageIndex={pageIndex}
-          pageWidth={info.width}
-          pageHeight={info.height}
-          readOnly={readOnly}
-        />
+        <>
+          <PageImageLayer
+            key={`${documentId}:${pageIndex}:images`}
+            documentId={documentId}
+            pageIndex={pageIndex}
+            pageWidth={info.width}
+            pageHeight={info.height}
+            readOnly={readOnly}
+          />
+          <FormLayer
+            documentId={documentId}
+            pageIndex={pageIndex}
+            pageWidth={info.width}
+            pageHeight={info.height}
+            scale={scale}
+            canFillForms={canFillForms}
+            focusFieldId={formFocusFieldId}
+            onFocusHandled={onFormFocusHandled}
+            onSelectPage={onSelectPage}
+            onFocusField={onFormFocusField}
+          />
+        </>
       )}
       {info && (
         <ShapeLayer

@@ -179,7 +179,15 @@ export function PageImageLayer({
   useEffect(
     () =>
       onDocumentChanged((detail) => {
-        if (detail.documentId === documentId && detail.pageIndex === pageIndex) {
+        // This layer already updates its state from the command result of its
+        // own actions, and its server-side list may lag behind that result;
+        // refreshing on its own event would overwrite the committed preview.
+        // Undo, redo and other tools notify with a different source.
+        if (
+          detail.documentId === documentId &&
+          detail.pageIndex === pageIndex &&
+          detail.source !== "image"
+        ) {
           setReloadKey((value) => value + 1);
         }
       }),
@@ -230,7 +238,12 @@ export function PageImageLayer({
     setBusy(true);
     try {
       const result = await insertImage(documentId, pageIndex, path);
-      setImages((list) => [...list, result.image]);
+      // The command result is canonical; replace an entry with the same id so
+      // a stale list can never show the image twice.
+      setImages((list) => [
+        ...list.filter((entry) => entry.imageId !== result.image.imageId),
+        result.image,
+      ]);
       setSelectedId(result.image.imageId);
       setNotice(null);
       notifyDocumentChanged({ documentId, pageIndex, source: "image" });

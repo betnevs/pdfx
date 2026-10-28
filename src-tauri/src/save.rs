@@ -127,6 +127,14 @@ pub async fn save_document(
 pub enum ObjectEdit {
     /// Sets an entry in the document `/Info` dictionary.
     SetInfoEntry { key: String, value: String },
+    /// Sets a radio group's value and every widget's appearance state.
+    ///
+    /// Pdfium's public API writes `/V` on one widget annotation only, while a
+    /// radio group stores its value on the parent field. The edit writes the
+    /// parent `/V` and each widget's `/AS` in the appended revision.
+    SetRadioGroup { field_name: String, state: String },
+    /// Sets a choice field's `/V` and, when the label is one of `/Opt`, `/I`.
+    SetChoiceValue { field_name: String, label: String },
 }
 
 /// Per-document save state, kept next to the PDFium document.
@@ -176,7 +184,12 @@ pub fn save_document_with_progress(
         let output_bytes = serialize_output(entry, encrypted)?;
 
         emit(document_id, SaveStage::Finalizing, 2, progress);
-        let output_bytes = append_object_edits(output_bytes, &entry.save.object_edits)?;
+        // Form values that live in the edit history (radio groups, choice
+        // fields) are re-derived on every save, so undo/redo is reflected in
+        // the output without a second copy of form state.
+        let mut object_edits = entry.save.object_edits.clone();
+        object_edits.extend(crate::form::save_object_edits(&entry.edit));
+        let output_bytes = append_object_edits(output_bytes, &object_edits)?;
 
         emit(document_id, SaveStage::Writing, 3, progress);
         let written = write_output_atomically(&target, &output_bytes)?;
@@ -429,7 +442,215 @@ fn apply_object_edit(
             }
             Ok(())
         }
+        ObjectEdit::SetRadioGroup { field_name, state } => {
+            apply_radio_group(incremental, field_name, state)
+        }
+        ObjectEdit::SetChoiceValue { field_name, label } => {
+            apply_choice_value(incremental, field_name, label)
+        }
     }
+}
+
+/// Decodes a PDF text string: UTF-16BE when it carries the BOM, otherwise the
+/// bytes are compared as-is (PDFDocEncoding is ASCII-compatible for the
+/// characters form option labels use in practice).
+fn decode_pdf_text(bytes: &[u8]) -> String {
+    if let Some(utf16) = bytes.strip_prefix(&[0xFE, 0xFF]) {
+        let units: Vec<u16> = utf16
+            .chunks_exact(2)
+            .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+            .collect();
+        String::from_utf16_lossy(&units)
+    } else {
+        String::from_utf8_lossy(bytes).into_owned()
+    }
+}
+
+fn text_string_object(value: &str) -> lopdf::Object {
+    if value.is_ascii() {
+        lopdf::Object::string_literal(value.as_bytes().to_vec())
+    } else {
+        let mut bytes = vec![0xFE, 0xFF];
+        for unit in value.encode_utf16() {
+            bytes.extend_from_slice(&unit.to_be_bytes());
+        }
+        lopdf::Object::String(bytes, lopdf::StringFormat::Hexadecimal)
+    }
+}
+
+fn option_label(object: &lopdf::Object) -> Option<String> {
+    match object {
+        lopdf::Object::String(bytes, _) => Some(decode_pdf_text(bytes)),
+        lopdf::Object::Array(items) => items
+            .first()
+            .and_then(|item| item.as_str().ok())
+            .map(decode_pdf_text),
+        _ => None,
+    }
+}
+
+fn find_form_field_id(document: &lopdf::Document, name: &str) -> Option<lopdf::ObjectId> {
+    let catalog = document.catalog().ok()?;
+    let acro_form = catalog
+        .get_deref(b"AcroForm", document)
+        .ok()?
+        .as_dict()
+        .ok()?;
+    let fields = acro_form
+        .get_deref(b"Fields", document)
+        .ok()?
+        .as_array()
+        .ok()?;
+    fields.iter().find_map(|field| {
+        let id = field.as_reference().ok()?;
+        let dictionary = document.get_dictionary(id).ok()?;
+        let field_name = dictionary
+            .get(b"T")
+            .and_then(lopdf::Object::as_str)
+            .ok()
+            .map(decode_pdf_text)?;
+        (field_name == name).then_some(id)
+    })
+}
+
+/// Returns the non-Off state name from a widget's normal appearance dictionary.
+fn widget_on_state(widget: &lopdf::Dictionary, document: &lopdf::Document) -> Option<Vec<u8>> {
+    let normal = widget
+        .get_deref(b"AP", document)
+        .ok()?
+        .as_dict()
+        .ok()?
+        .get_deref(b"N", document)
+        .ok()?;
+    normal
+        .as_dict()
+        .ok()?
+        .iter()
+        .find(|(state, _)| state.as_slice() != b"Off")
+        .map(|(state, _)| state.clone())
+}
+
+fn apply_radio_group(
+    incremental: &mut lopdf::IncrementalDocument,
+    field_name: &str,
+    state: &str,
+) -> Result<(), CommandError> {
+    let (field_id, widget_ids, on_states) = {
+        let previous = incremental.get_prev_documents();
+        let field_id = find_form_field_id(previous, field_name).ok_or_else(|| {
+            lopdf_error(
+                "could not find a radio field in the saved document",
+                field_name,
+            )
+        })?;
+        let field = previous
+            .get_dictionary(field_id)
+            .map_err(|error| lopdf_error("could not read the radio field dictionary", error))?;
+        let widget_ids: Vec<lopdf::ObjectId> = match field
+            .get_deref(b"Kids", previous)
+            .ok()
+            .and_then(|kids| kids.as_array().ok())
+        {
+            Some(kids) => kids
+                .iter()
+                .filter_map(|kid| kid.as_reference().ok())
+                .collect(),
+            None => vec![field_id],
+        };
+        let on_states: Vec<Option<Vec<u8>>> = widget_ids
+            .iter()
+            .map(|id| {
+                previous
+                    .get_dictionary(*id)
+                    .ok()
+                    .and_then(|widget| widget_on_state(widget, previous))
+            })
+            .collect();
+        (field_id, widget_ids, on_states)
+    };
+
+    incremental
+        .opt_clone_object_to_new_document(field_id)
+        .map_err(|error| lopdf_error("could not clone the radio field", error))?;
+    for id in &widget_ids {
+        incremental
+            .opt_clone_object_to_new_document(*id)
+            .map_err(|error| lopdf_error("could not clone a radio widget", error))?;
+    }
+
+    let field = incremental
+        .new_document
+        .get_dictionary_mut(field_id)
+        .map_err(|error| lopdf_error("could not edit the radio field", error))?;
+    field.set(
+        b"V".to_vec(),
+        lopdf::Object::Name(state.as_bytes().to_vec()),
+    );
+
+    for (id, on_state) in widget_ids.iter().zip(on_states) {
+        let widget = incremental
+            .new_document
+            .get_dictionary_mut(*id)
+            .map_err(|error| lopdf_error("could not edit a radio widget", error))?;
+        let appearance: &[u8] = if on_state.as_deref() == Some(state.as_bytes()) {
+            state.as_bytes()
+        } else {
+            b"Off"
+        };
+        widget.set(b"AS".to_vec(), lopdf::Object::Name(appearance.to_vec()));
+    }
+
+    Ok(())
+}
+
+fn apply_choice_value(
+    incremental: &mut lopdf::IncrementalDocument,
+    field_name: &str,
+    label: &str,
+) -> Result<(), CommandError> {
+    let (field_id, index) = {
+        let previous = incremental.get_prev_documents();
+        let field_id = find_form_field_id(previous, field_name).ok_or_else(|| {
+            lopdf_error(
+                "could not find a choice field in the saved document",
+                field_name,
+            )
+        })?;
+        let field = previous
+            .get_dictionary(field_id)
+            .map_err(|error| lopdf_error("could not read the choice field dictionary", error))?;
+        let index = field
+            .get_deref(b"Opt", previous)
+            .ok()
+            .and_then(|options| options.as_array().ok())
+            .and_then(|options| {
+                options
+                    .iter()
+                    .position(|option| option_label(option).as_deref() == Some(label))
+            })
+            .map(|index| index as i64);
+        (field_id, index)
+    };
+
+    incremental
+        .opt_clone_object_to_new_document(field_id)
+        .map_err(|error| lopdf_error("could not clone the choice field", error))?;
+    let field = incremental
+        .new_document
+        .get_dictionary_mut(field_id)
+        .map_err(|error| lopdf_error("could not edit the choice field", error))?;
+    field.set(b"V".to_vec(), text_string_object(label));
+    match index {
+        Some(index) => field.set(
+            b"I".to_vec(),
+            lopdf::Object::Array(vec![lopdf::Object::Integer(index)]),
+        ),
+        None => {
+            field.remove(b"I");
+        }
+    }
+
+    Ok(())
 }
 
 fn lopdf_error(context: &str, error: impl std::fmt::Display) -> CommandError {

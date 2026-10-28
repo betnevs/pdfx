@@ -20,8 +20,13 @@ export interface DocumentChangedDetail {
    * The tool that made the change, when another overlay needs to refresh
    * tool-specific state such as the shared undo availability. Omitted by
    * callers whose command results already carry that state.
+   *
+   * `"form"` marks a form fill whose overlay already updated from the command
+   * result; `"text"`, `"image"`, `"shape"` and `"annotation"` mark the Text
+   * Box, Image, Shape and text-markup edits whose command results returned the
+   * new history.
    */
-  source?: "text" | "image" | "shape" | "annotation";
+  source?: "text" | "image" | "shape" | "annotation" | "form";
 }
 
 export function notifyDocumentChanged(detail: DocumentChangedDetail): void {
@@ -54,7 +59,8 @@ export function onDocumentChanged(
         detail.source === "text" ||
         detail.source === "image" ||
         detail.source === "shape" ||
-        detail.source === "annotation"
+        detail.source === "annotation" ||
+        detail.source === "form"
       ) {
         message.source = detail.source;
       }

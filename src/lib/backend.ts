@@ -39,6 +39,10 @@ export type CommandErrorCode =
   | "no_output_document"
   | "unencrypted_output_confirmation_required"
   | "read_only_document"
+  | "form_field_not_found"
+  | "form_field_read_only"
+  | "form_fill_not_permitted"
+  | "form_value_invalid"
   | "update_not_configured"
   | "update_check_failed"
   | "update_manifest_invalid"
@@ -334,6 +338,70 @@ export interface ImageEditResultView {
   history: EditHistoryView;
 }
 
+/** Widget types PDFX can display from an existing AcroForm. */
+export type FormFieldKind =
+  | "text"
+  | "checkbox"
+  | "radio"
+  | "comboBox"
+  | "listBox"
+  | "pushButton"
+  | "signature"
+  | "unknown";
+
+/** A widget rectangle in display-space points (top-left origin). */
+export interface FormFieldRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * One interactive widget of the open document.
+ *
+ * A radio group has one view per widget; the widgets share `name` and
+ * `radioGroup`, `value` is the selected export state of the group and
+ * `checked` tells whether this particular widget is the selected one.
+ */
+export interface FormFieldView {
+  /** Stable within an open document: `"<page-index>:<annotation-index>"`. */
+  fieldId: string;
+  name: string;
+  kind: FormFieldKind;
+  pageIndex: number;
+  /** Zero-based position in document-wide tab order. */
+  order: number;
+  rect: FormFieldRect;
+  /** Text value, radio-group value or selected choice label. */
+  value: string | null;
+  /** Checkbox/radio state; always false for other kinds. */
+  checked: boolean;
+  /** Choice labels in document order; empty for other kinds. */
+  options: string[];
+  selectedIndex: number | null;
+  required: boolean;
+  readOnly: boolean;
+  multiline: boolean;
+  /** The shared field name for radio widgets. */
+  radioGroup: string | null;
+  /** The widget's export value for radio widgets. */
+  exportValue: string | null;
+}
+
+/** A value the user committed for one widget. */
+export type FormFieldValueInput =
+  | { kind: "text"; text: string }
+  | { kind: "checked"; checked: boolean }
+  | { kind: "choice"; value: string };
+
+/** The outcome of one field change: all fields refreshed, plus history. */
+export interface FormFieldEditResultView {
+  fieldId: string;
+  fields: FormFieldView[];
+  history: EditHistoryView;
+}
+
 /** The text markup annotation kinds PDFX creates. */
 export type TextMarkupKind = "highlight" | "underline" | "strikeout";
 
@@ -502,6 +570,10 @@ const COMMAND_ERROR_CODES: ReadonlySet<string> = new Set<CommandErrorCode>([
   "no_output_document",
   "unencrypted_output_confirmation_required",
   "read_only_document",
+  "form_field_not_found",
+  "form_field_read_only",
+  "form_fill_not_permitted",
+  "form_value_invalid",
   "internal",
 ]);
 
@@ -861,6 +933,41 @@ export async function undoTextEdit(documentId: string): Promise<EditStepView> {
 /** Redoes the most recently undone edit action. */
 export async function redoTextEdit(documentId: string): Promise<EditStepView> {
   return invoke<EditStepView>("redo_text_edit", { documentId });
+}
+
+/**
+ * Lists every existing AcroForm widget in document order. Widgets on other
+ * pages are included so the caller can plan document-wide tab order.
+ */
+export async function formFields(documentId: string): Promise<FormFieldView[]> {
+  return invoke<FormFieldView[]>("form_fields", { documentId });
+}
+
+/**
+ * Lists the required fields that still need an answer, in tab order. The save
+ * flow calls this before writing so an incomplete form can be reported and
+ * the first missing widget located.
+ */
+export async function missingRequiredFields(
+  documentId: string,
+): Promise<FormFieldView[]> {
+  return invoke<FormFieldView[]>("missing_required_fields", { documentId });
+}
+
+/**
+ * Commits one widget value. The backend records the change in the shared
+ * undo/redo history and returns every field, plus the new history state.
+ */
+export async function fillFormField(
+  documentId: string,
+  fieldId: string,
+  value: FormFieldValueInput,
+): Promise<FormFieldEditResultView> {
+  return invoke<FormFieldEditResultView>("fill_form_field", {
+    documentId,
+    fieldId,
+    value,
+  });
 }
 
 /**

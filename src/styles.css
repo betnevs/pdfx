@@ -650,6 +650,97 @@ button {
   cursor: default;
 }
 
+/* Existing AcroForm widgets sit above the page bitmap but leave empty page
+   space clickable for text selection. Geometry is set inline as percentages
+   from PDF display-space points. */
+.form-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.form-field {
+  position: absolute;
+  box-sizing: border-box;
+  margin: 0;
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+.form-field--text,
+.form-field--multiline,
+.form-field--combo,
+.form-field--list {
+  padding: 0 2px;
+  border: 1px solid var(--pdfx-blue-ui);
+  border-radius: 2px;
+  background: var(--pdfx-page-control-bg);
+  color: var(--pdfx-page-ink);
+  font-family: Helvetica, Arial, sans-serif;
+  line-height: 1.15;
+  cursor: text;
+}
+
+.form-field--combo,
+.form-field--list {
+  cursor: pointer;
+}
+
+.form-field--multiline {
+  resize: none;
+}
+
+.form-field--checkbox,
+.form-field--radio {
+  accent-color: var(--pdfx-blue-ui);
+}
+
+.form-field:focus-visible {
+  outline: 2px solid var(--pdfx-blue-ui);
+  outline-offset: 1px;
+}
+
+.form-field--required-missing {
+  border-color: var(--pdfx-page-danger-text);
+  color: var(--pdfx-page-danger-text);
+}
+
+.form-field--checkbox.form-field--required-missing,
+.form-field--radio.form-field--required-missing {
+  outline: 2px solid var(--pdfx-page-danger-text);
+  outline-offset: 1px;
+}
+
+.form-field:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
+.form-field--read-only {
+  border-style: dashed;
+  color: var(--pdfx-page-control-border);
+}
+
+.form-layer-notice {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  z-index: 3;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--pdfx-pill-bg-soft);
+  color: var(--pdfx-pill-text);
+  font-size: 12px;
+  line-height: 1.4;
+  pointer-events: auto;
+}
+
+.form-layer-notice--error {
+  background: var(--pdfx-danger-strong);
+}
+
 .text-layer-message {
   padding: 6px 12px;
   border-radius: 999px;
