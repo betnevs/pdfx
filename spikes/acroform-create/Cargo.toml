@@ -1,0 +1,13 @@
+[package]
+name = "pdfx-acroform-create-spike"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "PDFX technical spike: create AcroForm fields with lopdf"
+
+[dependencies]
+anyhow = "1"
+lopdf = "0.46"
+
+[dev-dependencies]
+pdfium-render = { version = "=0.9.4", default-features = false, features = ["pdfium_7881", "thread_safe"] }
