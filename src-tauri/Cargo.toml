@@ -15,8 +15,16 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+anyhow = "1"
+base64 = "0.22"
+# pdfium-render defaults pull in the `image` crate for PdfBitmap::as_image, which
+# PDFX does not use; only the bindings and the thread-safe wrapper are needed.
+pdfium-render = { version = "=0.9.4", default-features = false, features = ["pdfium_7881", "thread_safe"] }
+percent-encoding = "2"
+png = "0.18"
 
 [features]
 default = []

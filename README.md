@@ -2,7 +2,7 @@
 
 本地运行、跨 macOS 与 Windows 的 PDF 编辑器。界面参照 iLovePDF 编辑页的信息架构与交互密度，但文件始终留在本机，无账户、无云端处理、无遥测。
 
-当前仓库已包含 **票 01：仓库脚手架**（可启动的 Tauri 2 桌面壳、原生标题栏与菜单、唯一的 Tauri 命令 seam、固定 fixture 语料）与 **票 02：M0 浏览器原型**（React + TypeScript 的 PDFX 工作区布局，独立于生产壳运行）。生产桌面壳仍是空白工作区；原型不接入 PDF 引擎，页面内容为占位 React 标记。PDF 引擎（PDFium/lopdf）尚未接入。
+当前仓库已包含 **票 01：仓库脚手架**、**票 02：M0 浏览器原型**、**票 03：PDF 引擎技术验证**（结论见 [`docs/spikes/pdf-engine.md`](docs/spikes/pdf-engine.md)）与 **票 04：打开文档并渲染第一页**。生产桌面壳可通过文件对话框或拖放打开本地 PDF，在独立窗口中用 PDFium 渲染第 1 页；编辑、保存与翻页尚未实现。
 
 ## 技术栈
 
@@ -24,11 +24,14 @@
 
 ```bash
 npm install
+npm run setup:native   # 一次性：下载、校验并解压 PDFium 原生库
 npm run tauri dev      # 启动 Vite 与 Tauri 开发窗口
 npm run prototype      # 在浏览器中打开 M0 原型（/prototype.html）
 ```
 
-M0 原型只运行在浏览器中：入口为 `prototype.html`，不加载 Tauri IPC，也不调用任何 PDF 引擎。生产壳入口 `src/App.tsx` 保持不变。
+`npm run setup:native` 从 bblanchon/pdfium-binaries 的 `chromium/7881` 发布页下载与 `pdfium-render =0.9.4` 匹配的 PDFium 151.0.7881.0（macOS universal、Linux x64、Windows x64），校验 SHA-256 后解压到 `src-tauri/vendor/pdfium/`。该目录已被 git 忽略，仓库不提交原生二进制。若把库放在别处，设置 `PDFIUM_DYNAMIC_LIB_PATH` 指向库文件。缺少原生库时应用仍可启动，但打开文档会返回带安装指引的结构化错误；`cargo test` 也要求先执行该脚本。
+
+M0 原型只运行在浏览器中：入口为 `prototype.html`，不加载 Tauri IPC，也不调用任何 PDF 引擎。生产壳入口 `src/App.tsx` 已接入 PDFium，但在普通浏览器中只显示空工作区。
 
 生产构建（不打包安装器，便于本机冒烟）：
 
@@ -44,12 +47,13 @@ npx tauri build --no-bundle
 | 命令 | 说明 |
 | --- | --- |
 | `npm run typecheck` | TypeScript 严格模式类型检查 |
-| `npm test` | Vitest 单元/组件测试（mock `@tauri-apps/api/core`；含原型交互与中文文案守卫） |
+| `npm test` | Vitest 单元/组件测试（mock Tauri IPC、事件、窗口、拖放与文件对话框边界；含原型交互与中文文案守卫） |
 | `npm run test:e2e` | Playwright 原型布局冒烟（1440×900 与 1280×720），首次需 `npx playwright install chromium` |
 | `npm run build` | 类型检查 + Vite 生产构建 |
+| `npm run setup:native` | 下载并校验固定版本 PDFium 原生库到 `src-tauri/vendor/`（不提交） |
 | `npm run prototype` | 启动开发服务器并在浏览器打开 `/prototype.html` |
 | `cd src-tauri && cargo check` | Rust 编译检查 |
-| `cd src-tauri && cargo test` | 命令层与 fixture 加载器测试 |
+| `cd src-tauri && cargo test` | 命令层、打开/渲染与 fixture 加载器测试（需先 `npm run setup:native`） |
 | `python3 fixtures/generate.py --check` | 校验已提交语料与生成器一致 |
 | `swift fixtures/verify.swift` | 用 macOS PDFKit 独立验证每个 fixture |
 
@@ -58,14 +62,17 @@ npx tauri build --no-bundle
 ```
 prototype.html        M0 原型入口（浏览器，不含 Tauri IPC）
 e2e/                  Playwright 原型布局冒烟
+scripts/              原生依赖准备脚本（setup-native.sh）
 src/                  React 前端
   lib/backend.ts      Tauri 命令绑定的唯一前端入口
-  App.tsx             生产空工作区壳
+  App.tsx             生产工作区：打开文档、渲染第 1 页、错误与缩放
   prototype/          M0 原型（PrototypeApp、文案、占位文档、样式）
 src-tauri/            Tauri / Rust
-  src/commands.rs     Tauri 命令边界（当前仅 app_info）
+  src/commands.rs     Tauri 命令边界（app_info、open_document、render_page 等）
+  src/engine.rs       PDFium 动态库绑定与字节加载
   src/menu.rs         原生菜单（文件/编辑/视图/帮助）
-  tests/              命令层与 fixture 加载器集成测试
+  tests/              命令层、打开/渲染与 fixture 加载器集成测试
+  vendor/             本地 PDFium 原生库（git-ignored）
 fixtures/             固定 PDF 语料与生成/验证脚本
 docs/adr/             架构决策记录
 playwright.config.ts  原型 e2e 配置（两个桌面视口）
@@ -75,9 +82,9 @@ playwright.config.ts  原型 e2e 配置（两个桌面视口）
 
 唯一主 seam 是 **Tauri 命令边界**：
 
-- Rust 侧命令函数（当前 `app_info`）由 `cargo test` 直接调用，断言跨 IPC 序列化后的结果。
-- 前端只通过 `src/lib/backend.ts` 调用 `invoke`；组件测试 mock 系统边界 `@tauri-apps/api/core`，不 mock 自己的模块。
-- 测试不接触 PDFium/lopdf 内部类型；后续引擎测试同样通过命令边界驱动。
+- Rust 侧命令函数（`app_info`、`open_document`、`render_page`、`extract_text`、`close_document`）由 `cargo test` 直接调用，断言跨 IPC 序列化后的结果；打开/渲染测试覆盖文本、扫描、加密、截断、坏 xref、旋转与 500 页语料。
+- 前端只通过 `src/lib/backend.ts` 调用 `invoke`；组件测试 mock Tauri 系统边界（`@tauri-apps/api/core`、`event`、`window`、`webview` 与 `@tauri-apps/plugin-dialog`），不 mock 自己的模块。
+- 测试不接触 PDFium 内部类型；引擎测试同样通过命令边界驱动。
 
 新增命令时：在 `src-tauri/src/commands.rs` 注册，在 `src/lib/backend.ts` 增加对应调用，测试分别驱动命令函数与 mock 后的 IPC。
 
@@ -94,13 +101,16 @@ M0 原型还有两个独立 seam：
 
 ## 依赖许可
 
-仅使用宽松许可依赖：Tauri、React、Vite、Vitest、Testing Library 为 MIT / Apache-2.0，TypeScript 为 Apache-2.0。仓库不含付费服务、遥测或代码签名配置。
+仅使用宽松许可依赖：Tauri、React、Vite、Vitest、Testing Library、`pdfium-render` 为 MIT / Apache-2.0，TypeScript 为 Apache-2.0。PDFium 原生库为 BSD-3-Clause（含第三方许可，见解压后的 `src-tauri/vendor/pdfium/LICENSE`），由 setup 脚本按固定 SHA-256 获取，不随仓库分发。仓库不含付费服务、遥测或代码签名配置。
 
 ## 当前限制
 
-- PDF 引擎（PDFium + lopdf，ADR-0010）尚未接入；由票 03 负责。
-- M0 原型（票 02）只验证布局、交互与文案；不打开真实 PDF，页面内容为 React 占位标记，`插入`、`表单` 等后续能力显示为占位状态。
-- 生产桌面壳仍是空工作区；原型入口与生产入口相互独立。
+- 只渲染第 1 页；翻页、连续滚动与页面导航属于后续票据。
+- 编辑与保存尚未实现；脏状态与关闭保护只有脚手架，当前始终按“未修改”处理。
+- 加密 PDF 在命令层返回 `password_required` / `invalid_password`，界面尚未提供密码输入框。
+- 每个文档窗口独立打开一个文档；尚无窗口间会话恢复或最近文件列表。
+- 原生 PDFium 库需要本地运行 `npm run setup:native`；仓库不提交二进制。
+- M0 原型（票 02）只验证布局、交互与文案；不打开真实 PDF，`插入`、`表单` 等后续能力显示为占位状态。
 - fixture 中的“大文件”是 500 页的提交版本；可用 `--large-pages 2000` 生成完整压力样例。
 - 中文/Embedded Font/Font Subset fixture 待字体管线票补充（见 `fixtures/README.md`）。
 - 生产构建目前未打包、未签名；GUI 启动冒烟需在图形会话中执行。
