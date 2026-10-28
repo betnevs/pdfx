@@ -3038,6 +3038,10 @@ describe("recovery and recent files", () => {
       name: "恢复未保存的文档？",
     });
     expect(within(dialog).getByText("report.pdf")).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "稍后处理" })).toHaveFocus();
+    // The unanswered recovery question is modal: document/new-file actions in
+    // the native menu stay unavailable until it is answered.
+    await waitFor(() => expect(lastMenuState().get("file.open")).toBe(false));
     expect(commandCalls("open_document")).toHaveLength(0);
 
     await user.click(
@@ -3058,6 +3062,64 @@ describe("recovery and recent files", () => {
     await waitFor(() =>
       expect(setTitle).toHaveBeenLastCalledWith("report.pdf（未保存） — PDFX"),
     );
+  });
+
+  it("discloses that an encrypted source's recovery copy is unencrypted", async () => {
+    installDocumentBackend({
+      recovery_candidates: () => [
+        { ...recoveryCandidate, sourceEncrypted: true },
+      ],
+    });
+
+    render(<App />);
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "恢复未保存的文档？",
+    });
+    expect(within(dialog).getByText(/恢复副本未加密/)).toBeInTheDocument();
+  });
+
+  it("ignores a dropped file while the recovery question is open", async () => {
+    installDocumentBackend({
+      recovery_candidates: () => [recoveryCandidate],
+    });
+
+    render(<App />);
+
+    await screen.findByRole("dialog", { name: "恢复未保存的文档？" });
+    await waitFor(() => expect(dragDropHandler).toBeDefined());
+
+    act(() => {
+      dragDropHandler?.({
+        payload: {
+          type: "drop",
+          paths: ["/tmp/dropped.pdf"],
+          position: { x: 0, y: 0 },
+        },
+      });
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(commandCalls("open_document")).toHaveLength(0);
+    expect(
+      screen.getByRole("dialog", { name: "恢复未保存的文档？" }),
+    ).toBeInTheDocument();
+  });
+
+  it("skips the start-up recovery scan in a window opened for one document", async () => {
+    installDocumentBackend({
+      recovery_candidates: () => [recoveryCandidate],
+      list_recent_files: () => recentFiles,
+    });
+    window.history.replaceState({}, "", "/?open=%2Ftmp%2Freport.pdf");
+
+    render(<App />);
+
+    expect(await screen.findByText("report.pdf")).toBeInTheDocument();
+    expect(commandCalls("recovery_candidates")).toHaveLength(0);
+    expect(
+      screen.queryByRole("dialog", { name: "恢复未保存的文档？" }),
+    ).not.toBeInTheDocument();
   });
 
   it("discards a recovery file and keeps the empty workspace", async () => {

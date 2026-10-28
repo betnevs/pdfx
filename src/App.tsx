@@ -253,6 +253,10 @@ export function App() {
     editor.status === "empty" &&
     recovery.open &&
     recovery.candidates.length > 0;
+  // The drop subscription is created once; read the modal state through a ref
+  // so a dropped file cannot answer the recovery question by accident.
+  const recoveryPromptOpenRef = useRef(recoveryPromptOpen);
+  recoveryPromptOpenRef.current = recoveryPromptOpen;
 
   // A focused text control owns Cmd/Ctrl+Z, PageUp/PageDown and Home/End. The
   // menu state below disables those items, which also releases their native
@@ -764,7 +768,7 @@ export function App() {
       subscribe(
         onFileDrop((paths) => {
           const pdf = paths.find((path) => path.toLowerCase().endsWith(".pdf"));
-          if (pdf && !closePromptRef.current) {
+          if (pdf && !closePromptRef.current && !recoveryPromptOpenRef.current) {
             void openPath(pdf);
           }
         }),
