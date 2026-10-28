@@ -9,6 +9,8 @@ import { createPortal, flushSync } from "react-dom";
 
 import {
   choosePageImageDestination,
+  chooseSaveFile,
+  exportFlattenedCopy,
   exportPage,
   pageInfo,
   printDocument,
@@ -16,6 +18,7 @@ import {
   toCommandError,
   type CommandError,
   type DocumentView,
+  type FlattenExportView,
   type PageImageFormat,
 } from "../lib/backend";
 import { documentPolicy } from "../lib/document-policy";
@@ -30,7 +33,7 @@ interface PrintExportProps {
   pageIndex: number;
 }
 
-type Dialog = "print" | "export";
+type Dialog = "print" | "export" | "flatten";
 type PrintRange = "all" | "current" | "custom";
 type PrintOrientation = "auto" | "portrait" | "landscape";
 type PrintScale = "fit" | "actual";
@@ -68,6 +71,18 @@ const EXPORT_ERROR_MESSAGES: Partial<Record<CommandError["code"], string>> = {
   invalid_argument: "导出参数无效，请检查后重试。",
 };
 
+const FLATTEN_ERROR_MESSAGES: Partial<Record<CommandError["code"], string>> = {
+  permission_denied: "没有写入该位置的权限，请选择其他位置。",
+  file_write_failed: "无法写入文件，请检查目标位置与磁盘空间。",
+  export_target_is_source: "不能覆盖源 PDF 文件，请选择其他位置。",
+  export_target_is_output: "不能覆盖当前输出 PDF 文件，请选择其他位置。",
+  unencrypted_output_confirmation_required:
+    "加密文档需要确认后才能导出未加密的 Flatten 副本。",
+  document_not_found: "文档已关闭，无法导出 Flatten 副本。",
+  invalid_argument: "导出参数无效，请检查后重试。",
+  flatten_export_failed: "无法生成 Flatten 副本，请检查文档后重试。",
+};
+
 const PRINT_ERROR_MESSAGES: Partial<Record<CommandError["code"], string>> = {
   permission_denied: "文档所有者限制了打印权限。",
   print_failed: "无法打开打印对话框。",
@@ -91,6 +106,22 @@ function suggestedFileName(
 ): string {
   const base = documentName.replace(/\.pdf$/i, "") || "document";
   return `${base}-page-${pageNumber}.${format}`;
+}
+
+/** Default name for a flattened copy; it is always a new file. */
+function suggestedFlattenedFileName(documentName: string): string {
+  const base = documentName.replace(/\.pdf$/i, "") || "document";
+  return `${base}-flattened.pdf`;
+}
+
+/** Chinese success summary for a written flattened copy. */
+function flattenNotice(result: FlattenExportView): string {
+  const detail = `flatten ${result.flattened} 个标注，保留 ${result.preserved} 个交互项`;
+  const skipped =
+    result.skipped.length > 0
+      ? `，跳过 ${result.skipped.length} 个无页面外观的标注`
+      : "";
+  return `已导出 Flatten 副本：${result.path}（${detail}${skipped}）`;
 }
 
 function printPageBoxSize(
@@ -179,12 +210,16 @@ async function preparePrintPage(
 }
 
 /**
- * Print and page-export actions for the open Document.
+ * Print, page-export and flattened-copy actions for the open Document.
  *
- * Both are read-only: they render through the same commands as the page
- * viewer and never change the Document or its unsaved state. Export is always
- * available; printing is disabled when the Document's Permission Restrictions
- * deny it.
+ * All three are read-only for the open Document: they never change it or its
+ * unsaved state. Export is always available; printing is disabled when the
+ * Document's Permission Restrictions deny it.
+ *
+ * Flattened-copy export serializes the live state (including unsaved edits)
+ * into a new file whose visual annotations are page content while links and
+ * form widgets stay interactive. An encrypted Source Document requires an
+ * explicit unencrypted-output confirmation first (ADR-0007).
  *
  * Printing renders the selected Pages into a hidden print-only surface (one
  * PNG Blob per Page, a `@page` box in points and a page break between Pages).
@@ -206,6 +241,9 @@ export const PrintExport = forwardRef<PrintExportHandle, PrintExportProps>(
     const [format, setFormat] = useState<PageImageFormat>("png");
     const [dpi, setDpi] = useState<number>(DEFAULT_EXPORT_RESOLUTION);
     const [exporting, setExporting] = useState(false);
+    const [flattening, setFlattening] = useState(false);
+    const [confirmFlattenUnencrypted, setConfirmFlattenUnencrypted] =
+      useState(false);
 
     const [printRange, setPrintRange] = useState<PrintRange>("all");
     const [customFrom, setCustomFrom] = useState("1");
@@ -241,6 +279,8 @@ export const PrintExport = forwardRef<PrintExportHandle, PrintExportProps>(
       setNotice(null);
       setDialogError(null);
       setExporting(false);
+      setFlattening(false);
+      setConfirmFlattenUnencrypted(false);
       setProgress(null);
       setPrintPages(null);
       setPrintSize(null);
@@ -297,6 +337,13 @@ export const PrintExport = forwardRef<PrintExportHandle, PrintExportProps>(
       setNotice(null);
       setDialogError(null);
       setDialog("export");
+    }
+
+    function openFlattenDialog() {
+      setNotice(null);
+      setDialogError(null);
+      setConfirmFlattenUnencrypted(false);
+      setDialog("flatten");
     }
 
     function closeDialog() {
@@ -456,6 +503,37 @@ export const PrintExport = forwardRef<PrintExportHandle, PrintExportProps>(
       }
     }
 
+    async function startFlattenExport() {
+      setFlattening(true);
+      setDialogError(null);
+      try {
+        const destination = await chooseSaveFile(
+          suggestedFlattenedFileName(document.name),
+        );
+        if (!destination) {
+          return;
+        }
+        const result = await exportFlattenedCopy(
+          document.documentId,
+          destination,
+          confirmFlattenUnencrypted,
+        );
+        setNotice(flattenNotice(result));
+        setDialog(null);
+        setConfirmFlattenUnencrypted(false);
+      } catch (error) {
+        setDialogError(
+          describeError(
+            toCommandError(error),
+            FLATTEN_ERROR_MESSAGES,
+            "导出 Flatten 副本失败",
+          ),
+        );
+      } finally {
+        setFlattening(false);
+      }
+    }
+
     useImperativeHandle(ref, () => ({
       openPrintDialog,
       openExportDialog,
@@ -474,6 +552,9 @@ export const PrintExport = forwardRef<PrintExportHandle, PrintExportProps>(
           </button>
           <button type="button" onClick={openExportDialog}>
             导出当前页…
+          </button>
+          <button type="button" onClick={openFlattenDialog}>
+            导出 Flatten 副本…
           </button>
           {policy.printDisabledReason ? (
             <span className="print-disabled-reason">
@@ -717,6 +798,76 @@ export const PrintExport = forwardRef<PrintExportHandle, PrintExportProps>(
                   onClick={() => void startExport()}
                 >
                   {exporting ? "正在导出…" : "导出…"}
+                </button>
+              </div>
+            </section>
+          </div>
+        ) : null}
+
+        {dialog === "flatten" ? (
+          <div
+            className="print-export-overlay"
+            onMouseDown={(event) => {
+              if (event.target === event.currentTarget && !flattening) {
+                closeDialog();
+              }
+            }}
+          >
+            <section
+              className="print-export-dialog"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="print-export-flatten-title"
+            >
+              <h2 id="print-export-flatten-title">导出 Flatten 副本</h2>
+              <p className="print-export-hint">
+                {document.name} · 共 {document.pageCount} 页
+              </p>
+              <p className="print-export-hint">
+                视觉标注将绘制为页面内容，在任何阅读器中显示一致；链接和表单字段保持可交互。
+                原文档不会被修改，导出总是生成新文件。没有页面外观的标注（如便笺弹窗）将被省略。
+              </p>
+
+              {document.encrypted ? (
+                <div className="print-export-warning">
+                  <p>此文档已加密。Flatten 副本将以未加密方式保存。</p>
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={confirmFlattenUnencrypted}
+                      disabled={flattening}
+                      onChange={(event) =>
+                        setConfirmFlattenUnencrypted(event.target.checked)
+                      }
+                    />
+                    我了解副本将不加密，继续导出
+                  </label>
+                </div>
+              ) : null}
+
+              {dialogError ? (
+                <p className="print-export-error" role="alert">
+                  {dialogError}
+                </p>
+              ) : null}
+
+              <div className="print-export-dialog-actions">
+                <button
+                  type="button"
+                  disabled={flattening}
+                  onClick={closeDialog}
+                >
+                  取消
+                </button>
+                <button
+                  type="button"
+                  disabled={
+                    flattening ||
+                    (document.encrypted && !confirmFlattenUnencrypted)
+                  }
+                  onClick={() => void startFlattenExport()}
+                >
+                  {flattening ? "正在导出…" : "导出…"}
                 </button>
               </div>
             </section>

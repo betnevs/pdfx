@@ -189,25 +189,9 @@ pub fn save_document_with_progress(
 
         emit(document_id, SaveStage::Preparing, 0, progress);
         emit(document_id, SaveStage::Serializing, 1, progress);
-        let output_bytes = serialize_output(entry, encrypted)?;
+        let output_bytes = serialize_live_document(entry)?;
 
         emit(document_id, SaveStage::Finalizing, 2, progress);
-        // Form values that live in the edit history (radio groups, choice
-        // fields) are re-derived on every save, so undo/redo is reflected in
-        // the output without a second copy of form state.
-        let mut object_edits = entry.save.object_edits.clone();
-        object_edits.extend(crate::form::save_object_edits(&entry.edit));
-        // Created form fields are re-derived from the session on every save,
-        // so repeated saves cannot duplicate them and undo/redo is reflected
-        // in the output.
-        object_edits.extend(crate::form_create::save_object_edits(&entry.edit));
-        let output_bytes = append_object_edits(output_bytes, &object_edits)?;
-        // Free text alignment lives in a private string key because PDFium
-        // cannot write an integer annotation entry. Translate it into `/Q`
-        // (and `/IT`) in one appended revision; undo/redo and repeat saves
-        // therefore always reflect the current annotation state.
-        let output_bytes = apply_annotation_dictionary_edits(output_bytes)?;
-
         emit(document_id, SaveStage::Writing, 3, progress);
         let written = write_output_atomically(&target, &output_bytes)?;
 
@@ -305,6 +289,37 @@ fn ensure_target_is_not_source(source: &Path, target: &Path) -> Result<(), Comma
     } else {
         Ok(())
     }
+}
+
+/// Serializes the live document state — including unsaved edits — into one
+/// complete, unencrypted PDF in memory.
+///
+/// This is the shared seam for writing an Output Document and for flattened-
+/// copy export: both must start from exactly the bytes Save Changes would
+/// write, without touching the PDFium handle, its undo history or the save
+/// baseline. Object-level edits are re-derived from the edit history on every
+/// call, so repeat calls are idempotent.
+pub(crate) fn serialize_live_document(
+    entry: &crate::commands::OpenDocument,
+) -> Result<Vec<u8>, CommandError> {
+    let (encrypted, _, _) = crate::commands::document_permissions(&entry.document);
+    let output_bytes = serialize_output(entry, encrypted)?;
+
+    // Form values that live in the edit history (radio groups, choice fields)
+    // are re-derived on every save, so undo/redo is reflected in the output
+    // without a second copy of form state.
+    let mut object_edits = entry.save.object_edits.clone();
+    object_edits.extend(crate::form::save_object_edits(&entry.edit));
+    // Created form fields are re-derived from the session on every save, so
+    // repeated saves cannot duplicate them and undo/redo is reflected in the
+    // output.
+    object_edits.extend(crate::form_create::save_object_edits(&entry.edit));
+    let output_bytes = append_object_edits(output_bytes, &object_edits)?;
+    // Free text alignment lives in a private string key because PDFium cannot
+    // write an integer annotation entry. Translate it into `/Q` (and `/IT`) in
+    // one appended revision; undo/redo and repeat saves therefore always
+    // reflect the current annotation state.
+    apply_annotation_dictionary_edits(output_bytes)
 }
 
 /// Serializes the live document.

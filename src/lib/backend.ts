@@ -34,6 +34,7 @@ export type CommandErrorCode =
   | "file_write_failed"
   | "export_target_is_source"
   | "export_target_is_output"
+  | "flatten_export_failed"
   | "print_failed"
   | "window_failed"
   | "save_failed"
@@ -917,6 +918,7 @@ const COMMAND_ERROR_CODES: ReadonlySet<string> = new Set<CommandErrorCode>([
   "file_write_failed",
   "export_target_is_source",
   "export_target_is_output",
+  "flatten_export_failed",
   "print_failed",
   "window_failed",
   "save_failed",
@@ -1022,6 +1024,53 @@ export async function choosePageImageDestination(
     ],
   });
   return typeof selection === "string" ? selection : null;
+}
+
+/** Why an annotation was omitted from a flattened copy. */
+export type FlattenSkipReason =
+  | "popup"
+  | "no_appearance"
+  | "unsupported_appearance"
+  | "hidden";
+
+/** One annotation removed from a flattened copy without being drawn. */
+export interface FlattenSkipView {
+  pageIndex: number;
+  /** The annotation's `/Subtype`, without the slash. */
+  subtype: string;
+  reason: FlattenSkipReason;
+}
+
+/** Confirmation metadata for a written flattened copy. */
+export interface FlattenExportView {
+  documentId: string;
+  path: string;
+  bytes: number;
+  /** Visual annotations drawn into page content. */
+  flattened: number;
+  /** Links and form widgets left interactive in the copy. */
+  preserved: number;
+  skipped: FlattenSkipView[];
+}
+
+/**
+ * Writes a new PDF whose visual annotations are page content while links,
+ * form fields and signature widgets stay interactive. The live Document, its
+ * unsaved state and the Source Document are never modified.
+ *
+ * An encrypted Source Document produces an unencrypted copy only when
+ * `confirmUnencryptedOutput` is true (ADR-0007).
+ */
+export async function exportFlattenedCopy(
+  documentId: string,
+  destination: string,
+  confirmUnencryptedOutput = false,
+): Promise<FlattenExportView> {
+  return invoke<FlattenExportView>("export_flattened_copy", {
+    documentId,
+    destination,
+    confirmUnencryptedOutput,
+  });
 }
 
 /** Opens a PDF in this window's backend registry and returns its view. */

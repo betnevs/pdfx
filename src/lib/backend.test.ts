@@ -15,6 +15,7 @@ import {
   deleteFormField,
   deleteFormTextField,
   destroyWindow,
+  exportFlattenedCopy,
   exportPage,
   extractTextLayer,
   fillFormField,
@@ -450,6 +451,12 @@ describe("backend command seam", () => {
     }
   });
 
+  it("recognizes the flattened-copy export error code", () => {
+    expect(
+      toCommandError({ code: "flatten_export_failed", message: "detail" }),
+    ).toEqual({ code: "flatten_export_failed", message: "detail" });
+  });
+
   it("recognizes the form error codes", () => {
     for (const code of [
       "form_field_not_found",
@@ -725,6 +732,47 @@ describe("backend command seam", () => {
       documentId: "doc-1",
       fieldId: "new:3",
       request: signatureRequest,
+    });
+  });
+
+  it("sends a flattened-copy export under the export_flattened_copy command", async () => {
+    const result = {
+      documentId: "doc-1",
+      path: "/tmp/report-flattened.pdf",
+      bytes: 4096,
+      flattened: 3,
+      preserved: 2,
+      skipped: [
+        { pageIndex: 0, subtype: "Square", reason: "no_appearance" },
+      ],
+    };
+    invokeMock.mockResolvedValue(result);
+
+    await expect(
+      exportFlattenedCopy("doc-1", "/tmp/report-flattened.pdf", true),
+    ).resolves.toEqual(result);
+    expect(invokeMock).toHaveBeenCalledWith("export_flattened_copy", {
+      documentId: "doc-1",
+      destination: "/tmp/report-flattened.pdf",
+      confirmUnencryptedOutput: true,
+    });
+  });
+
+  it("defaults the flattened-copy unencrypted confirmation to false", async () => {
+    invokeMock.mockResolvedValue({
+      documentId: "doc-1",
+      path: "/tmp/report-flattened.pdf",
+      bytes: 0,
+      flattened: 0,
+      preserved: 0,
+      skipped: [],
+    });
+
+    await exportFlattenedCopy("doc-1", "/tmp/report-flattened.pdf");
+    expect(invokeMock).toHaveBeenCalledWith("export_flattened_copy", {
+      documentId: "doc-1",
+      destination: "/tmp/report-flattened.pdf",
+      confirmUnencryptedOutput: false,
     });
   });
 
