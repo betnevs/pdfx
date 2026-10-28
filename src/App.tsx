@@ -440,6 +440,7 @@ export function App() {
                     info={viewer.info}
                     scale={viewer.scale}
                     render={viewer.render}
+                    readOnly={open.document.readOnly}
                     surfaceRef={viewer.surfaceRef}
                   />
                 </div>

@@ -9,11 +9,20 @@ import {
 } from "react";
 
 import {
+  applyTextEdit,
+  deleteTextBox,
+  editHistory,
   extractTextLayer,
+  redoTextEdit,
+  textEditTarget,
   toCommandError,
+  undoTextEdit,
   type CommandError,
+  type EditHistoryView,
+  type TextBoxTargetView,
   type TextLayerView,
 } from "../lib/backend";
+import { notifyDocumentChanged, onDocumentChanged } from "../lib/documentEvents";
 import {
   buildTextLayer,
   findCharAt,
@@ -33,36 +42,163 @@ type LayerState =
   | { status: "ready"; layer: TextLayerView }
   | { status: "error"; error: CommandError };
 
+type EditorState =
+  | { status: "loading" }
+  | {
+      status: "editing";
+      target: TextBoxTargetView;
+      draft: string;
+      busy: boolean;
+      error: string | null;
+    };
+
+type Notice = { kind: "info" | "error"; text: string };
+
+const READ_ONLY_REASON = "此文档不允许编辑内容";
+const SCANNED_REASON = "此页没有可编辑文字";
+
 export interface PageTextLayerProps {
   documentId: string;
   pageIndex: number;
+  /** Permission Restrictions forbid changing document content. */
+  readOnly?: boolean;
+  /** Page render scale, used to size the inline editor text. */
+  scale?: number;
+}
+
+function TextEditToolbar({
+  canEdit,
+  editMode,
+  readOnly,
+  busy,
+  history,
+  notice,
+  onToggleEdit,
+  onUndo,
+  onRedo,
+}: {
+  canEdit: boolean;
+  editMode: boolean;
+  readOnly: boolean;
+  busy: boolean;
+  history: EditHistoryView | null;
+  notice: Notice | null;
+  onToggleEdit: () => void;
+  onUndo: () => void;
+  onRedo: () => void;
+}) {
+  return (
+    <div
+      className="text-edit-toolbar"
+      onPointerDown={(event) => event.stopPropagation()}
+    >
+      <button
+        type="button"
+        className="text-edit-toggle"
+        aria-pressed={editMode}
+        disabled={!canEdit || readOnly || busy}
+        title={
+          readOnly
+            ? READ_ONLY_REASON
+            : !canEdit
+              ? SCANNED_REASON
+              : editMode
+                ? "退出文字编辑"
+                : "点击页面上的文字开始编辑"
+        }
+        onClick={onToggleEdit}
+      >
+        编辑文字
+      </button>
+      <span className="toolbar-divider" aria-hidden="true" />
+      <button
+        type="button"
+        disabled={!history?.canUndo || busy}
+        title={history?.canUndo ? "撤销上一步文字编辑" : "没有可撤销的操作"}
+        onClick={onUndo}
+      >
+        撤销
+      </button>
+      <button
+        type="button"
+        disabled={!history?.canRedo || busy}
+        title={history?.canRedo ? "重做上一步文字编辑" : "没有可重做的操作"}
+        onClick={onRedo}
+      >
+        重做
+      </button>
+      {readOnly && <span className="text-edit-reason">{READ_ONLY_REASON}</span>}
+      {notice && (
+        <span
+          className={`text-edit-notice text-edit-notice--${notice.kind}`}
+          role={notice.kind === "error" ? "alert" : "status"}
+        >
+          {notice.text}
+        </span>
+      )}
+    </div>
+  );
 }
 
 /**
  * Transparent interaction layer over the rendered page image.
  *
  * Geometry from the backend is in display-space page points, so highlight
- * rectangles are positioned as percentages of the page box. That keeps the
- * layer aligned at every zoom level without re-fetching text when zoom
- * changes, and the page rotation/CropBox are already applied by the backend.
+ * rectangles and the Text Box editor are positioned as percentages of the
+ * page box. That keeps the layer aligned at every zoom level without
+ * re-fetching text when zoom changes, and the page rotation/CropBox are
+ * already applied by the backend.
+ *
+ * In selection mode clicks select and copy text. In edit mode a click resolves
+ * the original Text Object through `text_edit_target` and opens an inline Text
+ * Box editor prefilled with the original content, font, size and colour.
  */
-export function PageTextLayer({ documentId, pageIndex }: PageTextLayerProps) {
+export function PageTextLayer({
+  documentId,
+  pageIndex,
+  readOnly = false,
+  scale = 1,
+}: PageTextLayerProps) {
   const [state, setState] = useState<LayerState>({ status: "loading" });
   const [selection, setSelection] = useState<TextRange | null>(null);
   const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "failed">("idle");
+  const [editMode, setEditMode] = useState(false);
+  const [editor, setEditor] = useState<EditorState | null>(null);
+  const [history, setHistory] = useState<EditHistoryView | null>(null);
+  const [notice, setNotice] = useState<Notice | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
   const surfaceRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const dragAnchor = useRef<number | null>(null);
+  const targetRequest = useRef(0);
+  const loadedPageKey = useRef<string | null>(null);
 
+  // Re-fetch the layer when this page's content changes (edit, delete, undo,
+  // redo). The existing layer stays visible during the refresh so the overlay
+  // does not blink; only a document/page change shows the loading state.
   useEffect(() => {
     let cancelled = false;
-    setState({ status: "loading" });
-    setSelection(null);
-    setCopyStatus("idle");
+    const pageKey = `${documentId}:${pageIndex}`;
+    const samePage = loadedPageKey.current === pageKey;
+    loadedPageKey.current = pageKey;
+
+    if (!samePage) {
+      setState({ status: "loading" });
+      setSelection(null);
+      setCopyStatus("idle");
+      setEditor(null);
+      setEditMode(false);
+      setNotice(null);
+    }
 
     extractTextLayer(documentId, pageIndex)
       .then((layer) => {
         if (!cancelled) {
           setState({ status: "ready", layer });
+          if (samePage) {
+            // Character ranges from the previous content are no longer valid.
+            setSelection(null);
+          }
         }
       })
       .catch((error: unknown) => {
@@ -74,7 +210,53 @@ export function PageTextLayer({ documentId, pageIndex }: PageTextLayerProps) {
     return () => {
       cancelled = true;
     };
-  }, [documentId, pageIndex]);
+  }, [documentId, pageIndex, reloadKey]);
+
+  useEffect(() => {
+    let cancelled = false;
+    editHistory(documentId)
+      .then((next) => {
+        if (!cancelled) {
+          setHistory(next);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setHistory(null);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [documentId]);
+
+  useEffect(
+    () =>
+      onDocumentChanged((detail) => {
+        if (detail.documentId === documentId && detail.pageIndex === pageIndex) {
+          setReloadKey((key) => key + 1);
+        }
+      }),
+    [documentId, pageIndex],
+  );
+
+  useEffect(
+    () => () => {
+      targetRequest.current += 1;
+    },
+    [],
+  );
+
+  // Grow the editor with wrapped input so the user sees the same line breaks
+  // the committed Text Box will use.
+  useEffect(() => {
+    const textarea = textareaRef.current;
+    if (!textarea) {
+      return;
+    }
+    textarea.style.height = "auto";
+    textarea.style.height = `${textarea.scrollHeight}px`;
+  }, [editor]);
 
   const layer = state.status === "ready" ? state.layer : null;
   const structure = useMemo(() => (layer ? buildTextLayer(layer.chars) : null), [layer]);
@@ -91,16 +273,168 @@ export function PageTextLayer({ documentId, pageIndex }: PageTextLayerProps) {
     );
   }
 
+  const editingBusy = editor?.status === "editing" && editor.busy;
+  const toolbarFor = (canEdit: boolean) => (
+    <TextEditToolbar
+      canEdit={canEdit}
+      editMode={editMode}
+      readOnly={readOnly}
+      busy={editingBusy}
+      history={history}
+      notice={notice}
+      onToggleEdit={toggleEditMode}
+      onUndo={() => void runHistory("undo")}
+      onRedo={() => void runHistory("redo")}
+    />
+  );
+
   if (!layer || !structure || !layer.hasText) {
     return (
-      <div className="page-text-layer page-text-layer--message" role="status">
-        <span className="text-layer-message">此页没有可编辑文字</span>
+      <div className="page-text-layer page-text-layer--message">
+        <span className="text-layer-message" role="status">
+          {SCANNED_REASON}
+        </span>
+        <div className="text-edit-toolbar-holder">{toolbarFor(false)}</div>
       </div>
     );
   }
 
   const textLayer: TextLayerView = layer;
   const textStructure: TextLayerStructure = structure;
+
+  function cancelEditor() {
+    targetRequest.current += 1;
+    setEditor(null);
+  }
+
+  function toggleEditMode() {
+    if (readOnly) {
+      return;
+    }
+    if (editMode) {
+      setEditMode(false);
+      cancelEditor();
+      return;
+    }
+    setEditMode(true);
+    setSelection(null);
+    setCopyStatus("idle");
+    setNotice(null);
+  }
+
+  async function openEditor(charIndex: number) {
+    if (readOnly) {
+      return;
+    }
+    const requestId = targetRequest.current + 1;
+    targetRequest.current = requestId;
+    setEditor({ status: "loading" });
+    setNotice(null);
+    try {
+      const target = await textEditTarget(documentId, pageIndex, charIndex);
+      if (targetRequest.current === requestId) {
+        setEditor({
+          status: "editing",
+          target,
+          draft: target.text,
+          busy: false,
+          error: null,
+        });
+      }
+    } catch (error) {
+      if (targetRequest.current === requestId) {
+        setEditor(null);
+        setNotice({ kind: "error", text: toCommandError(error).message });
+      }
+    }
+  }
+
+  async function commitEditor() {
+    if (!editor || editor.status !== "editing" || editor.busy) {
+      return;
+    }
+    const current = editor;
+    if (!current.draft.trim()) {
+      setEditor({
+        ...current,
+        error: "文字不能为空；如需移除文字，请使用删除。",
+      });
+      return;
+    }
+    setEditor({ ...current, busy: true, error: null });
+    try {
+      const result = await applyTextEdit(
+        documentId,
+        pageIndex,
+        current.target.boxId,
+        current.draft,
+      );
+      setHistory(result.history);
+      setEditor(null);
+      setNotice(
+        result.font?.fallback
+          ? {
+              kind: "info",
+              text: `${result.font.originalFamily} 无法用于新文字，已改用 ${result.font.family}${result.font.reason ? `：${result.font.reason}` : ""}`,
+            }
+          : null,
+      );
+      notifyDocumentChanged({ documentId, pageIndex });
+    } catch (error) {
+      setEditor({
+        ...current,
+        busy: false,
+        error: toCommandError(error).message,
+      });
+    }
+  }
+
+  async function removeEditor() {
+    if (!editor || editor.status !== "editing" || editor.busy) {
+      return;
+    }
+    const current = editor;
+    setEditor({ ...current, busy: true, error: null });
+    try {
+      const result = await deleteTextBox(
+        documentId,
+        pageIndex,
+        current.target.boxId,
+      );
+      setHistory(result.history);
+      setEditor(null);
+      setNotice(null);
+      notifyDocumentChanged({ documentId, pageIndex });
+    } catch (error) {
+      setEditor({
+        ...current,
+        busy: false,
+        error: toCommandError(error).message,
+      });
+    }
+  }
+
+  async function runHistory(kind: "undo" | "redo") {
+    if (kind === "undo" ? !history?.canUndo : !history?.canRedo) {
+      return;
+    }
+    try {
+      const step =
+        kind === "undo"
+          ? await undoTextEdit(documentId)
+          : await redoTextEdit(documentId);
+      setHistory(step.history);
+      setEditor(null);
+      setSelection(null);
+      setNotice(null);
+      notifyDocumentChanged({
+        documentId,
+        pageIndex: step.pageIndex,
+      });
+    } catch (error) {
+      setNotice({ kind: "error", text: toCommandError(error).message });
+    }
+  }
 
   const pointFromEvent = (event: {
     clientX: number;
@@ -148,6 +482,19 @@ export function PageTextLayer({ documentId, pageIndex }: PageTextLayerProps) {
       return;
     }
 
+    if (editMode) {
+      event.preventDefault();
+      surfaceRef.current?.focus({ preventScroll: true });
+      if (editor) {
+        return;
+      }
+      const index = findCharAt(textLayer, point);
+      if (index !== null) {
+        void openEditor(index);
+      }
+      return;
+    }
+
     event.preventDefault();
     surfaceRef.current?.focus({ preventScroll: true });
     setCopyStatus("idle");
@@ -176,7 +523,7 @@ export function PageTextLayer({ documentId, pageIndex }: PageTextLayerProps) {
   };
 
   const handlePointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (dragAnchor.current === null) {
+    if (editMode || dragAnchor.current === null) {
       return;
     }
     const point = pointFromEvent(event);
@@ -199,6 +546,9 @@ export function PageTextLayer({ documentId, pageIndex }: PageTextLayerProps) {
   };
 
   const handleDoubleClick = (event: ReactMouseEvent<HTMLDivElement>) => {
+    if (editMode) {
+      return;
+    }
     const point = pointFromEvent(event);
     if (!point) {
       return;
@@ -208,7 +558,7 @@ export function PageTextLayer({ documentId, pageIndex }: PageTextLayerProps) {
   };
 
   const handleClick = (event: ReactMouseEvent<HTMLDivElement>) => {
-    if (event.detail !== 3) {
+    if (editMode || event.detail !== 3) {
       return;
     }
     const point = pointFromEvent(event);
@@ -242,8 +592,28 @@ export function PageTextLayer({ documentId, pageIndex }: PageTextLayerProps) {
 
   const handleKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
     if (event.key === "Escape") {
+      if (editor) {
+        event.preventDefault();
+        cancelEditor();
+        return;
+      }
       setSelection(null);
       setCopyStatus("idle");
+      return;
+    }
+    if (editor) {
+      // The textarea owns typing keys, including its own undo while composing.
+      return;
+    }
+    const modifier = event.metaKey || event.ctrlKey;
+    if (modifier && event.key.toLowerCase() === "z") {
+      event.preventDefault();
+      void runHistory(event.shiftKey ? "redo" : "undo");
+      return;
+    }
+    if (modifier && event.key.toLowerCase() === "y") {
+      event.preventDefault();
+      void runHistory("redo");
       return;
     }
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "c") {
@@ -260,7 +630,7 @@ export function PageTextLayer({ documentId, pageIndex }: PageTextLayerProps) {
   return (
     <div
       ref={surfaceRef}
-      className="page-text-layer"
+      className={`page-text-layer${editMode ? " page-text-layer--editing" : ""}`}
       role="region"
       aria-label="文本层"
       tabIndex={0}
@@ -272,6 +642,8 @@ export function PageTextLayer({ documentId, pageIndex }: PageTextLayerProps) {
       onClick={handleClick}
       onKeyDown={handleKeyDown}
     >
+      {toolbarFor(true)}
+
       {highlights.map((rect, index) => (
         <div
           key={`${index}:${rect.x}:${rect.y}`}
@@ -286,6 +658,80 @@ export function PageTextLayer({ documentId, pageIndex }: PageTextLayerProps) {
           }}
         />
       ))}
+
+      {editor?.status === "editing" && (
+        <div
+          className="text-box-editor"
+          data-testid="text-box-editor"
+          onPointerDown={(event) => event.stopPropagation()}
+          style={{
+            left: `${(editor.target.x / textLayer.pageWidth) * 100}%`,
+            top: `${(editor.target.y / textLayer.pageHeight) * 100}%`,
+            width: `${(editor.target.width / textLayer.pageWidth) * 100}%`,
+            minHeight: `${Math.max(editor.target.height, editor.target.fontSize * 1.2) * scale}px`,
+          }}
+        >
+          <textarea
+            ref={textareaRef}
+            className="text-box-input"
+            aria-label="文字内容"
+            value={editor.draft}
+            rows={1}
+            autoFocus
+            spellCheck={false}
+            style={{
+              fontFamily: editor.target.fontFamily,
+              fontSize: `${editor.target.fontSize * scale}px`,
+              lineHeight: 1.2,
+              color: editor.target.color,
+            }}
+            onChange={(event) =>
+              setEditor({ ...editor, draft: event.target.value, error: null })
+            }
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                event.preventDefault();
+                event.stopPropagation();
+                cancelEditor();
+              } else if (
+                (event.metaKey || event.ctrlKey) &&
+                event.key === "Enter"
+              ) {
+                event.preventDefault();
+                void commitEditor();
+              }
+            }}
+          />
+          <div className="text-box-actions">
+            <button
+              type="button"
+              disabled={editor.busy}
+              onClick={() => void commitEditor()}
+            >
+              应用
+            </button>
+            <button
+              type="button"
+              disabled={editor.busy}
+              onClick={() => void removeEditor()}
+            >
+              删除
+            </button>
+            <button
+              type="button"
+              disabled={editor.busy}
+              onClick={cancelEditor}
+            >
+              取消
+            </button>
+          </div>
+          {editor.error && (
+            <span role="alert" className="text-box-error">
+              {editor.error}
+            </span>
+          )}
+        </div>
+      )}
 
       {selection && selectedCharacterCount > 0 && (
         <div

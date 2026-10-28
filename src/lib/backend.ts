@@ -25,6 +25,8 @@ export type CommandErrorCode =
   | "page_out_of_range"
   | "invalid_scale"
   | "invalid_argument"
+  | "no_editable_text"
+  | "unsupported_font"
   | "render_failed"
   | "window_failed"
   | "internal";
@@ -138,6 +140,68 @@ export interface TextLayerView {
   chars: TextCharView[];
 }
 
+/**
+ * Initial state of a Text Box when the user clicks existing text.
+ *
+ * Content and style come from the original Text Object; geometry is in
+ * display-space points, the same coordinate system as the text layer.
+ */
+export interface TextBoxTargetView {
+  boxId: number;
+  pageIndex: number;
+  text: string;
+  fontFamily: string;
+  fontSize: number;
+  /** Fill colour as `#rrggbb`. */
+  color: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** The font chosen for a committed edit, when it differs from the original. */
+export interface FontUsageView {
+  originalFamily: string;
+  family: string;
+  fallback: boolean;
+  /** Why the original font could not be kept, when `fallback` is true. */
+  reason: string | null;
+}
+
+/**
+ * Document-wide undo/redo state shared by every edit tool.
+ *
+ * `revision` is the current document state; `savedRevision` is the state last
+ * written to disk. Undoing back to the saved state clears `dirty`. History
+ * survives saving.
+ */
+export interface EditHistoryView {
+  canUndo: boolean;
+  canRedo: boolean;
+  revision: number;
+  savedRevision: number;
+  dirty: boolean;
+}
+
+/** The outcome of committing a text edit or deletion. */
+export interface TextEditResultView {
+  pageIndex: number;
+  boxId: number;
+  /** Text Box content after the edit (empty after a deletion). */
+  text: string;
+  /** Set when the replacement could not keep the original font. */
+  font: FontUsageView | null;
+  history: EditHistoryView;
+}
+
+/** The outcome of an undo or redo step. */
+export interface EditStepView {
+  /** Page whose content changed, so only that page needs refreshing. */
+  pageIndex: number;
+  history: EditHistoryView;
+}
+
 /** Event emitted to the focused window for native menu activation. */
 export const MENU_EVENT = "pdfx://menu";
 
@@ -153,6 +217,8 @@ const COMMAND_ERROR_CODES: ReadonlySet<string> = new Set<CommandErrorCode>([
   "page_out_of_range",
   "invalid_scale",
   "invalid_argument",
+  "no_editable_text",
+  "unsupported_font",
   "render_failed",
   "window_failed",
   "internal",
@@ -265,6 +331,79 @@ export async function extractTextLayer(
   pageIndex: number,
 ): Promise<TextLayerView> {
   return invoke<TextLayerView>("extract_text_layer", { documentId, pageIndex });
+}
+
+/**
+ * Resolves the Text Object under a text-layer character into the initial Text
+ * Box state. `charIndex` is the index in `TextLayerView.chars`.
+ */
+export async function textEditTarget(
+  documentId: string,
+  pageIndex: number,
+  charIndex: number,
+): Promise<TextBoxTargetView> {
+  return invoke<TextBoxTargetView>("text_edit_target", {
+    documentId,
+    pageIndex,
+    charIndex,
+  });
+}
+
+/**
+ * Replaces a Text Box with `text`, wrapping at its width. Resolves with the
+ * document-wide history state after the edit.
+ */
+export async function applyTextEdit(
+  documentId: string,
+  pageIndex: number,
+  boxId: number,
+  text: string,
+): Promise<TextEditResultView> {
+  return invoke<TextEditResultView>("apply_text_edit", {
+    documentId,
+    pageIndex,
+    boxId,
+    text,
+  });
+}
+
+/** Removes a Text Box and its original page objects from the page content. */
+export async function deleteTextBox(
+  documentId: string,
+  pageIndex: number,
+  boxId: number,
+): Promise<TextEditResultView> {
+  return invoke<TextEditResultView>("delete_text_box", {
+    documentId,
+    pageIndex,
+    boxId,
+  });
+}
+
+/** Reads document-wide undo/redo availability. */
+export async function editHistory(documentId: string): Promise<EditHistoryView> {
+  return invoke<EditHistoryView>("edit_history", { documentId });
+}
+
+/** Undoes the most recent edit action and returns the affected page. */
+export async function undoTextEdit(documentId: string): Promise<EditStepView> {
+  return invoke<EditStepView>("undo_text_edit", { documentId });
+}
+
+/** Redoes the most recently undone edit action. */
+export async function redoTextEdit(documentId: string): Promise<EditStepView> {
+  return invoke<EditStepView>("redo_text_edit", { documentId });
+}
+
+/**
+ * Records that the current in-memory state was written to disk. The save
+ * pipeline must call this after a successful write; it moves the clean
+ * baseline without clearing undo/redo, so history survives Save Changes.
+ */
+export async function markDocumentSaved(
+  documentId: string,
+): Promise<EditHistoryView> {
+  return invoke<EditHistoryView>("mark_document_saved", { documentId });
 }
 
 /** Releases a document from the backend registry. Unknown ids are ignored. */

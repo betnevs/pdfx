@@ -33,6 +33,7 @@ import {
   type Rect,
   type ScrollViewport,
 } from "./pageGeometry";
+import { onDocumentChanged } from "./documentEvents";
 
 /** Extra page pixels rendered around the viewport at high zoom. */
 const REGION_OVERSCAN = 200;
@@ -123,6 +124,8 @@ export function useDocumentViewer(
   const [infos, setInfos] = useState<Record<number, PageInfo>>({});
   const [render, setRender] = useState<PageRender>(EMPTY_RENDER);
   const [fullscreen, setFullscreenState] = useState(false);
+  // Bumped when an edit changes page content; re-renders the same page.
+  const [contentRevision, setContentRevision] = useState(0);
 
   const viewportRef = useRef<HTMLDivElement>(null);
   const surfaceRef = useRef<HTMLDivElement>(null);
@@ -159,6 +162,19 @@ export function useDocumentViewer(
     setInfos({});
     setRender(EMPTY_RENDER);
     setFullscreenState(false);
+  }, [documentId]);
+
+  // Edits, deletions, undo and redo change the page bitmap without changing
+  // page geometry, so only the render effect needs to run again.
+  useEffect(() => {
+    if (!documentId) {
+      return;
+    }
+    return onDocumentChanged((detail) => {
+      if (detail.documentId === documentId) {
+        setContentRevision((value) => value + 1);
+      }
+    });
   }, [documentId]);
 
   // Page size and rotation matter for fitting and for overlays, so metadata
@@ -243,7 +259,7 @@ export function useDocumentViewer(
     return () => {
       cancelled = true;
     };
-  }, [documentId, pageIndex, scale, info]);
+  }, [documentId, pageIndex, scale, info, contentRevision]);
 
   // Fit modes follow viewport and page changes until the user zooms manually.
   useEffect(() => {

@@ -493,6 +493,120 @@ button {
   color: #b9f0c2;
 }
 
+.text-edit-toolbar {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 3;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  max-width: calc(100% - 16px);
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: rgba(31, 36, 48, 0.86);
+  color: #fff;
+  font-size: 12px;
+  line-height: 1.4;
+  user-select: none;
+  pointer-events: auto;
+}
+
+.text-edit-toolbar button {
+  padding: 2px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.45);
+  border-radius: 4px;
+  background: transparent;
+  color: #fff;
+  font: inherit;
+  cursor: pointer;
+}
+
+.text-edit-toolbar button:hover:enabled {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.text-edit-toolbar button[aria-pressed="true"] {
+  background: rgba(255, 255, 255, 0.24);
+}
+
+.text-edit-toolbar button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.text-edit-reason {
+  color: #ffd7a1;
+}
+
+.text-edit-notice--info {
+  color: #b9f0c2;
+}
+
+.text-edit-notice--error {
+  color: #ffb4b4;
+}
+
+.text-edit-toolbar-holder {
+  pointer-events: auto;
+}
+
+.text-box-editor {
+  position: absolute;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 140px;
+  padding: 3px;
+  border: 1px solid #3f6ad8;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.28);
+  cursor: text;
+  user-select: text;
+}
+
+.text-box-input {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 1.5em;
+  margin: 0;
+  padding: 0;
+  border: none;
+  outline: none;
+  overflow: hidden;
+  background: transparent;
+  resize: none;
+  white-space: pre-wrap;
+}
+
+.text-box-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.text-box-actions button {
+  padding: 2px 8px;
+  border: 1px solid rgba(31, 36, 48, 0.35);
+  border-radius: 4px;
+  background: #fff;
+  color: #1f2430;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.text-box-actions button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.text-box-error {
+  color: #a3271f;
+  font-size: 12px;
+}
+
 .status-bar {
   display: flex;
   align-items: center;
