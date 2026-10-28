@@ -716,6 +716,87 @@ fn undo_after_save_marks_the_document_dirty_again() {
     close_document(document.document_id).expect("close source");
 }
 
+/// Counts the cross-reference sections in a file. Each incremental revision
+/// appends exactly one, so a delta proves who wrote how many revisions.
+fn startxref_count(bytes: &[u8]) -> usize {
+    bytes
+        .windows(b"startxref".len())
+        .filter(|window| *window == b"startxref")
+        .count()
+}
+
+#[test]
+fn a_clean_unedited_save_copies_the_source_bytes_verbatim() {
+    let dir = TempDir::new("verbatim");
+    let source = copy_fixture("text", &dir, "source.pdf");
+    let output = dir.path().join("output.pdf");
+
+    let source_bytes = fs::read(&source).expect("read source");
+    let document = open(&source);
+    save(&document.document_id, save_request(Some(&output)));
+    close_document(document.document_id).expect("close source");
+
+    assert_eq!(
+        fs::read(&output).expect("read output"),
+        source_bytes,
+        "an unedited first save is the source bytes, byte for byte"
+    );
+}
+
+#[test]
+fn an_edited_save_appends_exactly_one_pdfium_revision() {
+    let dir = TempDir::new("one-revision");
+    let source = copy_fixture("text", &dir, "source.pdf");
+    let output = dir.path().join("output.pdf");
+
+    let source_bytes = fs::read(&source).expect("read source");
+    let document = open(&source);
+    create_box(&document.document_id, 72.0, 72.0, "One revision");
+    save(&document.document_id, save_request(Some(&output)));
+    close_document(document.document_id).expect("close source");
+
+    let output_bytes = fs::read(&output).expect("read output");
+    assert!(
+        output_bytes.starts_with(&source_bytes),
+        "the source bytes stay untouched and the revision is appended"
+    );
+    assert_eq!(
+        startxref_count(&output_bytes),
+        startxref_count(&source_bytes) + 1,
+        "PDFium appends exactly one incremental revision"
+    );
+}
+
+#[test]
+fn save_changes_without_new_edits_keeps_the_previously_saved_edits() {
+    let dir = TempDir::new("clean-save-changes");
+    let source = copy_fixture("text", &dir, "source.pdf");
+    let output = dir.path().join("output.pdf");
+
+    let document = open(&source);
+    create_box(&document.document_id, 72.0, 72.0, "Saved once");
+    let (first, _) = save(&document.document_id, save_request(Some(&output)));
+    assert!(!first.history.dirty);
+
+    // Save Changes with no new edits must not regress the Output Document to
+    // the Source Document: the edit saved above has to survive.
+    let (second, _) = save(&document.document_id, save_request(None));
+    assert_eq!(second.kind, SaveKind::SaveChanges);
+    assert!(!second.history.dirty);
+    assert!(second.history.can_undo, "history survives a no-op save");
+
+    let reopened = open(&output);
+    let text = extract_text(reopened.document_id.clone(), 0)
+        .expect("extract text")
+        .text;
+    assert!(
+        text.contains("Saved once"),
+        "the previously saved edit must still be in the output, got {text:?}"
+    );
+    close_document(reopened.document_id).expect("close reopened");
+    close_document(document.document_id).expect("close source");
+}
+
 /// Parses `path` independently of PDFium, the way an external viewer would.
 fn parse_with_lopdf(path: &Path) -> lopdf::Document {
     lopdf::Document::load(path).expect("lopdf parses the saved file")
@@ -1007,6 +1088,11 @@ fn object_level_edits_are_appended_as_one_lopdf_revision() {
     assert!(
         appended.starts_with(&pdfium_bytes),
         "lopdf appends to PDFium's bytes; it never rewrites them"
+    );
+    assert_eq!(
+        startxref_count(&appended),
+        startxref_count(&pdfium_bytes) + 1,
+        "lopdf appends exactly one revision after PDFium's revision"
     );
 
     let parsed = lopdf::Document::load_mem(&appended).expect("parse the appended output");

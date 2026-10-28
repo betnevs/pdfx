@@ -281,15 +281,24 @@ fn same_file(left: &Path, right: &Path) -> bool {
 /// Serializes the live document.
 ///
 /// PDFium writes every edit made through its page-object API in one incremental
-/// revision. An unedited document is copied byte for byte, which is the highest
-/// fidelity result and the fastest path. Encrypted sources always take the
-/// `FPDF_REMOVE_SECURITY` full rewrite because ADR-0007 requires an unencrypted
-/// Output Document.
+/// revision. The very first save of an unedited document is copied byte for
+/// byte, which is the highest fidelity result and the fastest path. Encrypted
+/// sources always take the `FPDF_REMOVE_SECURITY` full rewrite because ADR-0007
+/// requires an unencrypted Output Document.
+///
+/// The byte-verbatim fast path is only valid before an Output Document exists:
+/// once PDFium edits were saved, the live document (not the Source Document)
+/// holds the user's work, so a clean Save Changes must re-serialize the handle
+/// — copying the source bytes there would silently drop every previously saved
+/// edit from the Output Document.
 fn serialize_output(
     entry: &crate::commands::OpenDocument,
     encrypted: bool,
 ) -> Result<Vec<u8>, CommandError> {
-    if !encrypted && entry.edit.current_state == entry.edit.saved_state {
+    if !encrypted
+        && entry.save.output_path.is_none()
+        && entry.edit.current_state == entry.edit.saved_state
+    {
         return Ok(entry.source_bytes.clone());
     }
 
