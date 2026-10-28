@@ -1752,6 +1752,42 @@ pub(crate) fn page_geometry(
     DisplayGeometry::new(&page, rotation)
 }
 
+/// Gives every named annotation on an imported page copy a fresh `/NM`.
+///
+/// Pdfium's page importer copies `/NM` verbatim, so without this a copy and its
+/// source would both answer to the same name. Name-addressed commands (select,
+/// edit, delete, undo) resolve the first match in page order, so acting on the
+/// copy would silently act on the source instead. Unnamed annotations stay
+/// unnamed: copies keep the same editability as the page they came from.
+pub(crate) fn refresh_copied_annotation_names(
+    document: &PdfDocument<'static>,
+    page_index: u32,
+) -> Result<(), CommandError> {
+    let count = {
+        let page = document.pages().get(page_index as i32).map_err(|error| {
+            internal_error(format!("could not load page {page_index}: {error:?}"))
+        })?;
+        page.annotations().len()
+    };
+    for index in 0..count {
+        let target = AnnotationRef::new(page_index as i32, index);
+        if annotation_type(document, target).map_err(map_adapter_error)?
+            == PdfPageAnnotationType::Widget
+        {
+            continue;
+        }
+        let named = annotation_name(document, target)
+            .map_err(map_adapter_error)?
+            .is_some_and(|name| !name.is_empty());
+        if !named {
+            continue;
+        }
+        set_annotation_name(document, target, &next_annotation_name())
+            .map_err(map_adapter_error)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn find_target(
     document: &PdfDocument<'static>,
     name: &str,

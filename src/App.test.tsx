@@ -3217,6 +3217,140 @@ describe("page operations", () => {
     expect(await screen.findByText("未保存")).toBeInTheDocument();
   });
 
+  it("copies the current page, selects the duplicate and refreshes page state", async () => {
+    let history = idleHistory;
+    installDocumentBackend({
+      edit_history: () => history,
+      copy_page: (args) => {
+        history = dirtyHistory;
+        return {
+          pageCount: 4,
+          pageIndex: (args as { pageIndex: number }).pageIndex + 1,
+          history,
+        };
+      },
+    });
+    openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("report.pdf");
+    await waitFor(() => expect(thumbnailCalls().length).toBeGreaterThan(0));
+    const infoCalls = pageInfoCalls().length;
+    const renderCalls = renderPageCalls().length;
+    const thumbCalls = thumbnailCalls().length;
+
+    await user.click(screen.getByRole("button", { name: "复制页面" }));
+
+    await waitFor(() =>
+      expect(commandCalls("copy_page")).toEqual([
+        ["copy_page", { documentId: "doc-1", pageIndex: 0 }],
+      ]),
+    );
+    // The backend selects the inserted copy, so the viewer shows page 2 of 4.
+    expect(await screen.findByText("第 2 / 4 页 · 100%")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(pageInfoCalls().some((call) => call.pageIndex === 1)).toBe(true),
+    );
+    await waitFor(() =>
+      expect(pageInfoCalls().length).toBeGreaterThan(infoCalls),
+    );
+    await waitFor(() =>
+      expect(renderPageCalls().length).toBeGreaterThan(renderCalls),
+    );
+    await waitFor(() =>
+      expect(thumbnailCalls().length).toBeGreaterThan(thumbCalls),
+    );
+    // A fourth thumbnail exists for the appended physical page.
+    expect(await screen.findByRole("button", { name: "第 4 页" })).toBeInTheDocument();
+    await waitFor(() =>
+      expect(thumbnailCalls().some((call) => call.pageIndex === 3)).toBe(true),
+    );
+    expect(await screen.findByText("未保存")).toBeInTheDocument();
+    await waitFor(() => expect(lastMenuState().get("page.prev")).toBe(true));
+    expect(lastMenuState().get("page.next")).toBe(true);
+  });
+
+  it("undoes and redoes a page copy, keeping the page count and menu in sync", async () => {
+    const copiedHistory = {
+      canUndo: true,
+      canRedo: false,
+      revision: 1,
+      savedRevision: 0,
+      dirty: true,
+    };
+    const undoneHistory = {
+      canUndo: false,
+      canRedo: true,
+      revision: 0,
+      savedRevision: 0,
+      dirty: false,
+    };
+    let history = idleHistory;
+    installDocumentBackend({
+      edit_history: () => history,
+      copy_page: () => {
+        history = copiedHistory;
+        return { pageCount: 4, pageIndex: 1, history };
+      },
+      undo_text_edit: () => {
+        history = undoneHistory;
+        return {
+          pageIndex: 0,
+          pageCount: 3,
+          pageStructureChanged: true,
+          history,
+        };
+      },
+      redo_text_edit: () => {
+        history = copiedHistory;
+        return {
+          pageIndex: 1,
+          pageCount: 4,
+          pageStructureChanged: true,
+          history,
+        };
+      },
+    });
+    openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("report.pdf");
+
+    await user.click(screen.getByRole("button", { name: "复制页面" }));
+    expect(await screen.findByText("第 2 / 4 页 · 100%")).toBeInTheDocument();
+    expect(await screen.findByText("未保存")).toBeInTheDocument();
+
+    await waitFor(() => expect(menuHandler).toBeDefined());
+    await waitFor(() => expect(lastMenuState().get("edit.undo")).toBe(true));
+    act(() => menuHandler?.({ payload: "edit.undo" }));
+
+    await waitFor(() =>
+      expect(commandCalls("undo_text_edit")).toHaveLength(1),
+    );
+    expect(await screen.findByText("第 1 / 3 页 · 100%")).toBeInTheDocument();
+    // The copied page is gone and the document is clean again.
+    expect(screen.queryByRole("button", { name: "第 4 页" })).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.queryByText("未保存")).not.toBeInTheDocument(),
+    );
+    await waitFor(() => expect(lastMenuState().get("edit.redo")).toBe(true));
+
+    act(() => menuHandler?.({ payload: "edit.redo" }));
+
+    await waitFor(() =>
+      expect(commandCalls("redo_text_edit")).toHaveLength(1),
+    );
+    expect(await screen.findByText("第 2 / 4 页 · 100%")).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "第 4 页" })).toBeInTheDocument();
+    expect(await screen.findByText("未保存")).toBeInTheDocument();
+    await waitFor(() => expect(lastMenuState().get("page.prev")).toBe(true));
+    expect(lastMenuState().get("page.next")).toBe(true);
+  });
+
   it("disables page operations on a read-only document without touching history", async () => {
     installDocumentBackend({
       open_document: () => ({
@@ -3238,7 +3372,13 @@ describe("page operations", () => {
     expect(
       await screen.findByText("文档为只读，页面操作已禁用。"),
     ).toBeInTheDocument();
-    for (const name of ["向左旋转", "向右旋转", "插入空白页…", "删除页面"]) {
+    for (const name of [
+      "向左旋转",
+      "向右旋转",
+      "插入空白页…",
+      "复制页面",
+      "删除页面",
+    ]) {
       expect(screen.getByRole("button", { name })).toBeDisabled();
     }
     expect(screen.getByRole("button", { name: "第 1 页" })).toHaveAttribute(
@@ -3248,6 +3388,7 @@ describe("page operations", () => {
     expect(commandCalls("rotate_page")).toHaveLength(0);
     expect(commandCalls("delete_page")).toHaveLength(0);
     expect(commandCalls("insert_blank_page")).toHaveLength(0);
+    expect(commandCalls("copy_page")).toHaveLength(0);
     expect(commandCalls("move_page")).toHaveLength(0);
   });
 

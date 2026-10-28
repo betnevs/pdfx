@@ -76,6 +76,7 @@ export function DocumentToolbar({
   canModifyPages = false,
   pageOperationDisabledReason = null,
   onRotatePage,
+  onCopyPage,
   onDeletePage,
   onInsertPage,
 }: {
@@ -96,6 +97,7 @@ export function DocumentToolbar({
   /** Chinese explanation shown while page operations are unavailable. */
   pageOperationDisabledReason?: string | null;
   onRotatePage?: (deltaDegrees: 90 | 180 | 270) => void;
+  onCopyPage?: () => void;
   onDeletePage?: () => void;
   onInsertPage?: () => void;
 }) {
@@ -198,6 +200,14 @@ export function DocumentToolbar({
           onClick={() => onInsertPage?.()}
         >
           插入空白页…
+        </button>
+        <button
+          type="button"
+          title="复制当前页并插入到其后（可撤销）"
+          disabled={!canModifyPages}
+          onClick={() => onCopyPage?.()}
+        >
+          复制页面
         </button>
         <button
           type="button"

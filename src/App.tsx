@@ -21,6 +21,7 @@ import { SaveConfirmDialog } from "./components/SaveConfirmDialog";
 import {
   choosePdfFile,
   closeDocument,
+  copyPage,
   deletePage,
   destroyWindow,
   editHistory,
@@ -347,6 +348,21 @@ export function App() {
     },
     [applyPageOperation],
   );
+
+  // Copies the visible page and selects the duplicate, which the backend
+  // inserts immediately after the source page.
+  const copyCurrentPage = useCallback(() => {
+    const current = editorRef.current;
+    if (current.status !== "open") {
+      return;
+    }
+    if (current.document.readOnly || !current.document.permissions.canModifyContent) {
+      return;
+    }
+    const documentId = current.document.documentId;
+    const pageIndex = viewerRef.current.pageIndex;
+    void applyPageOperation(() => copyPage(documentId, pageIndex));
+  }, [applyPageOperation]);
 
   const moveThumbnailPage = useCallback(
     (fromIndex: number, toIndex: number) => {
@@ -1220,6 +1236,7 @@ export function App() {
               canModifyPages={canModifyPages}
               pageOperationDisabledReason={pageOperationDisabledReason}
               onRotatePage={rotateCurrentPage}
+              onCopyPage={copyCurrentPage}
               onDeletePage={openDeletePageDialog}
               onInsertPage={openInsertBlankPageDialog}
             />

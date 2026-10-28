@@ -30,16 +30,42 @@ pub(crate) struct BlankPage {
     pub(crate) size: BlankPageSize,
 }
 
+/// One physical page created by `copy_page`.
+///
+/// The page is a real PDFium page cloned from the source page (and from the
+/// current, fully edited document state) by `FPDF_ImportPages`, so it renders
+/// immediately and its content, links and annotations are independent objects.
+/// `source` is the physical page it was copied from. `inherited` holds the
+/// source page's form values at the moment of the copy, keyed by the raw
+/// Pdfium field name; discovery and the save pipeline use it so a copy starts
+/// with the same field values as its source even when those values only live
+/// in the session overlay.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CopiedPage {
+    pub(crate) source: u32,
+    pub(crate) inherited: crate::form::FormOverlay,
+}
+
 /// The visible page arrangement.
 ///
 /// `order[logical]` is the physical PDFium page index shown at that slot.
 /// Pages absent from `order` are deleted (hidden) and are excluded from the
 /// saved page tree. `blanks` remembers which physical pages were inserted so
-/// the save pipeline can give them explicit page boxes.
+/// the save pipeline can give them explicit page boxes. `copies` records the
+/// physical pages created by page duplication; the save pipeline registers
+/// their form fields under names unique within the copied AcroForm.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub(crate) struct PageModel {
     pub(crate) order: Vec<u32>,
     pub(crate) blanks: std::collections::HashMap<u32, BlankPage>,
+    pub(crate) copies: std::collections::HashMap<u32, CopiedPage>,
+}
+
+/// Field name used by the copy of a form field. The physical page index makes
+/// it unique among copies and stable across saves, and form discovery,
+/// fill routing and the save pipeline all derive the same name from it.
+pub(crate) fn copied_field_name(base: &str, physical_page: u32) -> String {
+    format!("{base}__copy_p{physical_page}")
 }
 
 impl PageModel {
@@ -49,6 +75,7 @@ impl PageModel {
         Self {
             order: (0..page_count).collect(),
             blanks: std::collections::HashMap::new(),
+            copies: std::collections::HashMap::new(),
         }
     }
 
@@ -423,4 +450,153 @@ pub fn insert_blank_page(
             entry, before, after, None, None, page_index, page_index,
         ))
     })
+}
+
+/// The `copy_page` command: duplicates the current page immediately after it
+/// as one undoable action.
+///
+/// The duplicate is a real PDFium page, not a second logical reference to the
+/// source page. To get independent page objects PDFium's own importer is used
+/// (`FPDF_ImportPagesByIndex`) against a serialization of the current live
+/// document state, and the new physical page is appended to the live document.
+/// Appending keeps every existing physical page index (and therefore every
+/// session record keyed by it) valid.
+///
+/// The importer clones the page dictionary, content streams, resources, links
+/// and annotation objects. Form widgets keep their original field names at
+/// import time because Pdfium only recognizes a widget whose name belongs to a
+/// field it knows; the session therefore namespaces the copy's fields for
+/// display and value routing, and the save pipeline renames the cloned widgets
+/// and clones their parent fields into the output AcroForm.
+#[tauri::command]
+pub fn copy_page(document_id: String, page_index: u32) -> Result<PageOperationView, CommandError> {
+    crate::commands::with_open_document(&document_id, |entry| {
+        ensure_page_editable(entry)?;
+        let before = entry.pages.clone();
+        let physical_page = before.physical(page_index)?;
+        let new_physical = entry.document.pages().len() as u32;
+        let mut used_names = std::collections::HashSet::new();
+        let inherited = inherited_form_values(entry, physical_page, &mut used_names)?;
+        // Pdfium's importer drops page link destinations; capture them while
+        // the copy still points at the live source page.
+        let source_links =
+            crate::links::capture_copied_link_sources(&entry.document, physical_page)?;
+
+        // Import from Pdfium's own serialization, not the finalized save
+        // output: it carries every PDFium-side edit while keeping physical
+        // page indices and raw field names, which is what the importer and the
+        // session's copy namespacing rely on.
+        let snapshot = crate::save::serialize_pdfium_state(entry)?;
+        let engine = crate::engine::Engine::shared()
+            .map_err(|message| CommandError::new(CommandErrorCode::PdfiumUnavailable, message))?;
+        let source = engine.open_bytes(snapshot, None).map_err(|error| {
+            CommandError::new(
+                CommandErrorCode::RenderFailed,
+                format!("could not reopen the document snapshot to copy the page: {error:?}"),
+            )
+        })?;
+        entry
+            .document
+            .pages_mut()
+            .copy_page_from_document(&source, physical_page as i32, new_physical as i32)
+            .map_err(|error| {
+                CommandError::new(
+                    CommandErrorCode::RenderFailed,
+                    format!("could not copy page {page_index}: {error:?}"),
+                )
+            })?;
+        // Pdfium shares field objects (radio parents and nested fields) across
+        // the import; keep the snapshot so those pointers stay valid.
+        entry.copy_snapshots.push(source);
+        // Pdfium copies `/NM` verbatim, which would leave two annotations in
+        // the document answering to the same name. Give the imported
+        // annotations fresh identities before any name-addressed command can
+        // reach them. A failure does not invalidate the copied page.
+        if let Err(error) =
+            crate::annotations::refresh_copied_annotation_names(&entry.document, new_physical)
+        {
+            eprintln!("[pdfx] could not refresh copied annotation names: {error:?}");
+        }
+        // Created fields exist only in the session store, so the importer
+        // cannot bring them across; duplicate the records and let the normal
+        // discovery/save paths materialize them for the copy.
+        crate::form_create::copy_created_fields_for_page(
+            &mut entry.edit.created_fields,
+            physical_page,
+            new_physical,
+            &used_names,
+        );
+        // The copy must be usable in the viewer before it is saved: give its
+        // dropped page destinations back through PDFX's private page key. A
+        // failure here does not invalidate the copied page, and the save
+        // pipeline still repairs the output from the source page.
+        if let Err(error) =
+            crate::links::restore_copied_link_sources(&entry.document, new_physical, &source_links)
+        {
+            eprintln!("[pdfx] could not restore copied link destinations: {error:?}");
+        }
+
+        let mut after = before.clone();
+        after.order.insert((page_index + 1) as usize, new_physical);
+        after.copies.insert(
+            new_physical,
+            CopiedPage {
+                source: physical_page,
+                inherited,
+            },
+        );
+        Ok(push_page_action(
+            entry,
+            before,
+            after,
+            None,
+            None,
+            page_index,
+            page_index + 1,
+        ))
+    })
+}
+
+/// Captures the source page's current form values, keyed by raw field name.
+///
+/// Discovery already merges the session overlay, so this is the value the user
+/// sees, including radio and choice selections that Pdfium does not store and
+/// values filled on a copied source page. The copy uses these as fallbacks
+/// until the user edits the copy's own field.
+fn inherited_form_values(
+    entry: &OpenDocument,
+    source_physical: u32,
+    used_names: &mut std::collections::HashSet<String>,
+) -> Result<crate::form::FormOverlay, CommandError> {
+    use crate::form::{FormFieldKind, FormOverlay};
+    let mut inherited = FormOverlay::default();
+    for field in crate::form::discover_all(entry)? {
+        used_names.insert(field.name.clone());
+        used_names.insert(field.raw_name.clone());
+        if field.created || field.page_index != source_physical {
+            continue;
+        }
+        match field.kind {
+            FormFieldKind::Text => {
+                if let Some(value) = field.value {
+                    inherited.text.insert(field.raw_name, value);
+                }
+            }
+            FormFieldKind::Checkbox => {
+                inherited.checked.insert(field.raw_name, field.checked);
+            }
+            FormFieldKind::Radio => {
+                if let Some(value) = field.value {
+                    inherited.radio.insert(field.raw_name, value);
+                }
+            }
+            FormFieldKind::ComboBox | FormFieldKind::ListBox => {
+                if let Some(value) = field.value {
+                    inherited.choice.insert(field.raw_name, value);
+                }
+            }
+            FormFieldKind::PushButton | FormFieldKind::Signature | FormFieldKind::Unknown => {}
+        }
+    }
+    Ok(inherited)
 }
