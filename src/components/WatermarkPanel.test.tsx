@@ -225,6 +225,41 @@ describe("WatermarkPanel", () => {
     expect(screen.getByText("已应用到所有可见页面。")).toBeInTheDocument();
   });
 
+  it("invalidates every thumbnail when replacing a mark that covers other pages", async () => {
+    const allPagesView: WatermarkView = {
+      ...textView,
+      scope: "all",
+      text: "全页",
+      pageIndices: [0, 1, 2],
+    };
+    mockCommands({
+      watermark_state: () => allPagesView,
+      apply_watermark: () => ({
+        watermark: { ...textView, scope: "current", pageIndices: [2] },
+        history: dirtyHistory,
+      }),
+    });
+    const { onApplied } = renderPanel({ pageIndex: 2 });
+
+    await waitFor(() =>
+      expect(screen.getByText("当前水印：文字「全页」（3 页）")).toBeInTheDocument(),
+    );
+    expect(screen.getByLabelText("所有页面")).toBeChecked();
+
+    fireEvent.click(screen.getByLabelText("当前页"));
+    fireEvent.click(screen.getByRole("button", { name: "应用水印" }));
+
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith(
+        "apply_watermark",
+        expect.objectContaining({
+          request: expect.objectContaining({ scope: "current" }),
+        }),
+      ),
+    );
+    expect(onApplied).toHaveBeenLastCalledWith(true);
+  });
+
   it("rejects empty, multi-line and over-long text without calling the backend", async () => {
     renderPanel();
     const applyButton = screen.getByRole("button", { name: "应用水印" });

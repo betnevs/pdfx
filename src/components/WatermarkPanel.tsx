@@ -238,7 +238,11 @@ export function WatermarkPanel({
       });
       setActive(result.watermark);
       onHistory(result.history);
-      onApplied(scope === "all");
+      // Replacing an active watermark can remove the mark from pages that are
+      // not in the new scope (for example an all-pages mark replaced by a
+      // current-page one), so every thumbnail may be stale unless this is the
+      // very first current-page apply.
+      onApplied(scope === "all" || active !== null);
       setNotice(
         scope === "all" ? "已应用到所有可见页面。" : "已应用到当前页。",
       );
