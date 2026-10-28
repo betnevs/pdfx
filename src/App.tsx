@@ -91,7 +91,11 @@ export function App() {
 
   const editorRef = useRef(editor);
   editorRef.current = editor;
-  const dirtyRef = useRef(false);
+  // Ticket 44 wires the save session's dirty flag into the title marker and
+  // the close confirmation; ticket 10 only exposes it from the backend.
+  const [dirty] = useState(false);
+  const dirtyRef = useRef(dirty);
+  dirtyRef.current = dirty;
   const openingRef = useRef(false);
 
   const handleViewerError = useCallback((error: CommandError) => {
@@ -113,25 +117,11 @@ export function App() {
   const viewerRef = useRef(viewer);
   viewerRef.current = viewer;
 
-  // Save state lives next to the viewer so the header, title and close guard
-  // all read the same dirty flag the backend reports.
+  // Save state lives next to the viewer so the save buttons and menu actions
+  // share the session's target and last result.
   const save = useDocumentSave(openDocumentView);
   const saveRef = useRef(save);
   saveRef.current = save;
-  dirtyRef.current = save.dirty;
-
-  const openDocumentId = openDocumentView?.documentId ?? null;
-  const openDocumentName = openDocumentView?.name ?? null;
-
-  useEffect(() => {
-    if (!openDocumentName) {
-      return;
-    }
-    const marker = save.dirty ? "（未保存）" : "";
-    void setWindowTitle(`${openDocumentName}${marker} — PDFX`).catch(() => {
-      // The title is cosmetic; a missing window capability must not fail open.
-    });
-  }, [openDocumentId, openDocumentName, save.dirty]);
 
   useEffect(() => {
     let cancelled = false;
@@ -182,6 +172,10 @@ export function App() {
       const document = await openDocument(path, password);
       openedDocumentId = document.documentId;
       setPasswordPrompt(null);
+
+      await setWindowTitle(`${document.name} — PDFX`).catch(() => {
+        // The title is cosmetic; a missing window capability must not fail open.
+      });
 
       setEditor({ status: "open", document });
     } catch (error) {
@@ -361,11 +355,6 @@ export function App() {
           {open && (
             <span className="document-name" title={open.document.path}>
               {open.document.name}
-            </span>
-          )}
-          {open && save.dirty && (
-            <span className="dirty-indicator" title="有未保存的更改">
-              未保存
             </span>
           )}
           <span className="app-mode">本地 PDF 编辑器</span>

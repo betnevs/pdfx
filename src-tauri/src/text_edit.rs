@@ -614,6 +614,13 @@ impl EditSession {
             dirty: self.current_state != self.saved_state,
         }
     }
+
+    /// Records that the current state is on disk. The undo/redo stacks are
+    /// deliberately untouched, so history survives a save and the user can
+    /// undo past the new baseline.
+    pub(crate) fn mark_document_saved(&mut self) {
+        self.saved_state = self.current_state;
+    }
 }
 
 fn no_editable_text(page_index: u32) -> CommandError {
@@ -2780,15 +2787,16 @@ pub fn redo_text_edit(document_id: String) -> Result<EditStepView, CommandError>
 /// The `mark_document_saved` command: records that the current state is on
 /// disk.
 ///
-/// This is the contract the save pipeline (ticket 10) must call *after* a
-/// successful write. It sets the clean baseline without clearing the undo/redo
+/// This is the contract the save pipeline (ticket 10) applies *after* a
+/// successful write, through the same [`EditSession::mark_document_saved`]
+/// transition. It sets the clean baseline without clearing the undo/redo
 /// stacks, so history survives Save Changes and the user can undo past the
 /// save point. `save_document_bytes` serializes the live in-memory document
 /// for that pipeline without reloading it, so the same history stays valid.
 #[tauri::command]
 pub fn mark_document_saved(document_id: String) -> Result<EditHistoryView, CommandError> {
     with_open_document(&document_id, |entry| {
-        entry.edit.saved_state = entry.edit.current_state;
+        entry.edit.mark_document_saved();
         Ok(entry.edit.history_view())
     })
 }
