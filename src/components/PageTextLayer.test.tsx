@@ -2,7 +2,8 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { TextCharView, TextLayerView } from "../lib/backend";
+import type { EditHistoryView, TextCharView, TextLayerView } from "../lib/backend";
+import { notifyDocumentChanged } from "../lib/documentEvents";
 import { PageTextLayer } from "./PageTextLayer";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -206,5 +207,40 @@ describe("PageTextLayer", () => {
 
     fireEvent.keyDown(region, { key: "Escape" });
     expect(screen.queryByRole("button", { name: "复制" })).not.toBeInTheDocument();
+  });
+
+  it("refreshes the undo state when another overlay changes the document", async () => {
+    let history: EditHistoryView = {
+      canUndo: false,
+      canRedo: false,
+      revision: 0,
+      savedRevision: 0,
+      dirty: false,
+    };
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "extract_text_layer") {
+        return textLayer;
+      }
+      if (command === "edit_history") {
+        return history;
+      }
+      throw new Error(`unexpected command: ${command as string}`);
+    });
+
+    render(<PageTextLayer documentId="doc-1" pageIndex={2} />);
+    const undo = await screen.findByRole("button", { name: "撤销" });
+    expect(undo).toBeDisabled();
+
+    // A shape draw or transform announces itself on the same event bus; the
+    // text layer's toolbar must pick up the new undo state.
+    history = {
+      canUndo: true,
+      canRedo: false,
+      revision: 1,
+      savedRevision: 0,
+      dirty: true,
+    };
+    notifyDocumentChanged({ documentId: "doc-1", pageIndex: 2 });
+    await waitFor(() => expect(undo).toBeEnabled());
   });
 });

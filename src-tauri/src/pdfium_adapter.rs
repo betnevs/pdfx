@@ -88,6 +88,13 @@ pub enum TextMarkupAnnotationKind {
     Strikeout,
 }
 
+/// The geometric annotations PDFX creates through PDFium.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShapeAnnotationKind {
+    Square,
+    Circle,
+}
+
 /// How [PdfiumAdapter::save()] should write the document.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SaveMode {
@@ -253,6 +260,43 @@ pub fn create_text_markup_annotation(
     Ok(AnnotationRef::new(page_index, annotations.len() - 1))
 }
 
+/// Creates a square or circle annotation with `rect` bounds.
+///
+/// Pdfium does not generate an appearance for the annotation; callers install
+/// one with [`set_annotation_appearance`] before saving. Set the border and
+/// colours first: Pdfium drops a custom appearance when the border is set and
+/// refuses colour changes once an appearance exists.
+pub fn create_shape_annotation(
+    document: &PdfDocument<'_>,
+    page_index: i32,
+    kind: ShapeAnnotationKind,
+    rect: AnnotationRect,
+) -> Result<AnnotationRef, AdapterError> {
+    let pages = document.pages();
+    let mut page = pages.get(page_index)?;
+    let annotations = page.annotations_mut();
+
+    // Set the bounds Pdfium uses for the appearance Form XObject /BBox, then
+    // close the creation handle. The concrete types differ, so the shared work
+    // is repeated per arm as in `create_text_markup_annotation`.
+    match kind {
+        ShapeAnnotationKind::Square => {
+            let mut annotation = annotations.create_square_annotation()?;
+            let result = annotation.set_bounds(rect.to_pdf_rect());
+            annotation.close();
+            result?;
+        }
+        ShapeAnnotationKind::Circle => {
+            let mut annotation = annotations.create_circle_annotation()?;
+            let result = annotation.set_bounds(rect.to_pdf_rect());
+            annotation.close();
+            result?;
+        }
+    }
+
+    Ok(AnnotationRef::new(page_index, annotations.len() - 1))
+}
+
 /// Returns the [PdfPageAnnotationType] of the annotation identified by
 /// `target`.
 pub fn annotation_type(
@@ -286,11 +330,7 @@ pub fn annotation_author(
     document: &PdfDocument<'_>,
     target: AnnotationRef,
 ) -> Result<Option<String>, AdapterError> {
-    with_annotation_on(
-        document,
-        target,
-        |annotation| with_text_markup!(annotation, annotation => Ok(annotation.creator())),
-    )
+    with_annotation_on(document, target, |annotation| Ok(annotation.creator()))
 }
 
 /// Sets the annotation author (`/T`).
@@ -299,11 +339,9 @@ pub fn set_annotation_author(
     target: AnnotationRef,
     author: &str,
 ) -> Result<(), AdapterError> {
-    with_annotation_on(
-        document,
-        target,
-        |annotation| with_text_markup!(annotation, annotation => annotation.set_creator(author)),
-    )
+    with_annotation_on(document, target, |annotation| {
+        annotation.set_creator(author)
+    })
 }
 
 /// Returns the raw `/CreationDate` string, if any.
@@ -363,27 +401,35 @@ pub fn annotation_bounds(
     target: AnnotationRef,
 ) -> Result<AnnotationRect, AdapterError> {
     with_annotation_on(document, target, |annotation| {
-        with_text_markup!(annotation, annotation => {
-            annotation.bounds().map(AnnotationRect::from_pdf_rect)
-        })
+        annotation.bounds().map(AnnotationRect::from_pdf_rect)
     })
 }
 
-/// Returns the annotation color as RGBA bytes.
+/// Returns the annotation stroke colour as RGBA bytes.
 pub fn annotation_color(
     document: &PdfDocument<'_>,
     target: AnnotationRef,
 ) -> Result<(u8, u8, u8, u8), AdapterError> {
     with_annotation_on(document, target, |annotation| {
-        with_text_markup!(annotation, annotation => {
-            annotation
-                .stroke_color()
-                .map(|color| (color.red(), color.green(), color.blue(), color.alpha()))
-        })
+        annotation
+            .stroke_color()
+            .map(|color| (color.red(), color.green(), color.blue(), color.alpha()))
     })
 }
 
-/// Sets the annotation color and its constant opacity.
+/// Returns the annotation fill (interior) colour as RGBA bytes.
+pub fn annotation_fill_color(
+    document: &PdfDocument<'_>,
+    target: AnnotationRef,
+) -> Result<(u8, u8, u8, u8), AdapterError> {
+    with_annotation_on(document, target, |annotation| {
+        annotation
+            .fill_color()
+            .map(|color| (color.red(), color.green(), color.blue(), color.alpha()))
+    })
+}
+
+/// Sets the annotation stroke colour and its constant opacity.
 pub fn set_annotation_color(
     document: &PdfDocument<'_>,
     target: AnnotationRef,
@@ -393,9 +439,43 @@ pub fn set_annotation_color(
     alpha: u8,
 ) -> Result<(), AdapterError> {
     with_annotation_on(document, target, |annotation| {
-        with_text_markup!(annotation, annotation => {
-            annotation.set_stroke_color(PdfColor::new(red, green, blue, alpha))
-        })
+        annotation.set_stroke_color(PdfColor::new(red, green, blue, alpha))
+    })
+}
+
+/// Sets the annotation fill (interior) colour and its constant opacity.
+pub fn set_annotation_fill_color(
+    document: &PdfDocument<'_>,
+    target: AnnotationRef,
+    red: u8,
+    green: u8,
+    blue: u8,
+    alpha: u8,
+) -> Result<(), AdapterError> {
+    with_annotation_on(document, target, |annotation| {
+        annotation.set_fill_color(PdfColor::new(red, green, blue, alpha))
+    })
+}
+
+/// Returns the annotation border width in default user space units.
+pub fn annotation_border_width(
+    document: &PdfDocument<'_>,
+    target: AnnotationRef,
+) -> Result<f32, AdapterError> {
+    with_annotation_on(document, target, |annotation| annotation.border_width())
+}
+
+/// Sets the annotation border width in default user space units.
+///
+/// Pdfium drops any existing appearance stream when the border is set, so call
+/// this before [`set_annotation_appearance`].
+pub fn set_annotation_border_width(
+    document: &PdfDocument<'_>,
+    target: AnnotationRef,
+    width: f32,
+) -> Result<(), AdapterError> {
+    with_annotation_on(document, target, |annotation| {
+        annotation.set_border_width(width)
     })
 }
 
@@ -406,24 +486,22 @@ pub fn annotation_quads(
     target: AnnotationRef,
 ) -> Result<Vec<[f32; 8]>, AdapterError> {
     with_annotation_on(document, target, |annotation| {
-        with_text_markup!(annotation, annotation => {
-            Ok(annotation
-                .attachment_points()
-                .iter()
-                .map(|quad| {
-                    [
-                        quad.x1().value,
-                        quad.y1().value,
-                        quad.x2().value,
-                        quad.y2().value,
-                        quad.x3().value,
-                        quad.y3().value,
-                        quad.x4().value,
-                        quad.y4().value,
-                    ]
-                })
-                .collect())
-        })
+        Ok(annotation
+            .attachment_points()
+            .iter()
+            .map(|quad| {
+                [
+                    quad.x1().value,
+                    quad.y1().value,
+                    quad.x2().value,
+                    quad.y2().value,
+                    quad.x3().value,
+                    quad.y3().value,
+                    quad.x4().value,
+                    quad.y4().value,
+                ]
+            })
+            .collect())
     })
 }
 
@@ -554,13 +632,29 @@ impl<'a> PdfiumAdapter<'a> {
         page_index: i32,
         rect: AnnotationRect,
     ) -> Result<AnnotationRef, AdapterError> {
-        let pages = self.document.pages();
-        let mut page = pages.get(page_index)?;
-        let annotations = page.annotations_mut();
-        let mut annotation = annotations.create_circle_annotation()?;
-        annotation.set_bounds(rect.to_pdf_rect())?;
-        annotation.close();
-        Ok(AnnotationRef::new(page_index, annotations.len() - 1))
+        create_shape_annotation(
+            &self.document,
+            page_index,
+            ShapeAnnotationKind::Circle,
+            rect,
+        )
+    }
+
+    /// Creates a square annotation covering `rect` on page `page_index`.
+    ///
+    /// Pdfium does not generate an appearance for the annotation, so set a
+    /// border and/or a custom appearance stream before saving.
+    pub fn create_square_annotation(
+        &self,
+        page_index: i32,
+        rect: AnnotationRect,
+    ) -> Result<AnnotationRef, AdapterError> {
+        create_shape_annotation(
+            &self.document,
+            page_index,
+            ShapeAnnotationKind::Square,
+            rect,
+        )
     }
 
     /// Creates an ink annotation covering `rect` on page `page_index`.

@@ -30,6 +30,7 @@ const highlight: AnnotationView = {
   color: "#ffd400",
   opacity: 50,
   rects: [{ x: 100, y: 100, width: 120, height: 20 }],
+  shape: null,
 };
 
 const underline: AnnotationView = {
@@ -41,6 +42,28 @@ const underline: AnnotationView = {
   color: "#00aa00",
   opacity: 100,
   rects: [{ x: 80, y: 200, width: 90, height: 18 }],
+  shape: null,
+};
+
+const rectangle: AnnotationView = {
+  name: "s1",
+  pageIndex: 0,
+  kind: "square",
+  author: "形状作者",
+  createdAt: "D:20261028123456Z",
+  color: "#000000",
+  opacity: 80,
+  rects: [],
+  shape: {
+    kind: "square",
+    geometry: { x: 100, y: 100, width: 200, height: 100, rotation: 30 },
+    style: {
+      fillColor: "#3366cc",
+      strokeColor: "#000000",
+      opacity: 80,
+      lineWidth: 3,
+    },
+  },
 };
 
 function renderPanel(overrides: Partial<Parameters<typeof AnnotationPanel>[0]> = {}) {
@@ -160,7 +183,9 @@ describe("AnnotationPanel", () => {
 
     expect(screen.getByText("还没有注释")).toBeInTheDocument();
     expect(
-      screen.getByText("选择页面文字即可添加高亮、下划线或删除线。"),
+      screen.getByText(
+        "选择页面文字即可添加高亮、下划线或删除线；使用页面上的形状工具绘制矩形或椭圆。",
+      ),
     ).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "第 1 页" })).not.toBeInTheDocument();
   });
@@ -178,5 +203,85 @@ describe("AnnotationPanel", () => {
 
     expect(await screen.findByRole("alert")).toHaveTextContent("不允许删除注释");
     expect(onSelect).not.toHaveBeenCalledWith(null);
+  });
+
+  it("labels rectangles and ellipses in the annotation list", () => {
+    const ellipse: AnnotationView = {
+      ...rectangle,
+      name: "s2",
+      kind: "circle",
+      pageIndex: 1,
+      shape: { ...rectangle.shape!, kind: "circle" },
+    };
+    renderPanel({ annotations: [rectangle, ellipse] });
+
+    expect(
+      screen.getByRole("button", { name: "矩形，第 1 页，形状作者" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "椭圆，第 2 页，形状作者" }),
+    ).toBeInTheDocument();
+  });
+
+  it("edits shape fill, stroke, opacity and line width with selection", async () => {
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "update_shape_style") {
+        return {
+          annotation: rectangle,
+          pageIndex: 0,
+          history: idleHistory,
+        };
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+    const { onChanged } = renderPanel({
+      annotations: [rectangle],
+      selectedName: "s1",
+    });
+
+    expect(
+      screen.getByText("矩形 · 尺寸 200 × 100 pt · 旋转 30°"),
+    ).toBeInTheDocument();
+    expect(screen.queryByLabelText("注释颜色")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("形状填充颜色")).toHaveValue("#3366cc");
+    expect(screen.getByLabelText("形状描边颜色")).toHaveValue("#000000");
+    expect(screen.getByLabelText("形状线宽")).toHaveValue(3);
+    expect(screen.getByLabelText("形状透明度")).toHaveValue("80");
+
+    fireEvent.change(screen.getByLabelText("形状填充颜色"), {
+      target: { value: "#ff0000" },
+    });
+    fireEvent.change(screen.getByLabelText("形状线宽"), {
+      target: { value: "5" },
+    });
+    fireEvent.change(screen.getByLabelText("形状透明度"), {
+      target: { value: "60" },
+    });
+    fireEvent.click(screen.getByLabelText("形状描边"));
+    fireEvent.click(screen.getByRole("button", { name: "应用样式" }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("update_shape_style", {
+        documentId: "doc-1",
+        name: "s1",
+        style: {
+          fillColor: "#ff0000",
+          strokeColor: null,
+          opacity: 60,
+          lineWidth: 5,
+        },
+      });
+    });
+    expect(onChanged).toHaveBeenCalled();
+  });
+
+  it("refuses a shape style with neither fill nor stroke", () => {
+    renderPanel({ annotations: [rectangle], selectedName: "s1" });
+    fireEvent.click(screen.getByLabelText("形状填充"));
+    fireEvent.click(screen.getByLabelText("形状描边"));
+    expect(screen.getByRole("button", { name: "应用样式" })).toBeDisabled();
+    expect(
+      screen.getByText("至少需要填充或描边中的一项"),
+    ).toBeInTheDocument();
   });
 });

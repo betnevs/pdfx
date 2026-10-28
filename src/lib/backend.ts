@@ -294,6 +294,12 @@ export interface EditStepView {
 /** The text markup annotation kinds PDFX creates. */
 export type TextMarkupKind = "highlight" | "underline" | "strikeout";
 
+/** The geometric shape kinds PDFX creates. */
+export type ShapeKind = "square" | "circle";
+
+/** Every annotation kind the list and overlay render. */
+export type AnnotationKind = TextMarkupKind | ShapeKind;
+
 /** A display-space rectangle of a markup selection. */
 export interface TextMarkupRect {
   x: number;
@@ -324,12 +330,52 @@ export interface CreateTextMarkupRequest {
 export interface AnnotationView {
   name: string;
   pageIndex: number;
-  kind: TextMarkupKind;
+  kind: AnnotationKind;
   author: string | null;
   createdAt: string | null;
   color: string;
   opacity: number;
   rects: TextMarkupRect[];
+  /** Shape geometry and style; null for text markup. */
+  shape: ShapeView | null;
+}
+
+/** A shape's unrotated display-space geometry plus clockwise rotation. */
+export interface ShapeGeometry {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  /** Clockwise degrees around the rectangle's centre (0-360). */
+  rotation: number;
+}
+
+/**
+ * Fill, stroke, opacity and line width of a shape. A null colour means the
+ * shape has no fill or no stroke; at least one must be present. Opacity is a
+ * percentage (0-100) applied to the whole annotation. Line width is in page
+ * points and is ignored without a stroke.
+ */
+export interface ShapeStyle {
+  fillColor: string | null;
+  strokeColor: string | null;
+  opacity: number;
+  lineWidth: number;
+}
+
+/** A shape annotation as the canvas overlay and property panel see it. */
+export interface ShapeView {
+  kind: ShapeKind;
+  geometry: ShapeGeometry;
+  style: ShapeStyle;
+}
+
+/** Draws a rectangle or ellipse on one page. */
+export interface CreateShapeRequest {
+  pageIndex: number;
+  kind: ShapeKind;
+  geometry: ShapeGeometry;
+  style: ShapeStyle;
 }
 
 /** The outcome of creating, restyling or deleting one annotation. */
@@ -740,6 +786,46 @@ export async function listAnnotations(
   documentId: string,
 ): Promise<AnnotationView[]> {
   return invoke<AnnotationView[]>("list_annotations", { documentId });
+}
+
+/**
+ * Draws a native rectangle (Square) or ellipse (Circle) on one page. The
+ * author comes from the persisted settings on the Rust side.
+ */
+export async function createShapeAnnotation(
+  documentId: string,
+  request: CreateShapeRequest,
+): Promise<AnnotationMutationView> {
+  return invoke<AnnotationMutationView>("create_shape_annotation", {
+    documentId,
+    request,
+  });
+}
+
+/** Moves, resizes or rotates a shape as one undoable action. */
+export async function updateShapeGeometry(
+  documentId: string,
+  name: string,
+  geometry: ShapeGeometry,
+): Promise<AnnotationMutationView> {
+  return invoke<AnnotationMutationView>("update_shape_geometry", {
+    documentId,
+    name,
+    geometry,
+  });
+}
+
+/** Changes a shape's fill, stroke, opacity or line width as one undoable action. */
+export async function updateShapeStyle(
+  documentId: string,
+  name: string,
+  style: ShapeStyle,
+): Promise<AnnotationMutationView> {
+  return invoke<AnnotationMutationView>("update_shape_style", {
+    documentId,
+    name,
+    style,
+  });
 }
 
 /** Changes an existing annotation's colour and opacity as one undoable action. */

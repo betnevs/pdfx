@@ -24,6 +24,7 @@ import {
 } from "../lib/pageGeometry";
 import type { PageRender, ZoomMode } from "../lib/useDocumentViewer";
 import { PageTextLayer } from "./PageTextLayer";
+import { ShapeLayer } from "./ShapeLayer";
 
 /** Fixed cell height keeps thumbnail virtualization independent of page sizes. */
 const THUMBNAIL_ITEM_HEIGHT = 168;
@@ -389,7 +390,9 @@ export function PageSurface({
   render,
   readOnly,
   canAnnotate,
+  annotations,
   selectedAnnotation,
+  onSelectAnnotation,
   surfaceRef,
 }: {
   documentId: string;
@@ -399,7 +402,9 @@ export function PageSurface({
   render: PageRender;
   readOnly: boolean;
   canAnnotate: boolean;
+  annotations: AnnotationView[];
   selectedAnnotation: AnnotationView | null;
+  onSelectAnnotation: (annotation: AnnotationView | null) => void;
   surfaceRef: RefObject<HTMLDivElement | null>;
 }) {
   const pixel = info ? pagePixelSize(info, scale) : null;
@@ -463,6 +468,20 @@ export function PageSurface({
         selectedAnnotation={selectedAnnotation}
         scale={scale}
       />
+      {info && (
+        <ShapeLayer
+          documentId={documentId}
+          pageIndex={pageIndex}
+          pageWidth={info.width}
+          pageHeight={info.height}
+          scale={scale}
+          readOnly={readOnly}
+          canAnnotate={canAnnotate}
+          annotations={annotations}
+          selectedAnnotation={selectedAnnotation}
+          onSelectAnnotation={onSelectAnnotation}
+        />
+      )}
     </div>
   );
 }

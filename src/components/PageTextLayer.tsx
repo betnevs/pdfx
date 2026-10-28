@@ -257,6 +257,12 @@ export function PageTextLayer({
   const [history, setHistory] = useState<EditHistoryView | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
+  // External overlays (shapes, the annotation list) change the same document
+  // and share this undo stack, so their events re-fetch the history. This
+  // layer's own commands already return the new history, and re-fetching it
+  // here could overwrite that with a slower, stale response.
+  const [historyRefreshKey, setHistoryRefreshKey] = useState(0);
+  const selfChange = useRef(false);
   const surfaceRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const dragAnchor = useRef<number | null>(null);
@@ -322,7 +328,7 @@ export function PageTextLayer({
     return () => {
       cancelled = true;
     };
-  }, [documentId]);
+  }, [documentId, historyRefreshKey]);
 
   useEffect(() => {
     if (!boxMode) {
@@ -381,6 +387,9 @@ export function PageTextLayer({
       onDocumentChanged((detail) => {
         if (detail.documentId === documentId && detail.pageIndex === pageIndex) {
           setReloadKey((key) => key + 1);
+          if (!selfChange.current) {
+            setHistoryRefreshKey((key) => key + 1);
+          }
         }
       }),
     [documentId, pageIndex],
@@ -455,6 +464,17 @@ export function PageTextLayer({
   const textLayer: TextLayerView = layer;
   const textStructure: TextLayerStructure = structure;
 
+  // Dispatch is synchronous, so the flag is only set while this layer's own
+  // announcement travels through the event bus.
+  function announceChange(changedPageIndex = pageIndex) {
+    selfChange.current = true;
+    try {
+      notifyDocumentChanged({ documentId, pageIndex: changedPageIndex });
+    } finally {
+      selfChange.current = false;
+    }
+  }
+
   function cancelEditor() {
     targetRequest.current += 1;
     setEditor(null);
@@ -522,7 +542,7 @@ export function PageTextLayer({
             }
           : null,
       );
-      notifyDocumentChanged({ documentId, pageIndex });
+      announceChange();
     } catch (error) {
       setNotice({ kind: "error", text: toCommandError(error).message });
     } finally {
@@ -558,7 +578,7 @@ export function PageTextLayer({
           item.boxId === result.target.boxId ? result.target : item,
         ),
       );
-      notifyDocumentChanged({ documentId, pageIndex });
+      announceChange();
     } catch (error) {
       setNotice({ kind: "error", text: toCommandError(error).message });
     } finally {
@@ -586,7 +606,7 @@ export function PageTextLayer({
           item.boxId === result.target.boxId ? result.target : item,
         ),
       );
-      notifyDocumentChanged({ documentId, pageIndex });
+      announceChange();
     } catch (error) {
       setNotice({ kind: "error", text: toCommandError(error).message });
     } finally {
@@ -609,7 +629,7 @@ export function PageTextLayer({
       );
       setSelectedBoxId(null);
       setEditor(null);
-      notifyDocumentChanged({ documentId, pageIndex });
+      announceChange();
     } catch (error) {
       setNotice({ kind: "error", text: toCommandError(error).message });
     } finally {
@@ -693,7 +713,7 @@ export function PageTextLayer({
             }
           : null,
       );
-      notifyDocumentChanged({ documentId, pageIndex });
+      announceChange();
     } catch (error) {
       setEditor({
         ...current,
@@ -721,7 +741,7 @@ export function PageTextLayer({
         setSelectedBoxId(null);
       }
       setNotice(null);
-      notifyDocumentChanged({ documentId, pageIndex });
+      announceChange();
     } catch (error) {
       setEditor({
         ...current,
@@ -746,10 +766,7 @@ export function PageTextLayer({
       setSelectedBoxId(null);
       setBoxInteraction(null);
       setNotice(null);
-      notifyDocumentChanged({
-        documentId,
-        pageIndex: step.pageIndex,
-      });
+      announceChange(step.pageIndex);
     } catch (error) {
       setNotice({ kind: "error", text: toCommandError(error).message });
     }
@@ -1147,7 +1164,7 @@ export function PageTextLayer({
       // selection so a second click cannot create a duplicate by accident.
       setSelection(null);
       setCopyStatus("idle");
-      notifyDocumentChanged({ documentId, pageIndex });
+      announceChange();
     } catch (error) {
       setNotice({ kind: "error", text: toCommandError(error).message });
     } finally {

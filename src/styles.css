@@ -476,6 +476,24 @@ button {
   min-width: 0;
 }
 
+.annotation-control input[type="number"] {
+  width: 64px;
+}
+
+.annotation-shape-meta {
+  margin: 0;
+  color: var(--pdfx-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.annotation-shape-warning {
+  margin: 0;
+  color: var(--pdfx-status-warning);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .annotation-actions {
   display: flex;
   gap: 6px;
@@ -856,6 +874,145 @@ button {
 
 .page-text-layer--box-mode {
   cursor: crosshair;
+}
+
+/* Rectangle and ellipse annotation overlay. The layer itself never blocks
+   text selection or the text toolbar; only its hit areas, handles and toolbar
+   opt back into pointer events. */
+.shape-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  pointer-events: none;
+}
+
+.shape-layer-svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.shape-hit {
+  pointer-events: all;
+  cursor: move;
+}
+
+.shape-layer--drawing .shape-hit {
+  cursor: crosshair;
+}
+
+.shape-draw-surface {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  cursor: crosshair;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.shape-toolbar {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 8;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  max-width: calc(100% - 16px);
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--pdfx-pill-bg);
+  color: var(--pdfx-pill-text);
+  font-size: 12px;
+  line-height: 1.4;
+  user-select: none;
+  pointer-events: auto;
+}
+
+.shape-toolbar-title {
+  font-weight: 600;
+}
+
+.shape-toolbar button {
+  padding: 2px 8px;
+  border: 1px solid var(--pdfx-pill-border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--pdfx-pill-text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.shape-toolbar button:hover:enabled {
+  background: var(--pdfx-pill-hover);
+}
+
+.shape-toolbar button[aria-pressed="true"] {
+  background: var(--pdfx-pill-active);
+}
+
+.shape-toolbar button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.shape-toolbar-control {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.shape-toolbar-control input[type="color"] {
+  width: 24px;
+  height: 18px;
+  padding: 1px;
+}
+
+.shape-toolbar-control input[type="number"] {
+  width: 48px;
+}
+
+.shape-toolbar-control input[type="range"] {
+  width: 72px;
+}
+
+.shape-toolbar-warning {
+  color: var(--pdfx-status-warning);
+}
+
+.shape-selection-outline {
+  pointer-events: none;
+}
+
+.shape-transform-preview,
+.shape-create-preview {
+  pointer-events: none;
+}
+
+.shape-handle {
+  position: absolute;
+  box-sizing: border-box;
+  width: 10px;
+  height: 10px;
+  padding: 0;
+  border: 1px solid var(--pdfx-page);
+  border-radius: 50%;
+  background: var(--pdfx-blue);
+  box-shadow: 0 0 0 1px var(--pdfx-blue);
+  transform: translate(-50%, -50%);
+  cursor: nwse-resize;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.shape-handle--rotate {
+  cursor: grab;
+  background: var(--pdfx-page);
+  border-color: var(--pdfx-blue);
 }
 
 .text-box-style-panel {
