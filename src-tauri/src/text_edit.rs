@@ -626,6 +626,10 @@ pub(crate) struct FieldEditAction {
     pub(crate) after_state: u64,
     pub(crate) before: FieldValueSnapshot,
     pub(crate) after: FieldValueSnapshot,
+    /// True when the value was written into the PDFium document rather than
+    /// recorded only in the history overlay. Undo/redo must apply the snapshot
+    /// the same way the original fill did.
+    pub(crate) pdfium_write: bool,
 }
 
 /// One committed change to a form field this session created.
@@ -2331,7 +2335,7 @@ fn redo_field(
         &entry.document,
         &action.field_id,
         &action.after,
-        &entry.pages,
+        action.pdfium_write,
     )?;
     let page_index = action.page_index;
     entry.edit.current_state = action.after_state;
@@ -2400,7 +2404,7 @@ fn undo_field(
         &entry.document,
         &action.field_id,
         &action.before,
-        &entry.pages,
+        action.pdfium_write,
     )?;
     let page_index = action.page_index;
     entry.edit.current_state = action.before_state;

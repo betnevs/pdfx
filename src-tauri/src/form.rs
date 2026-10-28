@@ -125,11 +125,19 @@ fn describe_value(
 ) {
     match field {
         PdfFormField::Text(text) => {
-            view.value = text.value();
+            view.value = overlay
+                .text
+                .get(&view.name)
+                .cloned()
+                .or_else(|| text.value());
             view.multiline = text.is_multiline();
         }
         PdfFormField::Checkbox(checkbox) => {
-            view.checked = checkbox.is_checked().unwrap_or(false);
+            view.checked = overlay
+                .checked
+                .get(&view.name)
+                .copied()
+                .unwrap_or_else(|| checkbox.is_checked().unwrap_or(false));
         }
         PdfFormField::RadioButton(radio) => {
             // Pdfium treats "Off" as matching the /Off appearance state, so its
@@ -320,29 +328,43 @@ pub(crate) fn radio_states(source_bytes: &[u8]) -> RadioStates {
 /// on top of what Pdfium reports.
 ///
 /// Text and checkbox values are normally written into the PDFium document
-/// directly. On a copied page they are recorded here instead: the copy's
-/// widgets may still share a parent field with the original, so writing
-/// through Pdfium could update the original field's value. The save pipeline
-/// writes the overlay value into the copy's own field object.
+/// directly. A terminal field whose `/Kids` are widgets, a field whose value
+/// lives on a nested `/Parent`, and every widget on a copied page cannot be
+/// written through the annotation API without touching the wrong object. Those
+/// fills are recorded here instead; discovery reads the overlay and the save
+/// pipeline writes the value and its appearance onto the field's own object.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub(crate) struct FormOverlay {
     /// Radio group name -> selected on-state name.
     pub(crate) radio: std::collections::HashMap<String, String>,
     /// Choice field name -> selected label.
     pub(crate) choice: std::collections::HashMap<String, String>,
-    /// Text field name -> text value (copied pages only).
+    /// Text field name -> text value.
     pub(crate) text: std::collections::HashMap<String, String>,
-    /// Checkbox field name -> checked state (copied pages only).
+    /// Checkbox field name -> checked state.
     pub(crate) checked: std::collections::HashMap<String, bool>,
 }
 
 /// Derives the overlay from the actions currently applied to the document.
 ///
 /// Walking the undo stack is what makes undo/redo work without a second copy
-/// of form state: the last applied action per field wins. Text and checkbox
-/// values only enter the overlay for fields on copied pages; everywhere else
-/// Pdfium already holds the value.
-pub(crate) fn overlay_for(edit: &EditSession, pages: &crate::page_ops::PageModel) -> FormOverlay {
+/// of form state: the last applied action per field wins. Values that Pdfium
+/// wrote into the document itself are not repeated here — discovery reads
+/// them from Pdfium, and an overlay entry would otherwise hide a later write.
+pub(crate) fn overlay_for(edit: &EditSession, _pages: &crate::page_ops::PageModel) -> FormOverlay {
+    collect_values(edit, false)
+}
+
+/// Last applied value per field, including values Pdfium already wrote.
+///
+/// The save pipeline needs these to rebuild the widget appearances: the value
+/// edit itself is idempotent, but a stale `/AP` would still draw the old value
+/// if no appearance followed.
+pub(crate) fn applied_values(edit: &EditSession) -> FormOverlay {
+    collect_values(edit, true)
+}
+
+fn collect_values(edit: &EditSession, include_pdfium_written: bool) -> FormOverlay {
     let mut overlay = FormOverlay::default();
     for entry in &edit.undo_stack {
         let EditAction::Field(action) = entry else {
@@ -360,6 +382,9 @@ pub(crate) fn overlay_for(edit: &EditSession, pages: &crate::page_ops::PageModel
                 }
             }
         }
+        if action.pdfium_write && !include_pdfium_written {
+            continue;
+        }
         match &action.after {
             FieldValueSnapshot::Choice(value) => {
                 if value.is_empty() {
@@ -370,13 +395,13 @@ pub(crate) fn overlay_for(edit: &EditSession, pages: &crate::page_ops::PageModel
                         .insert(action.field_name.clone(), value.clone());
                 }
             }
-            FieldValueSnapshot::Text(text) if pages.copies.contains_key(&action.page_index) => {
+            FieldValueSnapshot::Text(text) => {
                 overlay.text.insert(action.field_name.clone(), text.clone());
             }
-            FieldValueSnapshot::Checked(checked)
-                if pages.copies.contains_key(&action.page_index) =>
-            {
-                overlay.checked.insert(action.field_name.clone(), *checked);
+            FieldValueSnapshot::Checked(checked) => {
+                overlay
+                    .checked
+                    .insert(action.field_name.clone(), *checked);
             }
             _ => {}
         }
@@ -395,7 +420,7 @@ pub(crate) fn save_object_edits(
     edit: &EditSession,
     pages: &crate::page_ops::PageModel,
 ) -> Vec<crate::save::ObjectEdit> {
-    let overlay = overlay_for(edit, pages);
+    let overlay = applied_values(edit);
     let mut edits = Vec::new();
 
     let mut groups: Vec<_> = overlay.radio.iter().collect();
@@ -905,18 +930,20 @@ fn snapshot_for(field: &FormFieldView) -> Option<FieldValueSnapshot> {
 
 /// Restores a value recorded in the unified edit history.
 ///
-/// Text and checkbox values on a copied page live in the history overlay, not
-/// in Pdfium (the copy's widget can share a parent field with the original), so
-/// restoring them is a no-op here; discovery reads the overlay instead.
+/// Only fields whose value Pdfium could reach when the action was recorded are
+/// written back into the PDFium document. Text and checkbox values on copied
+/// pages and on fields whose terminal object is not the widget live in the
+/// history overlay instead; discovery reads the overlay and the save pipeline
+/// writes the value. Radio and choice values always take that overlay route.
 pub(crate) fn apply_field_snapshot(
     document: &PdfDocument<'static>,
     field_id: &str,
     snapshot: &FieldValueSnapshot,
-    pages: &crate::page_ops::PageModel,
+    pdfium_write: bool,
 ) -> Result<(), CommandError> {
     match snapshot {
         FieldValueSnapshot::Text(text) => {
-            if field_is_on_copy(field_id, pages)? {
+            if !pdfium_write {
                 return Ok(());
             }
             with_field(document, field_id, |form| match form {
@@ -930,7 +957,7 @@ pub(crate) fn apply_field_snapshot(
             })
         }
         FieldValueSnapshot::Checked(checked) => {
-            if field_is_on_copy(field_id, pages)? {
+            if !pdfium_write {
                 return Ok(());
             }
             with_field(document, field_id, |form| {
@@ -954,13 +981,92 @@ pub(crate) fn apply_field_snapshot(
     }
 }
 
-/// Whether a field id addresses a widget on a page created by `copy_page`.
-fn field_is_on_copy(
-    field_id: &str,
-    pages: &crate::page_ops::PageModel,
-) -> Result<bool, CommandError> {
-    let (page_index, _) = parse_field_id(field_id)?;
-    Ok(pages.copies.contains_key(&page_index))
+/// Whether Pdfium's annotation setter can reach a text or checkbox field's
+/// value.
+///
+/// `FPDFAnnot_SetStringValue` writes `/V` onto the widget annotation. A
+/// terminal field that keeps its value on a separate field object (its `/Kids`
+/// are the widgets) or that is nested under another field is not addressed by
+/// that write, so filling it through Pdfium would silently do nothing. Those
+/// fields use the history overlay instead. An unparseable or unknown field is
+/// also routed through the overlay, which can always write the correct object
+/// at save time.
+fn pdfium_can_write_field(source_bytes: &[u8], raw_name: &str) -> bool {
+    fn walk(
+        document: &lopdf::Document,
+        fields: &[lopdf::Object],
+        prefix: &str,
+        target: &str,
+    ) -> Option<bool> {
+        for entry in fields {
+            let Some(id) = entry.as_reference().ok() else {
+                continue;
+            };
+            let Some(dictionary) = document.get_dictionary(id).ok() else {
+                continue;
+            };
+            let title = dictionary
+                .get(b"T")
+                .ok()
+                .and_then(|title| title.as_str().ok())
+                .map(|title| String::from_utf8_lossy(title).into_owned());
+            let full = match &title {
+                Some(title) if prefix.is_empty() => title.clone(),
+                Some(title) => format!("{prefix}.{title}"),
+                None => prefix.to_owned(),
+            };
+            let kids: Vec<lopdf::Object> = dictionary
+                .get_deref(b"Kids", document)
+                .ok()
+                .and_then(|kids| kids.as_array().ok())
+                .map(|kids| {
+                    kids.iter()
+                        .filter(|kid| {
+                            kid.as_reference()
+                                .ok()
+                                .and_then(|id| document.get_dictionary(id).ok())
+                                .map(|kid| kid.has(b"T"))
+                                .unwrap_or(false)
+                        })
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default();
+            if title.is_some() && full == target && kids.is_empty() {
+                let has_widget_kids = dictionary
+                    .get_deref(b"Kids", document)
+                    .ok()
+                    .and_then(|kids| kids.as_array().ok())
+                    .map(|kids| !kids.is_empty())
+                    .unwrap_or(false);
+                return Some(!has_widget_kids);
+            }
+            for kid in &kids {
+                if let Some(found) = walk(document, std::slice::from_ref(kid), &full, target) {
+                    return Some(found);
+                }
+            }
+        }
+        None
+    }
+
+    let Ok(document) = lopdf::Document::load_mem(source_bytes) else {
+        return false;
+    };
+    let Ok(acro_form) = document
+        .catalog()
+        .and_then(|catalog| catalog.get_deref(b"AcroForm", &document))
+        .and_then(lopdf::Object::as_dict)
+    else {
+        return false;
+    };
+    let Ok(fields) = acro_form
+        .get_deref(b"Fields", &document)
+        .and_then(lopdf::Object::as_array)
+    else {
+        return false;
+    };
+    walk(&document, fields, "", raw_name).unwrap_or(false)
 }
 
 fn fill_for(
@@ -1071,6 +1177,15 @@ fn fill_for(
     let before =
         snapshot_for(&field).ok_or_else(|| invalid_value("this widget type cannot be filled"))?;
     let is_copy = entry.pages.copies.contains_key(&field.page_index);
+    // Radio and choice values always live in the history overlay. Text and
+    // checkbox values only go through Pdfium when the annotation setter can
+    // actually reach the field object.
+    let pdfium_write = !is_copy
+        && matches!(
+            field.kind,
+            FormFieldKind::Text | FormFieldKind::Checkbox
+        )
+        && pdfium_can_write_field(&entry.source_bytes, &field.raw_name);
 
     let after = match field.kind {
         FormFieldKind::Radio => {
@@ -1092,10 +1207,10 @@ fn fill_for(
             }
             FieldValueSnapshot::Choice(value.clone())
         }
-        _ if is_copy => {
-            // Copy-page widgets are filled through the history overlay so the
-            // write can never reach the source page's field object. The save
-            // pipeline applies the value to the copy's own field.
+        FormFieldKind::Text | FormFieldKind::Checkbox if !pdfium_write => {
+            // Copied pages and field shapes Pdfium cannot address are filled
+            // through the history overlay. The save pipeline applies the value
+            // and regenerates the widget appearance on the field's own object.
             match (&field.kind, &value) {
                 (FormFieldKind::Text, FormFieldValueInput::Text { text }) => {
                     FieldValueSnapshot::Text(text.clone())
@@ -1135,6 +1250,7 @@ fn fill_for(
                 after_state,
                 before,
                 after,
+                pdfium_write,
             }));
         entry.edit.redo_stack.clear();
         entry.edit.current_state = after_state;

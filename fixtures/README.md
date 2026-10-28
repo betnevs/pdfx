@@ -24,6 +24,7 @@ Rust 测试通过 `src-tauri/tests/support/fixtures.rs` 读取 `manifest.json`�
 | encrypted | `encrypted-owner-restrictions.pdf` | 用户密码为空；所有者限制修改、复制与注释，允许打印 | 用户（空）/ 所有者 `pdfx-owner` |
 | encrypted | `encrypted-print-denied.pdf` | 用户密码为空；所有者仅禁止打印，编辑、复制与注释仍允许 | 用户（空）/ 所有者 `pdfx-owner` |
 | form | `form-acroform.pdf` | 两页 AcroForm：文本、复选框、单选组、列表框、下拉框；含必填、只读与带 JavaScript 动作的字段 | — |
+| form-fill | `form-fill-appearance.pdf` | 两页 AcroForm：值位于 `/Kids` 终端字段、嵌套 `/Parent` 字段、复选框、单选组、列表框、下拉框；第 2 页旋转 90°；全部控件带故意过期的红色外观流 | — |
 | structure | `structure-metadata.pdf` | 两级书签、URI 链接、Info/XMP 元数据、内嵌附件 | — |
 | large | `large-500-pages.pdf` | 500 页最小“大文件”样例（约 146KB） | — |
 | rotated | `rotated-mixed-size.pdf` | 旋转 90/0/270，三种页面尺寸 | — |

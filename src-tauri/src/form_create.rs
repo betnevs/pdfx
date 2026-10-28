@@ -1437,6 +1437,67 @@ impl FormFieldSpec {
     }
 }
 
+/// One existing widget value whose appearance must be rebuilt on save.
+///
+/// Filling an existing field records the value in the edit history; the value
+/// itself is written by the `Set*Value` object edits. This spec carries the
+/// same value to the appearance writer, which reads the field's widgets, page
+/// rotation and layout entries from the document and produces an `/AP /N`
+/// that matches.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExistingFieldAppearance {
+    pub field_name: String,
+    pub value: ExistingAppearanceValue,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExistingAppearanceValue {
+    Text(String),
+    Checked(bool),
+    /// Selected on-state name of a radio group.
+    Radio(String),
+    /// Selected option label of a choice field.
+    Choice(String),
+}
+
+/// Widgets and layout inputs resolved before the font subset is built.
+struct PreparedAppearance {
+    widgets: Vec<PreparedWidget>,
+    kind: PreparedKind,
+}
+
+struct PreparedWidget {
+    id: ObjectId,
+    user_rect: [f32; 4],
+    /// Display-space dimensions: swapped for pages rotated by 90/270.
+    width: f32,
+    height: f32,
+    rotation: u16,
+    /// Non-Off state of a button widget's `/AP /N` dictionary.
+    on_state: Option<Vec<u8>>,
+}
+
+enum PreparedKind {
+    Text {
+        value: String,
+        multiline: bool,
+        font_size: f32,
+    },
+    Choice {
+        options: Vec<String>,
+        selected: Vec<usize>,
+        combo: bool,
+        font_size: f32,
+    },
+    Checkbox {
+        checked: bool,
+        on_state: Vec<u8>,
+    },
+    Radio {
+        selected: String,
+    },
+}
+
 impl CreatedField {
     fn text_spec(&self) -> Option<TextFieldSpec> {
         let widget = self.widgets.first()?;
@@ -1598,12 +1659,50 @@ pub(crate) fn save_object_edits(
         }
     }
     if specs.is_empty() {
-        Ok(Vec::new())
-    } else {
-        Ok(vec![crate::save::ObjectEdit::CreateFormFields {
-            fields: specs,
-        }])
+        let appearances = existing_appearances(edit, pages);
+        if appearances.is_empty() {
+            return Ok(Vec::new());
+        }
+        return Ok(vec![crate::save::ObjectEdit::CreateFormFields {
+            fields: Vec::new(),
+            appearances,
+        }]);
     }
+    Ok(vec![crate::save::ObjectEdit::CreateFormFields {
+        fields: specs,
+        appearances: existing_appearances(edit, pages),
+    }])
+}
+
+/// Mirrors the value edits derived from the history overlay into appearance
+/// specs: every filled existing field needs a widget appearance that shows the
+/// new value, not the source file's stale one.
+fn existing_appearances(
+    edit: &EditSession,
+    pages: &crate::page_ops::PageModel,
+) -> Vec<ExistingFieldAppearance> {
+    crate::form::save_object_edits(edit, pages)
+        .into_iter()
+        .filter_map(|object_edit| {
+            let (field_name, value) = match object_edit {
+                crate::save::ObjectEdit::SetTextValue { field_name, text } => {
+                    (field_name, ExistingAppearanceValue::Text(text))
+                }
+                crate::save::ObjectEdit::SetCheckboxValue {
+                    field_name,
+                    checked,
+                } => (field_name, ExistingAppearanceValue::Checked(checked)),
+                crate::save::ObjectEdit::SetRadioGroup { field_name, state } => {
+                    (field_name, ExistingAppearanceValue::Radio(state))
+                }
+                crate::save::ObjectEdit::SetChoiceValue { field_name, label } => {
+                    (field_name, ExistingAppearanceValue::Choice(label))
+                }
+                _ => return None,
+            };
+            Some(ExistingFieldAppearance { field_name, value })
+        })
+        .collect()
 }
 
 fn pdf_error(context: impl Into<String>) -> CommandError {
@@ -2753,6 +2852,421 @@ fn write_signature_field(
         .map_err(|error| pdf_error(format!("could not add the signature field: {error}")))
 }
 
+/// Resolves the existing fields whose appearances must be rebuilt: widget
+/// rectangles, page rotation, `/DA` font size, flags and choice options.
+fn prepare_existing_appearances(
+    incremental: &IncrementalDocument,
+    appearances: &[ExistingFieldAppearance],
+) -> Result<Vec<PreparedAppearance>, CommandError> {
+    let acro_form_da = crate::save::acro_form_any(incremental)
+        .and_then(|acro_form| acro_form.get(b"DA").ok())
+        .and_then(|da| da.as_str().ok())
+        .map(crate::save::decode_pdf_text);
+    let mut prepared = Vec::with_capacity(appearances.len());
+    for appearance in appearances {
+        let found = crate::save::find_form_field_any(incremental, &appearance.field_name)
+            .ok_or_else(|| {
+                pdf_error(format!(
+                    "could not find the field {:?} in the saved document",
+                    appearance.field_name
+                ))
+            })?;
+        let field_id = found.field_id;
+        let mut widget_ids = found.widget_ids;
+        if widget_ids.is_empty() {
+            // A merged field is its own widget.
+            widget_ids.push(field_id);
+        }
+        let flags = inherited_field_entry(incremental, field_id, b"Ff")
+            .and_then(|flags| flags.as_i64().ok())
+            .unwrap_or(0);
+        let font_size = widget_da(incremental, &widget_ids)
+            .or_else(|| {
+                inherited_field_entry(incremental, field_id, b"DA")
+                    .and_then(|da| da.as_str().ok().map(crate::save::decode_pdf_text))
+            })
+            .or_else(|| acro_form_da.clone())
+            .as_deref()
+            .and_then(font_size_from_da)
+            .unwrap_or(DEFAULT_FONT_SIZE);
+        let widgets: Vec<PreparedWidget> = widget_ids
+            .iter()
+            .filter_map(|id| prepared_widget(incremental, *id, field_id))
+            .collect();
+        let kind = match &appearance.value {
+            ExistingAppearanceValue::Text(text) => PreparedKind::Text {
+                value: text.clone(),
+                multiline: flags & (1 << 12) != 0,
+                font_size,
+            },
+            ExistingAppearanceValue::Checked(checked) => {
+                let on_state = widgets
+                    .iter()
+                    .find_map(|widget| widget.on_state.clone())
+                    .unwrap_or_else(|| CHECKBOX_ON_STATE.as_bytes().to_vec());
+                PreparedKind::Checkbox {
+                    checked: *checked,
+                    on_state,
+                }
+            }
+            ExistingAppearanceValue::Radio(state) => PreparedKind::Radio {
+                selected: state.clone(),
+            },
+            ExistingAppearanceValue::Choice(label) => {
+                let options = inherited_field_entry(incremental, field_id, b"Opt")
+                    .and_then(|options| {
+                        crate::save::resolve_object_any(incremental, &options).cloned()
+                    })
+                    .and_then(|options| options.as_array().ok().cloned())
+                    .map(|options| {
+                        options
+                            .iter()
+                            .filter_map(crate::save::option_label)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let selected = options
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, option)| *option == label)
+                    .map(|(index, _)| index)
+                    .collect();
+                PreparedKind::Choice {
+                    options,
+                    selected,
+                    combo: flags & (1 << 17) != 0,
+                    font_size,
+                }
+            }
+        };
+        prepared.push(PreparedAppearance { widgets, kind });
+    }
+    Ok(prepared)
+}
+
+/// A field entry, falling back to the nearest ancestor that defines it
+/// (PDF 32000-1 Table 220: `/FT`, `/Ff`, `/DA` and `/Opt` are inheritable).
+fn inherited_field_entry(
+    incremental: &IncrementalDocument,
+    field_id: ObjectId,
+    key: &[u8],
+) -> Option<Object> {
+    let mut next = Some(field_id);
+    for _ in 0..64 {
+        let dictionary = crate::save::dictionary_any(incremental, next?)?;
+        if let Ok(value) = dictionary.get(key) {
+            return Some(value.clone());
+        }
+        next = dictionary
+            .get(b"Parent")
+            .ok()
+            .and_then(|parent| parent.as_reference().ok());
+    }
+    None
+}
+
+/// The widget-level `/DA`, which overrides the field and AcroForm defaults.
+fn widget_da(incremental: &IncrementalDocument, widget_ids: &[ObjectId]) -> Option<String> {
+    for id in widget_ids {
+        if let Some(da) = crate::save::dictionary_any(incremental, *id)
+            .and_then(|widget| widget.get(b"DA").ok())
+            .and_then(|da| da.as_str().ok())
+        {
+            return Some(crate::save::decode_pdf_text(da));
+        }
+    }
+    None
+}
+
+/// Reads the font size from a `/DA` string (`/Helv 12 Tf 0 g`). A size of 0
+/// means auto-sizing, which this writer does not implement, so it falls back
+/// to the default size.
+fn font_size_from_da(da: &str) -> Option<f32> {
+    let tokens: Vec<&str> = da.split_whitespace().collect();
+    tokens
+        .windows(3)
+        .find(|window| window[2] == "Tf")
+        .and_then(|window| window[1].parse::<f32>().ok())
+        .filter(|size| *size > 0.0)
+}
+
+fn prepared_widget(
+    incremental: &IncrementalDocument,
+    widget_id: ObjectId,
+    field_id: ObjectId,
+) -> Option<PreparedWidget> {
+    let widget = crate::save::dictionary_any(incremental, widget_id)?;
+    let rect = widget
+        .get(b"Rect")
+        .ok()
+        .and_then(|rect| crate::save::resolve_object_any(incremental, rect))
+        .and_then(|rect| rect.as_array().ok())?;
+    if rect.len() < 4 {
+        return None;
+    }
+    let mut values = [0.0_f32; 4];
+    for (value, object) in values.iter_mut().zip(rect.iter()) {
+        *value = object.as_float().ok()?;
+    }
+    let [x0, y0, x1, y1] = normalized_rect(values);
+    let rotation = annotation_rotation(incremental, widget, field_id);
+    let (width, height) = if rotation % 180 == 90 {
+        (y1 - y0, x1 - x0)
+    } else {
+        (x1 - x0, y1 - y0)
+    };
+    Some(PreparedWidget {
+        id: widget_id,
+        user_rect: [x0, y0, x1, y1],
+        width,
+        height,
+        rotation,
+        on_state: crate::save::widget_on_state_any(incremental, widget),
+    })
+}
+
+/// The page's intrinsic rotation, inherited through the page tree. Widgets
+/// without a resolvable page fall back to an unrotated appearance.
+fn annotation_rotation(
+    incremental: &IncrementalDocument,
+    widget: &Dictionary,
+    field_id: ObjectId,
+) -> u16 {
+    let page_id = widget
+        .get(b"P")
+        .ok()
+        .and_then(|page| page.as_reference().ok())
+        .or_else(|| {
+            crate::save::dictionary_any(incremental, field_id)
+                .and_then(|field| field.get(b"P").ok())
+                .and_then(|page| page.as_reference().ok())
+        });
+    let mut next = page_id;
+    for _ in 0..64 {
+        let Some(id) = next else { break };
+        let Some(dictionary) = crate::save::dictionary_any(incremental, id) else {
+            break;
+        };
+        if let Ok(rotation) = dictionary.get(b"Rotate").and_then(Object::as_i64) {
+            return ((rotation % 360 + 360) % 360) as u16;
+        }
+        next = dictionary
+            .get(b"Parent")
+            .ok()
+            .and_then(|parent| parent.as_reference().ok());
+    }
+    0
+}
+
+/// The shared font subset and the name it is registered under in `/DR`.
+struct AppearanceFont<'a> {
+    name: &'a str,
+    id: ObjectId,
+    subset: &'a FontSubset,
+    metrics: &'a FontMetrics,
+}
+
+impl AppearanceFont<'_> {
+    fn resources(&self) -> Dictionary {
+        let mut fonts = Dictionary::new();
+        fonts.set(self.name.as_bytes().to_vec(), Object::Reference(self.id));
+        let mut resources = Dictionary::new();
+        resources.set(b"Font".to_vec(), Object::Dictionary(fonts));
+        resources
+    }
+}
+
+/// Writes a fresh `/AP /N` for every widget of every filled existing field.
+///
+/// The value itself was already written by the `Set*Value` object edits; this
+/// pass only replaces appearances, so a reader that draws `/AP` agrees with
+/// `/V`, `/AS` and `/I`.
+fn write_existing_appearances(
+    incremental: &mut IncrementalDocument,
+    prepared: &[PreparedAppearance],
+    font: Option<&AppearanceFont<'_>>,
+) -> Result<(), CommandError> {
+    for appearance in prepared {
+        for widget in &appearance.widgets {
+            let (normal, state) = match &appearance.kind {
+                PreparedKind::Text {
+                    value,
+                    multiline,
+                    font_size,
+                } => {
+                    let font = font.ok_or_else(|| {
+                        pdf_error("a text appearance needs an embedded font subset")
+                    })?;
+                    let spec = TextFieldSpec {
+                        page_index: 0,
+                        name: String::new(),
+                        tooltip: None,
+                        required: false,
+                        multiline: *multiline,
+                        font_size: *font_size,
+                        user_rect: widget.user_rect,
+                        width: widget.width,
+                        height: widget.height,
+                        value: value.clone(),
+                        rotation: widget.rotation,
+                    };
+                    let content =
+                        text_appearance_content(&spec, font.name, font.subset, font.metrics);
+                    let appearance_id = write_appearance_stream(
+                        &mut incremental.new_document,
+                        widget.user_rect,
+                        content,
+                        Some(font.resources()),
+                    )?;
+                    (Object::Reference(appearance_id), None)
+                }
+                PreparedKind::Choice {
+                    options,
+                    selected,
+                    combo,
+                    font_size,
+                } => {
+                    let font = font.ok_or_else(|| {
+                        pdf_error("a choice appearance needs an embedded font subset")
+                    })?;
+                    let spec = ChoiceFieldSpec {
+                        page_index: 0,
+                        name: String::new(),
+                        tooltip: None,
+                        required: false,
+                        combo: *combo,
+                        multi_select: false,
+                        font_size: *font_size,
+                        options: options.clone(),
+                        selected: selected.clone(),
+                        user_rect: widget.user_rect,
+                        width: widget.width,
+                        height: widget.height,
+                        rotation: widget.rotation,
+                    };
+                    let content =
+                        choice_appearance_content(&spec, font.name, font.subset, font.metrics);
+                    let appearance_id = write_appearance_stream(
+                        &mut incremental.new_document,
+                        widget.user_rect,
+                        content,
+                        Some(font.resources()),
+                    )?;
+                    (Object::Reference(appearance_id), None)
+                }
+                PreparedKind::Checkbox { checked, on_state } => {
+                    let off = write_appearance_stream(
+                        &mut incremental.new_document,
+                        widget.user_rect,
+                        checkbox_appearance_content(
+                            widget.rotation,
+                            widget.user_rect,
+                            widget.width,
+                            widget.height,
+                            false,
+                        ),
+                        None,
+                    )?;
+                    let on = write_appearance_stream(
+                        &mut incremental.new_document,
+                        widget.user_rect,
+                        checkbox_appearance_content(
+                            widget.rotation,
+                            widget.user_rect,
+                            widget.width,
+                            widget.height,
+                            true,
+                        ),
+                        None,
+                    )?;
+                    let normal = state_appearance(&[
+                        (b"Off".as_slice(), off),
+                        (on_state.as_slice(), on),
+                    ]);
+                    let state = if *checked {
+                        on_state.clone()
+                    } else {
+                        b"Off".to_vec()
+                    };
+                    (normal, Some(state))
+                }
+                PreparedKind::Radio { selected } => {
+                    let on_state = widget
+                        .on_state
+                        .clone()
+                        .unwrap_or_else(|| selected.as_bytes().to_vec());
+                    let off = write_appearance_stream(
+                        &mut incremental.new_document,
+                        widget.user_rect,
+                        radio_appearance_content(
+                            widget.rotation,
+                            widget.user_rect,
+                            widget.width,
+                            widget.height,
+                            false,
+                        ),
+                        None,
+                    )?;
+                    let on = write_appearance_stream(
+                        &mut incremental.new_document,
+                        widget.user_rect,
+                        radio_appearance_content(
+                            widget.rotation,
+                            widget.user_rect,
+                            widget.width,
+                            widget.height,
+                            true,
+                        ),
+                        None,
+                    )?;
+                    let normal = state_appearance(&[
+                        (b"Off".as_slice(), off),
+                        (on_state.as_slice(), on),
+                    ]);
+                    let state = if selected.as_bytes() == on_state.as_slice() {
+                        on_state
+                    } else {
+                        b"Off".to_vec()
+                    };
+                    (normal, Some(state))
+                }
+            };
+            apply_widget_appearance(incremental, widget.id, normal, state)?;
+        }
+    }
+    Ok(())
+}
+
+fn state_appearance(states: &[(&[u8], ObjectId)]) -> Object {
+    let mut normal = Dictionary::new();
+    for (state, id) in states {
+        normal.set(state.to_vec(), Object::Reference(*id));
+    }
+    Object::Dictionary(normal)
+}
+
+fn apply_widget_appearance(
+    incremental: &mut IncrementalDocument,
+    widget_id: ObjectId,
+    normal: Object,
+    state: Option<Vec<u8>>,
+) -> Result<(), CommandError> {
+    incremental
+        .opt_clone_object_to_new_document(widget_id)
+        .map_err(|error| pdf_error(format!("could not clone a filled widget: {error}")))?;
+    let widget = incremental
+        .new_document
+        .get_dictionary_mut(widget_id)
+        .map_err(|error| pdf_error(format!("could not edit a filled widget: {error}")))?;
+    let mut appearance = Dictionary::new();
+    appearance.set(b"N".to_vec(), normal);
+    widget.set(b"AP".to_vec(), Object::Dictionary(appearance));
+    if let Some(state) = state {
+        widget.set(b"AS".to_vec(), Object::Name(state));
+    }
+    Ok(())
+}
+
 /// Writes every created field into the in-progress incremental revision.
 ///
 /// This is the only writer of AcroForm structures: the catalog, `/AcroForm`,
@@ -2763,8 +3277,9 @@ fn write_signature_field(
 pub(crate) fn apply_created_fields(
     incremental: &mut IncrementalDocument,
     fields: &[FormFieldSpec],
+    appearances: &[ExistingFieldAppearance],
 ) -> Result<(), CommandError> {
-    if fields.is_empty() {
+    if fields.is_empty() && appearances.is_empty() {
         return Ok(());
     }
 
@@ -2810,7 +3325,9 @@ pub(crate) fn apply_created_fields(
         array_entry(document, acroform, b"Fields", "the saved /AcroForm /Fields")?
     };
 
-    let font_text: String = fields
+    let prepared = prepare_existing_appearances(incremental, appearances)?;
+
+    let mut font_text: Vec<&str> = fields
         .iter()
         .flat_map(|spec| match spec {
             FormFieldSpec::Text(text) => vec![text.value.as_str()],
@@ -2818,12 +3335,26 @@ pub(crate) fn apply_created_fields(
             FormFieldSpec::Signature(_) => vec![SIGNATURE_APPEARANCE_LABEL],
             FormFieldSpec::Checkbox(_) | FormFieldSpec::Radio(_) => Vec::new(),
         })
-        .collect::<Vec<_>>()
-        .join(" ");
+        .collect();
+    for appearance in &prepared {
+        match &appearance.kind {
+            PreparedKind::Text { value, .. } => font_text.push(value),
+            PreparedKind::Choice { options, .. } => {
+                font_text.extend(options.iter().map(String::as_str));
+            }
+            PreparedKind::Checkbox { .. } | PreparedKind::Radio { .. } => {}
+        }
+    }
+    let font_text = font_text.join(" ");
     let has_font = fields.iter().any(|spec| {
         matches!(
             spec,
             FormFieldSpec::Text(_) | FormFieldSpec::Choice(_) | FormFieldSpec::Signature(_)
+        )
+    }) || prepared.iter().any(|appearance| {
+        matches!(
+            appearance.kind,
+            PreparedKind::Text { .. } | PreparedKind::Choice { .. }
         )
     });
     let has_signature = fields
@@ -2946,6 +3477,18 @@ pub(crate) fn apply_created_fields(
                     .push(Object::Reference(field_id));
             }
         }
+    }
+
+    if !prepared.is_empty() {
+        let appearance_font =
+            font.as_ref()
+                .map(|(name, id, subset, metrics, _)| AppearanceFont {
+                    name: name.as_str(),
+                    id: *id,
+                    subset,
+                    metrics,
+                });
+        write_existing_appearances(incremental, &prepared, appearance_font.as_ref())?;
     }
 
     {

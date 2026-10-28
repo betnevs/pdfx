@@ -76,6 +76,18 @@
       "description": "两页 AcroForm：文本、复选框、单选组、列表框、下拉框，含必填与只读字段；js_guard 字段带 JavaScript 击键动作（PDFX 不执行）。"
     },
     {
+      "id": "form-fill-appearance",
+      "category": "form-fill",
+      "path": "pdfs/form-fill-appearance.pdf",
+      "sha256": "fc127a04e6b3f4f70cce44307f0dc1659d753e0e557b531bbb28916bc7b82632",
+      "size_bytes": 4617,
+      "page_count": 2,
+      "valid": true,
+      "password": null,
+      "owner_password": null,
+      "description": "两页 AcroForm：字段值位于带 /Kids 的终端字段、嵌套 /Parent 字段、复选框、单选组、列表框与下拉框；第二页旋转 90°，所有控件带故意过期的红色外观流，用于填写后外观保真测试。"
+    },
+    {
       "id": "structure-metadata",
       "category": "structure",
       "path": "pdfs/structure-metadata.pdf",

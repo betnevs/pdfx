@@ -445,6 +445,156 @@ def form_pdf() -> bytes:
     return build_pdf(objects, root_ref=b"1 0 R", info_ref=b"26 0 R")
 
 
+def fill_appearance_pdf() -> bytes:
+    """Two-page AcroForm for appearance-fidelity tests.
+
+    Every widget carries a deliberately stale red appearance whose drawing does
+    not match its `/V`. The form exercises the field shapes PDFium's annotation
+    API cannot rewrite directly: a terminal text field whose value lives on the
+    parent while the widget sits in `/Kids` (`membership_id`), and a field
+    nested under another field (`person.name`). Page 1 is rotated 90 degrees so
+    a filled appearance must compensate for `/Rotate`. `/NM` is present on two
+    widgets so copying the page can be checked for independent annotation
+    names.
+    """
+    page_one_content = content_lines(
+        [
+            "PDFX fill appearance fixture",
+            "Membership id:",
+            "Person name:",
+            "Subscribe:",
+            "Gender:",
+            "Country:",
+        ],
+        size=16,
+    )
+    page_two_content = content_lines(
+        [
+            "PDFX fill appearance fixture - page 2 (rotated)",
+            "Comments:",
+            "Department:",
+        ],
+        size=16,
+    )
+    # Every stale appearance is red so a saved page can be scanned for leftover
+    # source pixels without relying on text extraction.
+    stale_text = stream_object(
+        b"/Type /XObject /Subtype /Form /BBox [0 0 248 24] "
+        b"/Resources << /Font << /Helv 4 0 R >> >>",
+        b"q 1 0 0 rg BT /Helv 12 Tf 2 6 Td (STALE) Tj ET Q\n",
+    )
+    stale_checkbox_off = stream_object(
+        b"/Type /XObject /Subtype /Form /BBox [0 0 16 16]",
+        b"q 1 0 0 RG 1 w 1 1 14 14 re S Q\n",
+    )
+    stale_checkbox_on = stream_object(
+        b"/Type /XObject /Subtype /Form /BBox [0 0 16 16]",
+        b"q 1 0 0 rg 2 2 12 12 re f Q\n",
+    )
+    stale_radio_on = stream_object(
+        b"/Type /XObject /Subtype /Form /BBox [0 0 16 16]",
+        b"q 1 0 0 rg 3 3 10 10 re f Q\n",
+    )
+    stale_radio_off = stream_object(
+        b"/Type /XObject /Subtype /Form /BBox [0 0 16 16]",
+        b"q 1 0 0 RG 1 w 1 1 14 14 re S Q\n",
+    )
+
+    objects = {
+        1: (
+            b"<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields ["
+            b"6 0 R 9 0 R 12 0 R 15 0 R 21 0 R 25 0 R 26 0 R"
+            b"] /DA (/Helv 10 Tf 0 g) /DR << /Font << /Helv 4 0 R >> >> >> >>"
+        ),
+        2: b"<< /Type /Pages /Kids [3 0 R 23 0 R] /Count 2 >>",
+        # Page 0, unrotated.
+        3: (
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+            b"/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R "
+            b"/Annots [7 0 R 11 0 R 12 0 R 16 0 R 17 0 R 18 0 R 21 0 R] >>"
+        ),
+        4: HELVETICA,
+        5: stream_object(b"", page_one_content),
+        # Terminal text field with the value on the parent and the widget in
+        # /Kids: Pdfium writes /V to the annotation, which would be a no-op.
+        6: (
+            b"<< /FT /Tx /T (membership_id) /V (OLD-0001) "
+            b"/DA (/Helv 12 Tf 0 g) /Kids [7 0 R] >>"
+        ),
+        7: (
+            b"<< /Type /Annot /Subtype /Widget /Parent 6 0 R "
+            b"/Rect [72 656 320 680] /P 3 0 R /F 4 /NM (w-membership) "
+            b"/AP << /N 8 0 R >> >>"
+        ),
+        8: stale_text,
+        # Nested field: /Fields -> person -> name -> widget. The value lives on
+        # the child; the widget's /Parent chain carries the dotted name.
+        9: b"<< /T (person) /FT /Tx /DA (/Helv 10 Tf 0 g) /Kids [10 0 R] >>",
+        10: (
+            b"<< /T (name) /Parent 9 0 R /V (Grace Hopper) /Kids [11 0 R] >>"
+        ),
+        11: (
+            b"<< /Type /Annot /Subtype /Widget /Parent 10 0 R "
+            b"/Rect [72 606 320 630] /P 3 0 R /F 4 /NM (w-person-name) "
+            b"/AP << /N 8 0 R >> >>"
+        ),
+        12: (
+            b"<< /Type /Annot /Subtype /Widget /FT /Btn /T (subscribe) "
+            b"/V /Off /AS /Off /Rect [72 556 88 572] /P 3 0 R /F 4 "
+            b"/AP << /N << /Off 13 0 R /Yes 14 0 R >> >> >>"
+        ),
+        13: stale_checkbox_off,
+        14: stale_checkbox_on,
+        15: (
+            b"<< /FT /Btn /T (gender) /Ff 32770 /Kids [16 0 R 17 0 R 18 0 R] "
+            b"/V /Off >>"
+        ),
+        16: (
+            b"<< /Type /Annot /Subtype /Widget /Parent 15 0 R "
+            b"/Rect [72 506 88 522] /P 3 0 R /F 4 /NM (w-gender-male) "
+            b"/AP << /N << /male 19 0 R /Off 20 0 R >> >> /AS /Off >>"
+        ),
+        17: (
+            b"<< /Type /Annot /Subtype /Widget /Parent 15 0 R "
+            b"/Rect [96 506 112 522] /P 3 0 R /F 4 "
+            b"/AP << /N << /female 19 0 R /Off 20 0 R >> >> /AS /Off >>"
+        ),
+        18: (
+            b"<< /Type /Annot /Subtype /Widget /Parent 15 0 R "
+            b"/Rect [120 506 136 522] /P 3 0 R /F 4 "
+            b"/AP << /N << /other 19 0 R /Off 20 0 R >> >> /AS /Off >>"
+        ),
+        19: stale_radio_on,
+        20: stale_radio_off,
+        21: (
+            b"<< /Type /Annot /Subtype /Widget /FT /Ch /T (country) "
+            b"/Rect [300 480 460 560] /P 3 0 R /F 4 /DA (/Helv 12 Tf 0 g) "
+            b"/Opt [(China) (Japan) (Germany)] /V (China) /I [0] "
+            b"/AP << /N 22 0 R >> >>"
+        ),
+        22: stale_text,
+        # Page 1, rotated 90 degrees.
+        23: (
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Rotate 90 "
+            b"/Resources << /Font << /F1 4 0 R >> >> /Contents 24 0 R "
+            b"/Annots [25 0 R 26 0 R] >>"
+        ),
+        24: stream_object(b"", page_two_content),
+        25: (
+            b"<< /Type /Annot /Subtype /Widget /FT /Tx /T (comments) /Ff 4096 "
+            b"/Rect [72 600 400 680] /P 23 0 R /F 4 /DA (/Helv 12 Tf 0 g) "
+            b"/V (Old comment) /AP << /N 8 0 R >> >>"
+        ),
+        26: (
+            b"<< /Type /Annot /Subtype /Widget /FT /Ch /T (department) /Ff 131072 "
+            b"/Rect [72 500 300 524] /P 23 0 R /F 4 /DA (/Helv 12 Tf 0 g) "
+            b"/Opt [(Engineering) (Design) (Sales)] /AP << /N 22 0 R >> >>"
+        ),
+        27: b"<< /Title (PDFX fill appearance fixture) /Author (PDFX QA) >>",
+    }
+    return build_pdf(objects, root_ref=b"1 0 R", info_ref=b"27 0 R")
+
+
 def structure_pdf() -> bytes:
     page_content = content_lines(
         ["PDFX structure fixture", "Bookmarks, a link, metadata and an attachment."],
@@ -620,6 +770,7 @@ def build_all(large_pages: int) -> Tuple[Dict[str, bytes], List[FixtureSpec]]:
             title="PDFX encrypted fixture (print denied)",
         ),
         "form-acroform.pdf": form_pdf(),
+        "form-fill-appearance.pdf": fill_appearance_pdf(),
         "structure-metadata.pdf": structure_pdf(),
         f"large-{large_pages}-pages.pdf": large_pdf(large_pages),
         "rotated-mixed-size.pdf": rotated_pdf(),
@@ -673,6 +824,15 @@ def build_all(large_pages: int) -> Tuple[Dict[str, bytes], List[FixtureSpec]]:
             "form",
             "两页 AcroForm：文本、复选框、单选组、列表框、下拉框，含必填与只读字段；"
             "js_guard 字段带 JavaScript 击键动作（PDFX 不执行）。",
+            2,
+            True,
+        ),
+        FixtureSpec(
+            "form-fill-appearance.pdf",
+            "form-fill",
+            "两页 AcroForm：字段值位于带 /Kids 的终端字段、嵌套 /Parent 字段、"
+            "复选框、单选组、列表框与下拉框；第二页旋转 90°，所有控件带故意过期的"
+            "红色外观流，用于填写后外观保真测试。",
             2,
             True,
         ),
