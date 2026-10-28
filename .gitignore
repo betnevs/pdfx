@@ -44,5 +44,7 @@ test-results/
 spikes/pdf-engine/vendor/
 spikes/pdf-engine/out/
 
-# Native PDFium library fetched by scripts/setup-native.sh
-src-tauri/vendor/
+# Native PDFium library fetched by scripts/setup-native.sh. The patched
+# pdfium-render crate under src-tauri/vendor/pdfium-render is committed.
+src-tauri/vendor/downloads/
+src-tauri/vendor/pdfium/

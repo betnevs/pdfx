@@ -1,6 +1,7 @@
 pub mod commands;
 pub mod engine;
 mod menu;
+pub mod pdfium_adapter;
 
 use tauri::{Emitter, Manager};
 
