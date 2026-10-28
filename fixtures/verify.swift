@@ -143,6 +143,38 @@ do {
                 expect(names.contains(name), "form field \(name) is present")
             }
 
+        case "signature":
+            if document.isEncrypted {
+                if let password = fixture.password, !password.isEmpty {
+                    expect(document.unlock(withPassword: password),
+                           "unlocks with the documented user password")
+                } else {
+                    _ = document.unlock(withPassword: "")
+                }
+            }
+            expect(!document.isLocked, "document is unlocked")
+            let widgets = (document.page(at: 0)?.annotations ?? []).filter {
+                ($0.type ?? "").contains("Widget")
+            }
+            let expectedWidgets = fixture.id == "signature-signed" ? 3 : 2
+            expect(widgets.count == expectedWidgets,
+                   "page has \(expectedWidgets) widgets (got \(widgets.count))")
+            expect(containsASCII(bytes, "/FT /Sig"), "document declares /FT /Sig fields")
+            if fixture.id == "signature-signed" {
+                expect(containsASCII(bytes, "/Type /Sig"),
+                       "document contains a signature dictionary")
+                expect(containsASCII(bytes, "/ByteRange"),
+                       "signature dictionary declares /ByteRange")
+                expect(containsASCII(bytes, "/Contents"),
+                       "signature dictionary declares /Contents")
+                expect(containsASCII(bytes, "/FT /Tx"),
+                       "ordinary text fields are present alongside signatures")
+            }
+            if fixture.id == "signature-field-only" {
+                expect(!containsASCII(bytes, "/ByteRange"),
+                       "field-only fixture carries no signature value")
+            }
+
         case "structure":
             expect(document.outlineRoot != nil, "document has an outline")
             expect(document.outlineRoot?.numberOfChildren == 2,

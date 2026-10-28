@@ -177,6 +177,51 @@ button {
   cursor: pointer;
 }
 
+/* Non-blocking digital-signature warning: editing or saving invalidates the
+   signature structures, but the user may keep working. */
+.signature-warning {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 8px 20px;
+  border-bottom: 1px solid var(--pdfx-warning-border);
+  background: var(--pdfx-warning-soft);
+  color: var(--pdfx-warning-text);
+  font-size: 13px;
+}
+
+.signature-warning--invalidated {
+  border-bottom-color: var(--pdfx-danger-border);
+  background: var(--pdfx-danger-soft);
+  color: var(--pdfx-danger-text);
+}
+
+.signature-warning-body {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 4px 10px;
+}
+
+.signature-warning-body p {
+  margin: 0;
+}
+
+.signature-warning-title {
+  font-weight: 600;
+}
+
+.signature-warning button {
+  padding: 3px 10px;
+  border: 1px solid currentColor;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
 .empty-workspace {
   max-width: 420px;
   padding: 48px 40px;
@@ -3555,4 +3600,176 @@ button {
 
 .watermark-apply {
   flex: 1;
+}
+
+/* Bundled OFL handwriting face for the typed-signature tab. The glyphs are
+   rasterised into a PNG; no font is embedded in the PDF. */
+@font-face {
+  font-family: "Ma Shan Zheng";
+  src: url("./assets/fonts/MaShanZheng-Regular.ttf") format("truetype");
+  font-display: swap;
+}
+
+.image-outline-kind {
+  display: inline-block;
+  margin-right: 4px;
+  padding: 0 3px;
+  border-radius: 2px;
+  background: var(--pdfx-on-accent);
+  color: var(--pdfx-blue-text);
+  font-weight: 600;
+}
+
+.signature-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: var(--pdfx-overlay);
+  pointer-events: auto;
+}
+
+.signature-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(560px, 100%);
+  max-height: calc(100vh - 32px);
+  overflow: auto;
+  padding: 16px;
+  border-radius: 8px;
+  background: var(--pdfx-surface);
+  color: var(--pdfx-text);
+  box-shadow: var(--pdfx-page-shadow);
+}
+
+.signature-dialog h2 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.signature-dialog-tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--pdfx-border);
+}
+
+.signature-dialog-tabs [role="tab"] {
+  padding: 6px 12px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--pdfx-text-secondary);
+  font: inherit;
+  cursor: pointer;
+}
+
+.signature-dialog-tabs [role="tab"][aria-selected="true"] {
+  border-bottom-color: var(--pdfx-accent);
+  color: var(--pdfx-accent-text);
+}
+
+.signature-dialog-tabs [role="tab"]:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.signature-dialog-canvas {
+  display: block;
+  width: 100%;
+  aspect-ratio: 8 / 3;
+  border: 1px dashed var(--pdfx-border-control);
+  border-radius: 6px;
+  background: var(--pdfx-page);
+  touch-action: none;
+  cursor: crosshair;
+}
+
+.signature-dialog-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+}
+
+.signature-dialog-field input[type="text"] {
+  padding: 6px 8px;
+  border: 1px solid var(--pdfx-border-control);
+  border-radius: 4px;
+  background: var(--pdfx-page);
+  color: var(--pdfx-text);
+  font: inherit;
+}
+
+.signature-dialog-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.signature-dialog-preview {
+  max-width: 100%;
+  max-height: 180px;
+  padding: 8px;
+  border: 1px solid var(--pdfx-border);
+  border-radius: 6px;
+  background: var(--pdfx-page);
+  object-fit: contain;
+}
+
+.signature-dialog-preview--empty {
+  opacity: 0.35;
+}
+
+.signature-dialog-filename {
+  margin: 0;
+  overflow: hidden;
+  color: var(--pdfx-muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.signature-dialog-hint {
+  min-height: 1.2em;
+  margin: 0;
+  color: var(--pdfx-text-secondary);
+  font-size: 12px;
+}
+
+.signature-dialog-error {
+  margin: 0;
+  color: var(--pdfx-danger-text);
+  font-size: 12px;
+}
+
+.signature-dialog-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.signature-dialog-actions button {
+  padding: 6px 12px;
+  border: 1px solid var(--pdfx-border-control);
+  border-radius: 4px;
+  background: var(--pdfx-raised);
+  color: var(--pdfx-text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.signature-dialog-actions button[type="submit"] {
+  border-color: var(--pdfx-accent);
+  background: var(--pdfx-accent);
+  color: var(--pdfx-on-accent);
+}
+
+.signature-dialog-actions button:disabled {
+  opacity: 0.45;
+  cursor: default;
 }

@@ -2,11 +2,12 @@ mod support;
 
 use support::fixtures;
 
-const REQUIRED_CATEGORIES: [&str; 8] = [
+const REQUIRED_CATEGORIES: [&str; 9] = [
     "text",
     "scanned",
     "encrypted",
     "form",
+    "signature",
     "structure",
     "large",
     "rotated",

@@ -2048,6 +2048,7 @@ fn save_as(document_id: &str, path: &Path) -> SaveResultView {
         SaveDocumentRequest {
             save_as_path: Some(path.to_string_lossy().into_owned()),
             confirm_unencrypted_output: false,
+            confirm_signature_invalidation: false,
             password: None,
         },
         &mut |_| {},
@@ -2061,6 +2062,7 @@ fn save_changes(document_id: &str) -> SaveResultView {
         SaveDocumentRequest {
             save_as_path: None,
             confirm_unencrypted_output: false,
+            confirm_signature_invalidation: false,
             password: None,
         },
         &mut |_| {},

@@ -19,6 +19,7 @@ pub mod print_export;
 pub mod recovery;
 pub mod save;
 pub mod settings;
+pub mod signature;
 mod stamp_glyphs;
 pub mod stamps;
 mod target_path;
@@ -101,6 +102,7 @@ pub fn run() {
             form_create::update_form_text_field,
             form_create::delete_form_text_field,
             image_edit::insert_image,
+            image_edit::insert_signature_image,
             image_edit::page_images,
             image_edit::transform_image,
             image_edit::delete_image,

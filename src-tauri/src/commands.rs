@@ -104,6 +104,9 @@ pub enum CommandErrorCode {
     /// caller supplied neither a new password nor confirmation that the
     /// replacement is unencrypted. Protection is never dropped silently.
     EncryptedOutputConfirmationRequired,
+    /// The open document contains digital signature structures and the caller
+    /// did not confirm that saving invalidates them. No bytes were written.
+    SignatureInvalidationConfirmationRequired,
     /// Permission Restrictions forbid saving changes to this document.
     ReadOnlyDocument,
     /// The chosen attachment file exceeds the size limit.
@@ -229,6 +232,12 @@ pub struct DocumentView {
     /// the original Source Document (provenance) and is never written.
     #[serde(default)]
     pub recovered: bool,
+    /// Signature structures found when the Document was opened, or `None` for
+    /// an ordinary document. The summary contains counts only: signer
+    /// identities, reasons, document text and signature bytes never cross the
+    /// command boundary.
+    #[serde(default)]
+    pub signature: Option<crate::signature::SignatureSummary>,
 }
 
 /// A rendered page encoded as PNG. The payload is base64 so it crosses the IPC
@@ -360,6 +369,10 @@ pub(crate) struct OpenDocument {
     pub(crate) source_security: DocumentSecurity,
     /// Attachments visible in this session and the baseline to diff at save.
     pub(crate) attachments: crate::attachments::AttachmentStore,
+    /// Signature structures detected when the Document was opened. They are
+    /// never modified by PDFX, so this summary stays valid for the session and
+    /// gates every save that writes a file.
+    pub(crate) signature: Option<crate::signature::SignatureSummary>,
     pub(crate) document: PdfDocument<'static>,
     /// Snapshots the copied pages were imported from.
     ///
@@ -533,6 +546,9 @@ fn insert_document(
     let encrypted = options.encrypted.unwrap_or(actual_encrypted);
     let read_only = options.read_only.unwrap_or(actual_read_only);
     let permissions = options.permissions.unwrap_or(actual_permissions);
+    // Best-effort structural detection: signer details and bytes never leave
+    // this module, and an unreadable structure never blocks opening.
+    let signature = crate::signature::detect(&document, &bytes, password.as_deref());
 
     registry.next_id += 1;
     let document_id = format!("doc-{}", registry.next_id);
@@ -550,6 +566,7 @@ fn insert_document(
         output_path: options.output_path.clone(),
         output_encrypted,
         recovered: options.recovered,
+        signature,
     };
     let save = crate::save::SaveState {
         output_path: options.output_path.map(PathBuf::from),
@@ -572,6 +589,7 @@ fn insert_document(
                 permissions,
             },
             attachments,
+            signature,
             document,
             copy_snapshots: Vec::new(),
         },

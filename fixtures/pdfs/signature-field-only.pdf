@@ -1,0 +1,62 @@
+%PDF-1.7
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [6 0 R 9 0 R] /DA (/Helv 0 Tf 0 g) /DR << /Font << /Helv 4 0 R >> >> /SigFlags 1 >> >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R /Annots [6 0 R 10 0 R] >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>
+endobj
+5 0 obj
+<<  /Length 133 >>
+stream
+BT /F1 16 Tf 72 720 Td (PDFX signature field fixture) Tj 0 -26 Td (This document has signature fields but no signature value.) Tj ET
+
+endstream
+endobj
+6 0 obj
+<< /Type /Annot /Subtype /Widget /FT /Sig /T <7369676e5f68657265> /Rect [72 650 300 690] /P 3 0 R /F 4 /AP << /N 8 0 R >> >>
+endobj
+7 0 obj
+null
+endobj
+8 0 obj
+<< /Type /XObject /Subtype /Form /BBox [0 0 228 40] /Resources << /Font << /Helv 4 0 R >> >> /Length 41 >>
+stream
+BT /Helv 12 Tf 4 14 Td (Sign here) Tj ET
+
+endstream
+endobj
+9 0 obj
+<< /FT /Sig /T <7769746e6573735f67726f7570> /Kids [10 0 R] >>
+endobj
+10 0 obj
+<< /Type /Annot /Subtype /Widget /Parent 9 0 R /Rect [72 560 300 600] /P 3 0 R /F 4 >>
+endobj
+11 0 obj
+<< /Title (PDFX signature field fixture) /Author (PDFX QA) >>
+endobj
+xref
+0 12
+0000000000 65535 f 
+0000000015 00000 n 
+0000000169 00000 n 
+0000000226 00000 n 
+0000000375 00000 n 
+0000000472 00000 n 
+0000000657 00000 n 
+0000000797 00000 n 
+0000000817 00000 n 
+0000000998 00000 n 
+0000001075 00000 n 
+0000001178 00000 n 
+trailer
+<< /Size 12 /Root 1 0 R /Info 11 0 R >>
+startxref
+1256
+%%EOF

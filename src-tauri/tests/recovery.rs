@@ -129,6 +129,7 @@ fn save_as(document_id: &str, target: &Path) -> SaveResultView {
         SaveDocumentRequest {
             save_as_path: Some(path_string(target)),
             confirm_unencrypted_output: false,
+            confirm_signature_invalidation: false,
             password: None,
         },
         &mut |_| {},
@@ -142,6 +143,7 @@ fn save_as_with_password(document_id: &str, target: &Path, password: &str) -> Sa
         SaveDocumentRequest {
             save_as_path: Some(path_string(target)),
             confirm_unencrypted_output: false,
+            confirm_signature_invalidation: false,
             password: Some(password.to_owned()),
         },
         &mut |_| {},
@@ -382,6 +384,7 @@ fn restoring_opens_unsaved_edits_and_saves_through_the_normal_pipeline() {
         SaveDocumentRequest {
             save_as_path: None,
             confirm_unencrypted_output: false,
+            confirm_signature_invalidation: false,
             password: None,
         },
         &mut |update| progress.push(update),
@@ -489,6 +492,7 @@ fn a_restored_protected_output_is_not_silently_saved_unencrypted() {
         SaveDocumentRequest {
             save_as_path: None,
             confirm_unencrypted_output: false,
+            confirm_signature_invalidation: false,
             password: None,
         },
         &mut |_| {},
@@ -516,6 +520,7 @@ fn a_restored_protected_output_is_not_silently_saved_unencrypted() {
         SaveDocumentRequest {
             save_as_path: None,
             confirm_unencrypted_output: false,
+            confirm_signature_invalidation: false,
             password: Some(password.to_owned()),
         },
         &mut |_| {},
@@ -750,6 +755,7 @@ fn restoring_reuses_the_previous_output_only_while_it_is_valid() {
         SaveDocumentRequest {
             save_as_path: None,
             confirm_unencrypted_output: false,
+            confirm_signature_invalidation: false,
             password: None,
         },
         &mut |_| {},
@@ -957,6 +963,7 @@ fn restoring_an_encrypted_source_keeps_the_unencrypted_output_warning() {
         SaveDocumentRequest {
             save_as_path: Some(path_string(&output)),
             confirm_unencrypted_output: false,
+            confirm_signature_invalidation: false,
             password: None,
         },
         &mut |_| {},
@@ -976,6 +983,7 @@ fn restoring_an_encrypted_source_keeps_the_unencrypted_output_warning() {
         SaveDocumentRequest {
             save_as_path: Some(path_string(&output)),
             confirm_unencrypted_output: true,
+            confirm_signature_invalidation: false,
             password: None,
         },
         &mut |_| {},
