@@ -42,7 +42,11 @@ import {
 import { scaleToPercent } from "./lib/pageGeometry";
 import { notifyDocumentChanged } from "./lib/documentEvents";
 import { isEditableTarget, isWindowsPlatform } from "./lib/keyboard";
-import { menuItemStates, menuStateSignature } from "./lib/menu";
+import {
+  MENU_ITEM_IDS,
+  menuItemStates,
+  menuStateSignature,
+} from "./lib/menu";
 import { useAnnotations } from "./lib/useAnnotations";
 import { useDocumentSave } from "./lib/useDocumentSave";
 import { useDocumentViewer } from "./lib/useDocumentViewer";
@@ -99,6 +103,21 @@ const ERROR_MESSAGES: Partial<Record<CommandErrorCode, string>> = {
 function errorMessage(code: CommandErrorCode): string {
   return ERROR_MESSAGES[code] ?? "无法打开该文档。";
 }
+
+/**
+ * Menu commands a focused text control owns.
+ *
+ * Disabling these items also releases their native accelerators, but that
+ * snapshot reaches the menu asynchronously. When an accelerator event still
+ * arrives in the gap, the focused control must keep the key: Cmd/Ctrl+Z and
+ * PageUp/PageDown belong to typing and scrolling there, not to the document.
+ */
+const TEXT_OWNED_MENU_IDS: ReadonlySet<string> = new Set<string>([
+  MENU_ITEM_IDS.undo,
+  MENU_ITEM_IDS.redo,
+  MENU_ITEM_IDS.previousPage,
+  MENU_ITEM_IDS.nextPage,
+]);
 
 function statusText(state: AppInfoState): string {
   switch (state.status) {
@@ -242,7 +261,8 @@ export function App() {
     modalOpen:
       closePrompt !== null ||
       passwordPrompt !== null ||
-      save.confirmation !== null,
+      save.confirmation !== null ||
+      settingsOpen,
     textInputFocused,
     pageIndex: viewer.pageIndex,
     pageCount: openDocumentView?.pageCount ?? 0,
@@ -595,6 +615,16 @@ export function App() {
     // state push is in flight. The current availability is the same snapshot
     // the menu was built from, so a disabled command is ignored here too.
     if (!menuEnabledRef.current.get(menuId)) {
+      return;
+    }
+    // The disabled snapshot reaches the native menu one command round trip
+    // later. If an accelerator event arrives in that gap, the focused control
+    // still owns the key; never let stale menu availability move the page or
+    // undo the document out from under it.
+    if (
+      TEXT_OWNED_MENU_IDS.has(menuId) &&
+      isEditableTarget(document.activeElement)
+    ) {
       return;
     }
     const current = viewerRef.current;

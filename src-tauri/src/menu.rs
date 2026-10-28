@@ -1,5 +1,5 @@
 use serde::Deserialize;
-use tauri::menu::{Menu, MenuBuilder, MenuItem, MenuItemBuilder, SubmenuBuilder};
+use tauri::menu::{Menu, MenuBuilder, MenuItem, MenuItemBuilder, MenuItemKind, SubmenuBuilder};
 use tauri::{AppHandle, Runtime};
 
 use crate::commands::{CommandError, CommandErrorCode};
@@ -138,6 +138,44 @@ fn menu_error(message: impl Into<String>) -> CommandError {
     CommandError::new(CommandErrorCode::Internal, message)
 }
 
+/// The accelerator to apply to a stateful item for a given availability.
+///
+/// `Some(Some(_))` enables an accelerator, `Some(None)` releases it, and
+/// `None` means the item never carries one. Re-enabling restores the same
+/// accelerator the menu was built with.
+fn accelerator_change(id: &str, enabled: bool) -> Option<Option<&'static str>> {
+    accelerator_for(id).map(|accelerator| if enabled { Some(accelerator) } else { None })
+}
+
+/// Finds one of the workspace's custom items anywhere in the menu tree.
+///
+/// `Menu::get` only searches the menu bar's direct children, which are the
+/// 文件/编辑/视图/帮助 submenus. The stateful items themselves live one level
+/// below, so this walks the submenus instead of treating every snapshot item
+/// as missing.
+fn find_item<R: Runtime>(menu: &Menu<R>, id: &str) -> Option<MenuItem<R>> {
+    fn find_in<R: Runtime>(items: &[MenuItemKind<R>], id: &str) -> Option<MenuItem<R>> {
+        for kind in items {
+            match kind {
+                MenuItemKind::MenuItem(item) if item.id().as_ref() == id => {
+                    return Some(item.clone());
+                }
+                MenuItemKind::Submenu(submenu) => {
+                    if let Ok(items) = submenu.items() {
+                        if let Some(item) = find_in(&items, id) {
+                            return Some(item);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    menu.items().ok().and_then(|items| find_in(&items, id))
+}
+
 /// Applies the workspace's availability snapshot to the native menu.
 ///
 /// A disabled item also loses its accelerator: the key must reach the focused
@@ -150,22 +188,13 @@ pub fn set_menu_state(app: AppHandle, state: MenuState) -> Result<(), CommandErr
         .menu()
         .ok_or_else(|| menu_error("the application has no menu"))?;
     for item in &state.items {
-        let kind = menu
-            .get(&item.id)
+        let menu_item = find_item(&menu, &item.id)
             .ok_or_else(|| menu_error(format!("menu item {} is missing", item.id)))?;
-        let menu_item = kind
-            .as_menuitem()
-            .ok_or_else(|| menu_error(format!("menu item {} is not a custom item", item.id)))?;
         menu_item
             .set_enabled(item.enabled)
             .map_err(|error| menu_error(format!("could not update {}: {error}", item.id)))?;
-        if let Some(accelerator) = accelerator_for(&item.id) {
-            let applied = if item.enabled {
-                menu_item.set_accelerator(Some(accelerator))
-            } else {
-                menu_item.set_accelerator(None::<&str>)
-            };
-            applied.map_err(|error| {
+        if let Some(accelerator) = accelerator_change(&item.id, item.enabled) {
+            menu_item.set_accelerator(accelerator).map_err(|error| {
                 menu_error(format!(
                     "could not update the accelerator of {}: {error}",
                     item.id
@@ -294,6 +323,23 @@ mod tests {
     }
 
     #[test]
+    fn disabling_an_item_releases_its_accelerator_and_enabling_restores_it() {
+        assert_eq!(accelerator_change(EDIT_UNDO, false), Some(None));
+        assert_eq!(
+            accelerator_change(EDIT_UNDO, true),
+            Some(Some(UNDO_ACCELERATOR))
+        );
+        assert_eq!(accelerator_change(PAGE_NEXT, false), Some(None));
+        assert_eq!(
+            accelerator_change(PAGE_NEXT, true),
+            Some(Some(NEXT_PAGE_ACCELERATOR))
+        );
+        // An item with no accelerator is left untouched in either state.
+        assert_eq!(accelerator_change("help.docs", true), None);
+        assert_eq!(accelerator_change("help.docs", false), None);
+    }
+
+    #[test]
     fn page_navigation_uses_page_up_and_page_down() {
         assert_eq!(accelerator_for(PAGE_PREVIOUS), Some("PageUp"));
         assert_eq!(accelerator_for(PAGE_NEXT), Some("PageDown"));
@@ -310,6 +356,20 @@ mod tests {
             );
         }
         assert_eq!(seen.len(), STATEFUL_MENU_IDS.len());
+    }
+
+    #[test]
+    fn no_two_stateful_items_share_an_accelerator() {
+        // One key press must reach exactly one command. Undo/redo and page
+        // navigation are the easy place to introduce a duplicate.
+        let mut seen = HashSet::new();
+        for id in STATEFUL_MENU_IDS {
+            let accelerator = accelerator_for(id).expect("accelerator");
+            assert!(
+                seen.insert(accelerator),
+                "duplicate accelerator {accelerator} on {id}"
+            );
+        }
     }
 
     #[test]

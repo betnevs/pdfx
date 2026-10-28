@@ -1211,6 +1211,33 @@ describe("PDFX workspace", () => {
     await waitFor(() => expect(commandCalls("undo_text_edit")).toHaveLength(1));
   });
 
+  it("ignores page and history menu events that race ahead of the focus snapshot", async () => {
+    installDocumentBackend({ edit_history: () => dirtyHistory });
+    openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("report.pdf");
+    await waitFor(() => expect(lastMenuState().get("page.next")).toBe(true));
+
+    const pageInput = screen.getByRole("spinbutton", { name: "当前页码" });
+
+    // The native menu is still enabled when focus lands in the input: the
+    // disabled snapshot reaches Rust one command round trip later. A menu
+    // event arriving in that window (an accelerator or a click) must yield to
+    // the focused text control instead of navigating or undoing the document.
+    act(() => {
+      pageInput.focus();
+      menuHandler?.({ payload: "page.next" });
+      menuHandler?.({ payload: "edit.undo" });
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(pageInput).toHaveValue(1);
+    expect(commandCalls("undo_text_edit")).toHaveLength(0);
+  });
+
   it("accepts Ctrl+Y for redo on Windows without a second menu accelerator", async () => {
     const userAgent = vi
       .spyOn(window.navigator, "userAgent", "get")
@@ -1271,6 +1298,34 @@ describe("PDFX workspace", () => {
     } finally {
       userAgent.mockRestore();
     }
+  });
+
+  it("does not treat Ctrl+Y as redo outside Windows", async () => {
+    installDocumentBackend({
+      edit_history: () => ({
+        canUndo: true,
+        canRedo: true,
+        revision: 2,
+        savedRevision: 1,
+        dirty: true,
+      }),
+    });
+    openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("report.pdf");
+    await waitFor(() => expect(lastMenuState().get("edit.redo")).toBe(true));
+
+    // The platform fallback must not shadow the menu's own redo accelerator
+    // outside Windows (where the test runner reports a non-Windows user agent).
+    fireEvent.keyDown(screen.getByLabelText("页面视口"), {
+      key: "y",
+      ctrlKey: true,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(commandCalls("redo_text_edit")).toHaveLength(0);
   });
 
   it("keeps page navigation but disables editing menu items for a restricted document", async () => {
@@ -1339,6 +1394,28 @@ describe("PDFX workspace", () => {
       ]) {
         expect(state.get(id), id).toBe(false);
       }
+    });
+  });
+
+  it("freezes the menu while the settings dialog is open", async () => {
+    installDocumentBackend({ edit_history: () => dirtyHistory });
+    openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("report.pdf");
+    await waitFor(() => expect(lastMenuState().get("file.save")).toBe(true));
+
+    await user.click(screen.getByRole("button", { name: "设置" }));
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+
+    await waitFor(() => {
+      const state = lastMenuState();
+      expect(state.get("file.open")).toBe(false);
+      expect(state.get("file.save")).toBe(false);
+      expect(state.get("page.next")).toBe(false);
+      expect(state.get("app.settings")).toBe(false);
     });
   });
 
