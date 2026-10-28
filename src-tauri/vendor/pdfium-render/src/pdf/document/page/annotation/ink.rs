@@ -88,6 +88,45 @@ impl<'a> PdfPageInkAnnotation<'a> {
         unsafe { self.bindings().FPDFAnnot_GetInkListCount(self.handle()) as usize }
     }
 
+    /// Returns every stroke in the `/InkList` of this [PdfPageInkAnnotation].
+    ///
+    /// Each stroke is a list of page-space points. The points are read back
+    /// through `FPDFAnnot_GetInkListPath()` so undo and style changes can
+    /// recreate a stroke-based snapshot instead of relying on a private copy.
+    pub fn ink_strokes(&self) -> Vec<Vec<(f32, f32)>> {
+        (0..self.ink_stroke_count())
+            .map(|index| {
+                let length = unsafe {
+                    self.bindings().FPDFAnnot_GetInkListPath(
+                        self.handle(),
+                        index as _,
+                        std::ptr::null_mut(),
+                        0,
+                    )
+                } as usize;
+
+                if length == 0 {
+                    return Vec::new();
+                }
+
+                let mut points = vec![FS_POINTF { x: 0.0, y: 0.0 }; length];
+                let written = unsafe {
+                    self.bindings().FPDFAnnot_GetInkListPath(
+                        self.handle(),
+                        index as _,
+                        points.as_mut_ptr(),
+                        length as _,
+                    )
+                } as usize;
+                points.truncate(written);
+                points
+                    .into_iter()
+                    .map(|point| (point.x, point.y))
+                    .collect()
+            })
+            .collect()
+    }
+
     /// Returns a mutable collection of all the page objects in this [PdfPageInkAnnotation].
     #[inline]
     pub fn objects_mut(&mut self) -> &mut PdfPageAnnotationObjects<'a> {

@@ -524,7 +524,9 @@ export function App() {
                     render={viewer.render}
                     readOnly={open.document.readOnly}
                     canAnnotate={open.document.permissions.canAnnotate}
+                    annotations={annotations.annotations}
                     selectedAnnotation={selectedAnnotation}
+                    onSelectAnnotation={selectAnnotation}
                     surfaceRef={viewer.surfaceRef}
                   />
                 </div>

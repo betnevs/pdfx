@@ -4,15 +4,18 @@ import {
   deleteAnnotation,
   toCommandError,
   updateAnnotationStyle,
+  updateNoteText,
+  type AnnotationKind,
   type AnnotationView,
-  type TextMarkupKind,
 } from "../lib/backend";
 import { notifyDocumentChanged } from "../lib/documentEvents";
 
-const KIND_LABELS: Record<TextMarkupKind, string> = {
+const KIND_LABELS: Record<AnnotationKind, string> = {
   highlight: "高亮",
   underline: "下划线",
   strikeout: "删除线",
+  note: "便签",
+  ink: "手绘",
 };
 
 /** Formats the backend's PDF date into the list's readable UTC label. */
@@ -66,14 +69,26 @@ export function AnnotationPanel({
     annotations.find((annotation) => annotation.name === selectedName) ?? null;
   const [colorDraft, setColorDraft] = useState(selected?.color ?? "#ffd400");
   const [opacityDraft, setOpacityDraft] = useState(selected?.opacity ?? 50);
-  const [busy, setBusy] = useState<"style" | "delete" | null>(null);
+  const [lineWidthDraft, setLineWidthDraft] = useState(
+    selected?.lineWidth ?? 3,
+  );
+  const [textDraft, setTextDraft] = useState(selected?.text ?? "");
+  const [busy, setBusy] = useState<"style" | "text" | "delete" | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
   useEffect(() => {
     setColorDraft(selected?.color ?? "#ffd400");
     setOpacityDraft(selected?.opacity ?? 50);
+    setLineWidthDraft(selected?.lineWidth ?? 3);
+    setTextDraft(selected?.text ?? "");
     setActionError(null);
-  }, [selected?.name, selected?.color, selected?.opacity]);
+  }, [
+    selected?.name,
+    selected?.color,
+    selected?.opacity,
+    selected?.lineWidth,
+    selected?.text,
+  ]);
 
   const groups = useMemo(() => {
     const byPage = new Map<number, AnnotationView[]>();
@@ -89,9 +104,15 @@ export function AnnotationPanel({
   }, [annotations]);
 
   const editable = canAnnotate && !readOnly;
+  const lineWidthChanged =
+    selected?.kind === "ink" && lineWidthDraft !== selected.lineWidth;
   const styleChanged =
     selected !== null &&
-    (colorDraft !== selected.color || opacityDraft !== selected.opacity);
+    (colorDraft !== selected.color ||
+      opacityDraft !== selected.opacity ||
+      lineWidthChanged);
+  const textChanged =
+    selected?.kind === "note" && textDraft !== (selected.text ?? "");
 
   async function applyStyle() {
     if (!selected || !styleChanged || busy) {
@@ -105,7 +126,28 @@ export function AnnotationPanel({
         selected.name,
         colorDraft,
         opacityDraft,
+        selected.kind === "ink" ? lineWidthDraft : null,
       );
+      onChanged();
+      notifyDocumentChanged({
+        documentId,
+        pageIndex: selected.pageIndex,
+      });
+    } catch (error) {
+      setActionError(toCommandError(error).message);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function applyText() {
+    if (!selected || !textChanged || busy) {
+      return;
+    }
+    setBusy("text");
+    setActionError(null);
+    try {
+      await updateNoteText(documentId, selected.name, textDraft);
       onChanged();
       notifyDocumentChanged({
         documentId,
@@ -163,7 +205,7 @@ export function AnnotationPanel({
       ) : annotations.length === 0 ? (
         <div className="annotation-empty">
           <p>还没有注释</p>
-          <p>选择页面文字即可添加高亮、下划线或删除线。</p>
+          <p>选择页面文字即可添加高亮、下划线或删除线；也可以放置便签或手绘。</p>
         </div>
       ) : (
         <div className="annotation-groups">
@@ -203,6 +245,18 @@ export function AnnotationPanel({
                           <span className="annotation-meta">
                             {annotation.author ?? "未知作者"}
                           </span>
+                          {annotation.kind === "note" &&
+                            annotation.text !== null && (
+                              <span className="annotation-preview">
+                                {annotation.text.trim() || "（空白便签）"}
+                              </span>
+                            )}
+                          {annotation.kind === "ink" && (
+                            <span className="annotation-preview">
+                              {annotation.strokes.length} 笔 ·{" "}
+                              {annotation.lineWidth ?? 3} pt
+                            </span>
+                          )}
                           <span className="annotation-time">
                             {created ?? "时间未知"}
                           </span>
@@ -219,6 +273,19 @@ export function AnnotationPanel({
 
       {selected && editable && (
         <div className="annotation-properties" aria-label="注释属性">
+          {selected.kind === "note" && (
+            <label className="annotation-control annotation-note-text">
+              <span>便签内容</span>
+              <textarea
+                aria-label="便签内容"
+                value={textDraft}
+                maxLength={5000}
+                rows={4}
+                disabled={busy !== null}
+                onChange={(event) => setTextDraft(event.target.value)}
+              />
+            </label>
+          )}
           <label className="annotation-control">
             <span>颜色</span>
             <input
@@ -245,7 +312,34 @@ export function AnnotationPanel({
             />
             <span>{opacityDraft}%</span>
           </label>
+          {selected.kind === "ink" && (
+            <label className="annotation-control">
+              <span>线宽</span>
+              <input
+                type="range"
+                aria-label="手绘线宽"
+                min={0.5}
+                max={32}
+                step={0.5}
+                value={lineWidthDraft}
+                disabled={busy !== null}
+                onChange={(event) =>
+                  setLineWidthDraft(Number.parseFloat(event.target.value))
+                }
+              />
+              <span>{lineWidthDraft} pt</span>
+            </label>
+          )}
           <div className="annotation-actions">
+            {selected.kind === "note" && (
+              <button
+                type="button"
+                disabled={!textChanged || busy !== null}
+                onClick={() => void applyText()}
+              >
+                保存便签
+              </button>
+            )}
             <button
               type="button"
               disabled={!styleChanged || busy !== null}

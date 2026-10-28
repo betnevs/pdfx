@@ -253,6 +253,47 @@ pub fn create_text_markup_annotation(
     Ok(AnnotationRef::new(page_index, annotations.len() - 1))
 }
 
+/// Creates a sticky-note annotation (`/Subtype /Text`) with `text` contents and
+/// `rect` bounds.
+///
+/// Pdfium does not generate an icon appearance for the annotation in this
+/// build, so callers install one with [`set_annotation_appearance`] before
+/// saving.
+pub fn create_text_annotation(
+    document: &PdfDocument<'_>,
+    page_index: i32,
+    text: &str,
+    rect: AnnotationRect,
+) -> Result<AnnotationRef, AdapterError> {
+    let pages = document.pages();
+    let mut page = pages.get(page_index)?;
+    let annotations = page.annotations_mut();
+    let mut annotation = annotations.create_text_annotation(text)?;
+    let result = annotation.set_bounds(rect.to_pdf_rect());
+    annotation.close();
+    result?;
+    Ok(AnnotationRef::new(page_index, annotations.len() - 1))
+}
+
+/// Creates an ink annotation (`/Subtype /Ink`) with `rect` bounds.
+///
+/// Add strokes with [`append_ink_strokes`]; Pdfium does not generate an
+/// appearance, so callers install one with [`set_annotation_appearance`].
+pub fn create_ink_annotation(
+    document: &PdfDocument<'_>,
+    page_index: i32,
+    rect: AnnotationRect,
+) -> Result<AnnotationRef, AdapterError> {
+    let pages = document.pages();
+    let mut page = pages.get(page_index)?;
+    let annotations = page.annotations_mut();
+    let mut annotation = annotations.create_ink_annotation()?;
+    let result = annotation.set_bounds(rect.to_pdf_rect());
+    annotation.close();
+    result?;
+    Ok(AnnotationRef::new(page_index, annotations.len() - 1))
+}
+
 /// Returns the [PdfPageAnnotationType] of the annotation identified by
 /// `target`.
 pub fn annotation_type(
@@ -286,11 +327,7 @@ pub fn annotation_author(
     document: &PdfDocument<'_>,
     target: AnnotationRef,
 ) -> Result<Option<String>, AdapterError> {
-    with_annotation_on(
-        document,
-        target,
-        |annotation| with_text_markup!(annotation, annotation => Ok(annotation.creator())),
-    )
+    with_annotation_on(document, target, |annotation| Ok(annotation.creator()))
 }
 
 /// Sets the annotation author (`/T`).
@@ -299,11 +336,31 @@ pub fn set_annotation_author(
     target: AnnotationRef,
     author: &str,
 ) -> Result<(), AdapterError> {
-    with_annotation_on(
-        document,
-        target,
-        |annotation| with_text_markup!(annotation, annotation => annotation.set_creator(author)),
-    )
+    with_annotation_on(document, target, |annotation| {
+        annotation.set_creator(author)
+    })
+}
+
+/// Returns the annotation contents (`/Contents`), if any.
+///
+/// Sticky notes keep their text here; the value is also a human-readable
+/// description for every other annotation type.
+pub fn annotation_contents(
+    document: &PdfDocument<'_>,
+    target: AnnotationRef,
+) -> Result<Option<String>, AdapterError> {
+    with_annotation_on(document, target, |annotation| Ok(annotation.contents()))
+}
+
+/// Sets the annotation contents (`/Contents`).
+pub fn set_annotation_contents(
+    document: &PdfDocument<'_>,
+    target: AnnotationRef,
+    contents: &str,
+) -> Result<(), AdapterError> {
+    with_annotation_on(document, target, |annotation| {
+        annotation.set_contents(contents)
+    })
 }
 
 /// Returns the raw `/CreationDate` string, if any.
@@ -363,9 +420,7 @@ pub fn annotation_bounds(
     target: AnnotationRef,
 ) -> Result<AnnotationRect, AdapterError> {
     with_annotation_on(document, target, |annotation| {
-        with_text_markup!(annotation, annotation => {
-            annotation.bounds().map(AnnotationRect::from_pdf_rect)
-        })
+        annotation.bounds().map(AnnotationRect::from_pdf_rect)
     })
 }
 
@@ -375,11 +430,9 @@ pub fn annotation_color(
     target: AnnotationRef,
 ) -> Result<(u8, u8, u8, u8), AdapterError> {
     with_annotation_on(document, target, |annotation| {
-        with_text_markup!(annotation, annotation => {
-            annotation
-                .stroke_color()
-                .map(|color| (color.red(), color.green(), color.blue(), color.alpha()))
-        })
+        annotation
+            .stroke_color()
+            .map(|color| (color.red(), color.green(), color.blue(), color.alpha()))
     })
 }
 
@@ -393,9 +446,52 @@ pub fn set_annotation_color(
     alpha: u8,
 ) -> Result<(), AdapterError> {
     with_annotation_on(document, target, |annotation| {
-        with_text_markup!(annotation, annotation => {
-            annotation.set_stroke_color(PdfColor::new(red, green, blue, alpha))
-        })
+        annotation.set_stroke_color(PdfColor::new(red, green, blue, alpha))
+    })
+}
+
+/// Returns the annotation border width from `/BS /W`, in default user space
+/// units.
+pub fn annotation_border_width(
+    document: &PdfDocument<'_>,
+    target: AnnotationRef,
+) -> Result<f32, AdapterError> {
+    with_annotation_on(document, target, |annotation| annotation.border_width())
+}
+
+/// Sets the annotation border width (`/BS /W`).
+///
+/// Pdfium drops any existing appearance stream when the border is set, so this
+/// must run before [`set_annotation_appearance`].
+pub fn set_annotation_border_width(
+    document: &PdfDocument<'_>,
+    target: AnnotationRef,
+    width: f32,
+) -> Result<(), AdapterError> {
+    with_annotation_on(document, target, |annotation| {
+        annotation.set_border_width(width)
+    })
+}
+
+/// Returns every `/InkList` stroke of an ink annotation as page-space points.
+pub fn annotation_ink_strokes(
+    document: &PdfDocument<'_>,
+    target: AnnotationRef,
+) -> Result<Vec<Vec<(f32, f32)>>, AdapterError> {
+    with_annotation_on(document, target, |annotation| annotation.ink_strokes())
+}
+
+/// Appends ink strokes to an ink annotation.
+pub fn append_ink_strokes(
+    document: &PdfDocument<'_>,
+    target: AnnotationRef,
+    strokes: &[Vec<(f32, f32)>],
+) -> Result<(), AdapterError> {
+    with_annotation_on(document, target, |annotation| {
+        for stroke in strokes {
+            annotation.add_ink_stroke(stroke)?;
+        }
+        Ok(())
     })
 }
 

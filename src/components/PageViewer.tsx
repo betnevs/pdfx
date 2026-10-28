@@ -389,7 +389,9 @@ export function PageSurface({
   render,
   readOnly,
   canAnnotate,
+  annotations,
   selectedAnnotation,
+  onSelectAnnotation,
   surfaceRef,
 }: {
   documentId: string;
@@ -399,7 +401,9 @@ export function PageSurface({
   render: PageRender;
   readOnly: boolean;
   canAnnotate: boolean;
+  annotations: AnnotationView[];
   selectedAnnotation: AnnotationView | null;
+  onSelectAnnotation: (annotation: AnnotationView | null) => void;
   surfaceRef: RefObject<HTMLDivElement | null>;
 }) {
   const pixel = info ? pagePixelSize(info, scale) : null;
@@ -460,7 +464,9 @@ export function PageSurface({
         pageIndex={pageIndex}
         readOnly={readOnly}
         canAnnotate={canAnnotate}
+        annotations={annotations}
         selectedAnnotation={selectedAnnotation}
+        onSelectAnnotation={onSelectAnnotation}
         scale={scale}
       />
     </div>
