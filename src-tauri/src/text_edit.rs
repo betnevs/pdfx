@@ -597,6 +597,8 @@ pub(crate) enum EditAction {
     Link(Box<LinkEditAction>),
     /// Rotation, deletion, reordering or blank-page insertion.
     Page(crate::page_ops::PageEditAction),
+    /// Insertion or deletion of an embedded-file attachment.
+    Attachment(crate::attachments::AttachmentEditAction),
 }
 
 /// The value a field edit restores during undo or redo.
@@ -2327,7 +2329,8 @@ fn undo_for(entry: &mut OpenDocument) -> Result<EditStepView, CommandError> {
         | Some(EditAction::Image(_))
         | Some(EditAction::Line(_))
         | Some(EditAction::FormStructure(_))
-        | Some(EditAction::Page(_)) => ensure_content_editable(&entry.document)?,
+        | Some(EditAction::Page(_))
+        | Some(EditAction::Attachment(_)) => ensure_content_editable(&entry.document)?,
         Some(EditAction::Field(_)) => crate::form::ensure_forms_editable(&entry.document)?,
         Some(EditAction::Annotation(_)) | Some(EditAction::Link(_)) => {
             ensure_annotation_editable(&entry.document)?
@@ -2352,6 +2355,7 @@ fn undo_for(entry: &mut OpenDocument) -> Result<EditStepView, CommandError> {
         EditAction::Annotation(action) => undo_annotation(entry, action),
         EditAction::Link(action) => undo_link(entry, action),
         EditAction::Page(action) => crate::page_ops::undo_page(entry, action),
+        EditAction::Attachment(action) => crate::attachments::undo_attachment(entry, action),
     }?;
     // Edit actions address physical pages; report the slot the user sees.
     // Page actions already report a logical slot.
@@ -2455,7 +2459,8 @@ fn redo_for(entry: &mut OpenDocument) -> Result<EditStepView, CommandError> {
         | Some(EditAction::Image(_))
         | Some(EditAction::Line(_))
         | Some(EditAction::FormStructure(_))
-        | Some(EditAction::Page(_)) => ensure_content_editable(&entry.document)?,
+        | Some(EditAction::Page(_))
+        | Some(EditAction::Attachment(_)) => ensure_content_editable(&entry.document)?,
         Some(EditAction::Field(_)) => crate::form::ensure_forms_editable(&entry.document)?,
         Some(EditAction::Annotation(_)) | Some(EditAction::Link(_)) => {
             ensure_annotation_editable(&entry.document)?
@@ -2480,6 +2485,7 @@ fn redo_for(entry: &mut OpenDocument) -> Result<EditStepView, CommandError> {
         EditAction::Annotation(action) => redo_annotation(entry, action),
         EditAction::Link(action) => redo_link(entry, action),
         EditAction::Page(action) => crate::page_ops::redo_page(entry, action),
+        EditAction::Attachment(action) => crate::attachments::redo_attachment(entry, action),
     }?;
     // Edit actions address physical pages; report the slot the user sees.
     // Page actions already report a logical slot.

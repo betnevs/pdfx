@@ -42,6 +42,13 @@ export type CommandErrorCode =
   | "no_output_document"
   | "unencrypted_output_confirmation_required"
   | "read_only_document"
+  | "attachment_too_large"
+  | "attachment_not_found"
+  | "attachment_open_confirmation_required"
+  | "attachment_open_failed"
+  | "attachment_target_is_source"
+  | "attachment_target_is_output"
+  | "attachment_save_failed"
   | "recovery_failed"
   | "recovery_not_found"
   | "form_field_not_found"
@@ -1051,6 +1058,13 @@ const COMMAND_ERROR_CODES: ReadonlySet<string> = new Set<CommandErrorCode>([
   "no_output_document",
   "unencrypted_output_confirmation_required",
   "read_only_document",
+  "attachment_too_large",
+  "attachment_not_found",
+  "attachment_open_confirmation_required",
+  "attachment_open_failed",
+  "attachment_target_is_source",
+  "attachment_target_is_output",
+  "attachment_save_failed",
   "recovery_failed",
   "recovery_not_found",
   "form_field_not_found",
@@ -1096,9 +1110,35 @@ export async function chooseImageFile(): Promise<string | null> {
   return typeof selection === "string" ? selection : null;
 }
 
+/**
+ * Opens a native file dialog for an attachment. Attachments may be any file,
+ * so no extension filter is applied. Returns null when cancelled.
+ */
+export async function chooseAttachmentFile(): Promise<string | null> {
+  const selection = await openDialog({
+    multiple: false,
+    directory: false,
+    title: "添加附件",
+  });
+  return typeof selection === "string" ? selection : null;
+}
+
+/**
+ * Opens the native save dialog for extracting an attachment. Returns null
+ * when cancelled.
+ */
+export async function chooseAttachmentDestination(
+  defaultName: string,
+): Promise<string | null> {
+  const selection = await saveDialog({
+    defaultPath: defaultName,
+    title: "另存附件",
+  });
+  return typeof selection === "string" ? selection : null;
+}
+
 /** Image format of an exported Page. */
 export type PageImageFormat = "png" | "jpg";
-
 /** Confirmation metadata for a written page image. */
 export interface PageExportView {
   path: string;
@@ -1998,6 +2038,98 @@ export async function eraseInkStroke(
     documentId,
     name,
     strokeIndex,
+  });
+}
+
+/**
+ * One file embedded in the document as an attachment. `id` is stable for the
+ * lifetime of the open document; `size` is the byte length.
+ */
+export interface AttachmentView {
+  id: number;
+  name: string;
+  size: number;
+  /** MIME type derived from the file name. */
+  mediaType: string;
+}
+
+/** The outcome of adding or deleting an attachment. */
+export interface AttachmentEditResultView {
+  attachments: AttachmentView[];
+  history: EditHistoryView;
+}
+
+/** The outcome of extracting one attachment to a user-chosen file. */
+export interface AttachmentSaveView {
+  path: string;
+  bytesWritten: number;
+}
+
+/** Lists the document's attachments, existing and added this session. */
+export async function listAttachments(
+  documentId: string,
+): Promise<AttachmentView[]> {
+  return invoke<AttachmentView[]>("list_attachments", { documentId });
+}
+
+/**
+ * Adds the chosen file to the session as an undoable action. The attachment
+ * is embedded in the PDF only when the document is saved.
+ */
+export async function addAttachment(
+  documentId: string,
+  path: string,
+): Promise<AttachmentEditResultView> {
+  return invoke<AttachmentEditResultView>("add_attachment", {
+    documentId,
+    path,
+  });
+}
+
+/**
+ * Deletes one attachment from the session as an undoable action. The UI asks
+ * for confirmation before calling this command.
+ */
+export async function deleteAttachment(
+  documentId: string,
+  attachmentId: number,
+): Promise<AttachmentEditResultView> {
+  return invoke<AttachmentEditResultView>("delete_attachment", {
+    documentId,
+    attachmentId,
+  });
+}
+
+/**
+ * Extracts one attachment to a temporary location and opens it with the OS
+ * default handler. Attachments are never opened automatically: `confirm` must
+ * be true after the user accepted the warning.
+ */
+export async function openAttachment(
+  documentId: string,
+  attachmentId: number,
+  confirm: boolean,
+): Promise<void> {
+  return invoke<void>("open_attachment", {
+    documentId,
+    attachmentId,
+    confirm,
+  });
+}
+
+/**
+ * Extracts one attachment to `destination` with an atomic write. The Source
+ * Document and the current Output Document are refused.
+ */
+export async function saveAttachmentAs(
+  documentId: string,
+  attachmentId: number,
+  destination: string,
+): Promise<AttachmentSaveView> {
+  return invoke<AttachmentSaveView>("save_attachment_as", {
+    documentId,
+    attachmentId,
+    destination,
   });
 }
 

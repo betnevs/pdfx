@@ -463,6 +463,101 @@ pub fn embedded_true_type_pdf() -> TempPdf {
     write_pdf("embedded-true-type", build_pdf(objects, 1))
 }
 
+/// A 612x792 page carrying two existing attachments in a nested
+/// `/Names /EmbeddedFiles` name tree (root `/Kids` with two leaf nodes), plus
+/// an unrelated `/Dests` name tree that must survive every save.
+///
+/// The first attachment is a plain ASCII `a.txt`; the second is named
+/// `报告.pdf` with a UTF-16BE name-tree key and file name, exercising the
+/// non-ASCII string paths.
+pub fn embedded_files_pdf() -> TempPdf {
+    let a_txt = b"hello attachment\n";
+    let report = b"%PDF-1.4 fake attachment\n";
+    let objects = vec![
+        (
+            1,
+            b"<< /Type /Catalog /Pages 2 0 R /Names << /Dests 6 0 R /EmbeddedFiles 7 0 R >> >>"
+                .to_vec(),
+        ),
+        (2, b"<< /Type /Pages /Kids [4 0 R] /Count 1 >>".to_vec()),
+        (3, HELVETICA.to_vec()),
+        (
+            4,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R >>".to_vec(),
+        ),
+        (
+            5,
+            stream("", b"BT /F1 18 Tf 72 720 Td (Attachment host.) Tj ET\n"),
+        ),
+        // Unrelated name tree that attachment saves must not disturb.
+        (6, b"<< /Names [(chapter-one) [4 0 R /Fit]] >>".to_vec()),
+        (7, b"<< /Kids [8 0 R 9 0 R] >>".to_vec()),
+        (
+            8,
+            b"<< /Limits [(a.txt) (a.txt)] /Names [(a.txt) 10 0 R] >>".to_vec(),
+        ),
+        (
+            9,
+            b"<< /Limits [<FEFF62A5544A002E007000640066> <FEFF62A5544A002E007000640066>] /Names [<FEFF62A5544A002E007000640066> 11 0 R] >>".to_vec(),
+        ),
+        (
+            10,
+            b"<< /Type /Filespec /F (a.txt) /UF (a.txt) /EF << /F 12 0 R >> >>".to_vec(),
+        ),
+        (
+            11,
+            b"<< /Type /Filespec /F (report.pdf) /UF <FEFF62A5544A002E007000640066> /EF << /F 13 0 R >> >>".to_vec(),
+        ),
+        (
+            12,
+            stream(
+                "/Type /EmbeddedFile /Subtype /text#2Fplain /Params << /Size 17 >>",
+                a_txt,
+            ),
+        ),
+        (
+            13,
+            stream(
+                "/Type /EmbeddedFile /Subtype /application#2Fpdf /Params << /Size 25 >>",
+                report,
+            ),
+        ),
+    ];
+    write_pdf("embedded-files", build_pdf(objects, 1))
+}
+
+/// A 612x792 page with one existing attachment whose name-tree key and
+/// `/Filespec /F` are single-byte PDFDocEncoding (`café.txt`, byte 0xE9) and
+/// which has no `/UF`, the form other writers emit.
+pub fn embedded_files_pdfdoc_encoding_pdf() -> TempPdf {
+    let data = b"pdfdoc attachment\n";
+    let objects = vec![
+        (
+            1,
+            b"<< /Type /Catalog /Pages 2 0 R /Names << /EmbeddedFiles 5 0 R >> >>".to_vec(),
+        ),
+        (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+        (
+            3,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R >>".to_vec(),
+        ),
+        (4, stream("", b"")),
+        (5, b"<< /Names [(caf\xE9.txt) 6 0 R] >>".to_vec()),
+        (
+            6,
+            b"<< /Type /Filespec /F (caf\xE9.txt) /EF << /F 7 0 R >> >>".to_vec(),
+        ),
+        (
+            7,
+            stream(
+                "/Type /EmbeddedFile /Subtype /text#2Fplain /Params << /Size 18 >>",
+                data,
+            ),
+        ),
+    ];
+    write_pdf("embedded-files-pdfdoc", build_pdf(objects, 1))
+}
+
 /// A 612x792 page using a non-embedded, non-standard font name. Pdfium
 /// substitutes a rendering font, but the text object still advertises the
 /// document's original (non-standard) font.

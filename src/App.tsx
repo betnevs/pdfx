@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { DocumentAccess } from "./components/DocumentAccess";
 import { AnnotationPanel } from "./components/AnnotationPanel";
+import { AttachmentPanel, attachmentErrorMessage } from "./components/AttachmentPanel";
 import { StampPanel } from "./components/StampPanel";
 import { DocumentToolbar, PageSurface, ThumbnailRail } from "./components/PageViewer";
 import {
@@ -60,6 +61,7 @@ import {
   menuStateSignature,
 } from "./lib/menu";
 import { useAnnotations } from "./lib/useAnnotations";
+import { useAttachments } from "./lib/useAttachments";
 import { useLinks } from "./lib/useLinks";
 import { useDocumentSave } from "./lib/useDocumentSave";
 import { useDocumentViewer } from "./lib/useDocumentViewer";
@@ -206,6 +208,7 @@ export function App() {
 
   const annotations = useAnnotations(openDocumentView?.documentId ?? null);
   const links = useLinks(openDocumentView?.documentId ?? null);
+  const attachments = useAttachments(openDocumentView?.documentId ?? null);
   const [selectedAnnotation, setSelectedAnnotation] =
     useState<AnnotationView | null>(null);
   const [armedStamp, setArmedStamp] = useState<StampKind | null>(null);
@@ -1302,6 +1305,23 @@ export function App() {
                   canAnnotate={open.document.permissions.canAnnotate}
                   readOnly={open.document.readOnly}
                   onPick={setArmedStamp}
+                />
+                <AttachmentPanel
+                  documentId={open.document.documentId}
+                  attachments={attachments.attachments}
+                  loading={attachments.status === "loading"}
+                  error={
+                    attachments.error
+                      ? attachmentErrorMessage(attachments.error.code)
+                      : null
+                  }
+                  canModify={
+                    open.document.permissions.canModifyContent &&
+                    !open.document.readOnly
+                  }
+                  readOnly={open.document.readOnly}
+                  onHistory={(history) => save.acceptHistory(history)}
+                  onChanged={() => void attachments.reload()}
                 />
                 <AnnotationPanel
                   documentId={open.document.documentId}
