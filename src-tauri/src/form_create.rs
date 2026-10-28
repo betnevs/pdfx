@@ -2854,6 +2854,10 @@ fn write_signature_field(
 
 /// Resolves the existing fields whose appearances must be rebuilt: widget
 /// rectangles, page rotation, `/DA` font size, flags and choice options.
+///
+/// A malformed document may contain more than one terminal field with the same
+/// full name; every match gets a fresh appearance so no same-named widget is
+/// left drawing its old value.
 fn prepare_existing_appearances(
     incremental: &IncrementalDocument,
     appearances: &[ExistingFieldAppearance],
@@ -2864,105 +2868,98 @@ fn prepare_existing_appearances(
         .map(crate::save::decode_pdf_text);
     let mut prepared = Vec::with_capacity(appearances.len());
     for appearance in appearances {
-        let found = crate::save::find_form_field_any(incremental, &appearance.field_name)
-            .ok_or_else(|| {
-                pdf_error(format!(
-                    "could not find the field {:?} in the saved document",
-                    appearance.field_name
-                ))
-            })?;
-        let field_id = found.field_id;
-        let mut widget_ids = found.widget_ids;
-        if widget_ids.is_empty() {
-            // A merged field is its own widget.
-            widget_ids.push(field_id);
+        let found = crate::save::find_form_fields_any(incremental, &appearance.field_name);
+        if found.is_empty() {
+            return Err(pdf_error(format!(
+                "could not find the field {:?} in the saved document",
+                appearance.field_name
+            )));
         }
-        let flags = inherited_field_entry(incremental, field_id, b"Ff")
-            .and_then(|flags| flags.as_i64().ok())
-            .unwrap_or(0);
-        let font_size = widget_da(incremental, &widget_ids)
-            .or_else(|| {
-                inherited_field_entry(incremental, field_id, b"DA")
-                    .and_then(|da| da.as_str().ok().map(crate::save::decode_pdf_text))
-            })
-            .or_else(|| acro_form_da.clone())
-            .as_deref()
-            .and_then(font_size_from_da)
-            .unwrap_or(DEFAULT_FONT_SIZE);
-        let widgets: Vec<PreparedWidget> = widget_ids
-            .iter()
-            .filter_map(|id| prepared_widget(incremental, *id, field_id))
-            .collect();
-        let kind = match &appearance.value {
-            ExistingAppearanceValue::Text(text) => PreparedKind::Text {
-                value: text.clone(),
-                multiline: flags & (1 << 12) != 0,
-                font_size,
-            },
-            ExistingAppearanceValue::Checked(checked) => {
-                let on_state = widgets
-                    .iter()
-                    .find_map(|widget| widget.on_state.clone())
-                    .unwrap_or_else(|| CHECKBOX_ON_STATE.as_bytes().to_vec());
-                PreparedKind::Checkbox {
-                    checked: *checked,
-                    on_state,
-                }
-            }
-            ExistingAppearanceValue::Radio(state) => PreparedKind::Radio {
-                selected: state.clone(),
-            },
-            ExistingAppearanceValue::Choice(label) => {
-                let options = inherited_field_entry(incremental, field_id, b"Opt")
-                    .and_then(|options| {
-                        crate::save::resolve_object_any(incremental, &options).cloned()
-                    })
-                    .and_then(|options| options.as_array().ok().cloned())
-                    .map(|options| {
-                        options
-                            .iter()
-                            .filter_map(crate::save::option_label)
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
-                let selected = options
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, option)| *option == label)
-                    .map(|(index, _)| index)
-                    .collect();
-                PreparedKind::Choice {
-                    options,
-                    selected,
-                    combo: flags & (1 << 17) != 0,
-                    font_size,
-                }
-            }
-        };
-        prepared.push(PreparedAppearance { widgets, kind });
+        for found in found {
+            prepared.push(prepare_existing_appearance(
+                incremental,
+                appearance,
+                found,
+                acro_form_da.clone(),
+            ));
+        }
     }
     Ok(prepared)
 }
 
-/// A field entry, falling back to the nearest ancestor that defines it
-/// (PDF 32000-1 Table 220: `/FT`, `/Ff`, `/DA` and `/Opt` are inheritable).
-fn inherited_field_entry(
+fn prepare_existing_appearance(
     incremental: &IncrementalDocument,
-    field_id: ObjectId,
-    key: &[u8],
-) -> Option<Object> {
-    let mut next = Some(field_id);
-    for _ in 0..64 {
-        let dictionary = crate::save::dictionary_any(incremental, next?)?;
-        if let Ok(value) = dictionary.get(key) {
-            return Some(value.clone());
-        }
-        next = dictionary
-            .get(b"Parent")
-            .ok()
-            .and_then(|parent| parent.as_reference().ok());
+    appearance: &ExistingFieldAppearance,
+    found: crate::save::FormFieldObjects,
+    acro_form_da: Option<String>,
+) -> PreparedAppearance {
+    let field_id = found.field_id;
+    let mut widget_ids = found.widget_ids;
+    if widget_ids.is_empty() {
+        // A merged field is its own widget.
+        widget_ids.push(field_id);
     }
-    None
+    let flags = crate::save::inherited_field_entry_any(incremental, field_id, b"Ff")
+        .and_then(|flags| flags.as_i64().ok())
+        .unwrap_or(0);
+    let font_size = widget_da(incremental, &widget_ids)
+        .or_else(|| {
+            crate::save::inherited_field_entry_any(incremental, field_id, b"DA")
+                .and_then(|da| da.as_str().ok().map(crate::save::decode_pdf_text))
+        })
+        .or_else(|| acro_form_da.clone())
+        .as_deref()
+        .and_then(font_size_from_da)
+        .unwrap_or(DEFAULT_FONT_SIZE);
+    let widgets: Vec<PreparedWidget> = widget_ids
+        .iter()
+        .filter_map(|id| prepared_widget(incremental, *id, field_id))
+        .collect();
+    let kind = match &appearance.value {
+        ExistingAppearanceValue::Text(text) => PreparedKind::Text {
+            value: text.clone(),
+            multiline: flags & (1 << 12) != 0,
+            font_size,
+        },
+        ExistingAppearanceValue::Checked(checked) => {
+            let on_state = widgets
+                .iter()
+                .find_map(|widget| widget.on_state.clone())
+                .unwrap_or_else(|| CHECKBOX_ON_STATE.as_bytes().to_vec());
+            PreparedKind::Checkbox {
+                checked: *checked,
+                on_state,
+            }
+        }
+        ExistingAppearanceValue::Radio(state) => PreparedKind::Radio {
+            selected: state.clone(),
+        },
+        ExistingAppearanceValue::Choice(label) => {
+            let options = crate::save::inherited_field_entry_any(incremental, field_id, b"Opt")
+                .and_then(|options| crate::save::resolve_object_any(incremental, &options).cloned())
+                .and_then(|options| options.as_array().ok().cloned())
+                .map(|options| {
+                    options
+                        .iter()
+                        .filter_map(crate::save::option_label)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let selected = options
+                .iter()
+                .enumerate()
+                .filter(|(_, option)| *option == label)
+                .map(|(index, _)| index)
+                .collect();
+            PreparedKind::Choice {
+                options,
+                selected,
+                combo: flags & (1 << 17) != 0,
+                font_size,
+            }
+        }
+    };
+    PreparedAppearance { widgets, kind }
 }
 
 /// The widget-level `/DA`, which overrides the field and AcroForm defaults.

@@ -2144,32 +2144,62 @@ pub(crate) fn acro_form_any(
     }
 }
 
-/// Finds a field by its full dotted name, walking nested `/Kids` levels
-/// (`person.name` resolves to the `name` dictionary under `person`).
+/// Finds every terminal field with the given full dotted name, walking nested
+/// `/Kids` levels (`person.name` resolves to the `name` dictionary under
+/// `person`).
 ///
 /// The search starts at the appended revision's `/Fields`, which holds the
 /// copy-page fields and — once any pass clones it — every existing field too.
 /// A field is terminal when none of its kids is itself a field; its kids are
 /// then the widgets. A merged widget field is its own widget.
-pub(crate) fn find_form_field_any(
+///
+/// Malformed documents can name two field dictionaries alike (a literal dotted
+/// `/T` colliding with a nested path, or a duplicate `/T`); PDF viewers treat
+/// them as one logical field, so every match is returned and written. The walk
+/// carries a visited set and a depth limit: a cyclic `/Kids` graph must not
+/// recurse forever.
+pub(crate) fn find_form_fields_any(
     incremental: &lopdf::IncrementalDocument,
     name: &str,
-) -> Option<FormFieldObjects> {
-    let acro_form = acro_form_any(incremental)?;
-    let fields = resolve_object_any(incremental, acro_form.get(b"Fields").ok()?)?;
-    walk_field_entries(incremental, fields.as_array().ok()?, "", name)
+) -> Vec<FormFieldObjects> {
+    let Some(acro_form) = acro_form_any(incremental) else {
+        return Vec::new();
+    };
+    let Some(fields) = acro_form
+        .get(b"Fields")
+        .ok()
+        .and_then(|fields| resolve_object_any(incremental, fields))
+        .and_then(|fields| fields.as_array().ok())
+    else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    let mut visited = std::collections::HashSet::new();
+    walk_field_entries(incremental, fields, "", name, &mut visited, 0, &mut found);
+    found
 }
+
+const MAX_FIELD_DEPTH: usize = 64;
 
 fn walk_field_entries(
     incremental: &lopdf::IncrementalDocument,
     entries: &[lopdf::Object],
     prefix: &str,
     target: &str,
-) -> Option<FormFieldObjects> {
+    visited: &mut std::collections::HashSet<lopdf::ObjectId>,
+    depth: usize,
+    found: &mut Vec<FormFieldObjects>,
+) {
+    if depth > MAX_FIELD_DEPTH {
+        return;
+    }
     for entry in entries {
         let Some(id) = entry.as_reference().ok() else {
             continue;
         };
+        if !visited.insert(id) {
+            continue;
+        }
         let Some(dictionary) = dictionary_any(incremental, id) else {
             continue;
         };
@@ -2211,16 +2241,22 @@ fn walk_field_entries(
             } else {
                 widget_ids
             };
-            return Some(FormFieldObjects {
+            found.push(FormFieldObjects {
                 field_id: id,
                 widget_ids,
             });
+            continue;
         }
-        if let Some(found) = walk_field_entries(incremental, &child_fields, &full, target) {
-            return Some(found);
-        }
+        walk_field_entries(
+            incremental,
+            &child_fields,
+            &full,
+            target,
+            visited,
+            depth + 1,
+            found,
+        );
     }
-    None
 }
 
 /// Resolves an object that may live in the appended revision or in the
@@ -2249,6 +2285,27 @@ pub(crate) fn dictionary_any(
         .get_dictionary(id)
         .ok()
         .or_else(|| incremental.get_prev_documents().get_dictionary(id).ok())
+}
+
+/// A field entry, falling back to the nearest ancestor that defines it
+/// (PDF 32000-1 Table 220: `/FT`, `/Ff`, `/DA` and `/Opt` are inheritable).
+pub(crate) fn inherited_field_entry_any(
+    incremental: &lopdf::IncrementalDocument,
+    field_id: lopdf::ObjectId,
+    key: &[u8],
+) -> Option<lopdf::Object> {
+    let mut next = Some(field_id);
+    for _ in 0..64 {
+        let dictionary = dictionary_any(incremental, next?)?;
+        if let Ok(value) = dictionary.get(key) {
+            return Some(value.clone());
+        }
+        next = dictionary
+            .get(b"Parent")
+            .ok()
+            .and_then(|parent| parent.as_reference().ok());
+    }
+    None
 }
 
 /// Field entries a terminal field inherits from its `/Parent` chain
@@ -2344,63 +2401,75 @@ pub(crate) fn widget_on_state_any(
         .map(|(state, _)| state.clone())
 }
 
+/// A matched radio group: its field object, its widget objects and each
+/// widget's non-Off appearance state (when it has one).
+type RadioGroupObjects = (lopdf::ObjectId, Vec<lopdf::ObjectId>, Vec<Option<Vec<u8>>>);
+
 fn apply_radio_group(
     incremental: &mut lopdf::IncrementalDocument,
     field_name: &str,
     state: &str,
 ) -> Result<(), CommandError> {
-    let (field_id, widget_ids, on_states) = {
-        let found = find_form_field_any(incremental, field_name).ok_or_else(|| {
-            lopdf_error(
+    let groups: Vec<RadioGroupObjects> = {
+        let found = find_form_fields_any(incremental, field_name);
+        if found.is_empty() {
+            return Err(lopdf_error(
                 "could not find a radio field in the saved document",
                 field_name,
-            )
-        })?;
-        let field_id = found.field_id;
-        let widget_ids = if found.widget_ids.is_empty() {
-            vec![field_id]
-        } else {
-            found.widget_ids
-        };
-        let on_states: Vec<Option<Vec<u8>>> = widget_ids
-            .iter()
-            .map(|id| {
-                dictionary_any(incremental, *id)
-                    .and_then(|widget| widget_on_state_any(incremental, widget))
+            ));
+        }
+        found
+            .into_iter()
+            .map(|found| {
+                let field_id = found.field_id;
+                let widget_ids = if found.widget_ids.is_empty() {
+                    vec![field_id]
+                } else {
+                    found.widget_ids
+                };
+                let on_states: Vec<Option<Vec<u8>>> = widget_ids
+                    .iter()
+                    .map(|id| {
+                        dictionary_any(incremental, *id)
+                            .and_then(|widget| widget_on_state_any(incremental, widget))
+                    })
+                    .collect();
+                (field_id, widget_ids, on_states)
             })
-            .collect();
-        (field_id, widget_ids, on_states)
+            .collect()
     };
 
-    incremental
-        .opt_clone_object_to_new_document(field_id)
-        .map_err(|error| lopdf_error("could not clone the radio field", error))?;
-    for id in &widget_ids {
+    for (field_id, widget_ids, on_states) in groups {
         incremental
-            .opt_clone_object_to_new_document(*id)
-            .map_err(|error| lopdf_error("could not clone a radio widget", error))?;
-    }
+            .opt_clone_object_to_new_document(field_id)
+            .map_err(|error| lopdf_error("could not clone the radio field", error))?;
+        for id in &widget_ids {
+            incremental
+                .opt_clone_object_to_new_document(*id)
+                .map_err(|error| lopdf_error("could not clone a radio widget", error))?;
+        }
 
-    let field = incremental
-        .new_document
-        .get_dictionary_mut(field_id)
-        .map_err(|error| lopdf_error("could not edit the radio field", error))?;
-    field.set(
-        b"V".to_vec(),
-        lopdf::Object::Name(state.as_bytes().to_vec()),
-    );
-
-    for (id, on_state) in widget_ids.iter().zip(on_states) {
-        let widget = incremental
+        let field = incremental
             .new_document
-            .get_dictionary_mut(*id)
-            .map_err(|error| lopdf_error("could not edit a radio widget", error))?;
-        let appearance: &[u8] = if on_state.as_deref() == Some(state.as_bytes()) {
-            state.as_bytes()
-        } else {
-            b"Off"
-        };
-        widget.set(b"AS".to_vec(), lopdf::Object::Name(appearance.to_vec()));
+            .get_dictionary_mut(field_id)
+            .map_err(|error| lopdf_error("could not edit the radio field", error))?;
+        field.set(
+            b"V".to_vec(),
+            lopdf::Object::Name(state.as_bytes().to_vec()),
+        );
+
+        for (id, on_state) in widget_ids.iter().zip(on_states) {
+            let widget = incremental
+                .new_document
+                .get_dictionary_mut(*id)
+                .map_err(|error| lopdf_error("could not edit a radio widget", error))?;
+            let appearance: &[u8] = if on_state.as_deref() == Some(state.as_bytes()) {
+                state.as_bytes()
+            } else {
+                b"Off"
+            };
+            widget.set(b"AS".to_vec(), lopdf::Object::Name(appearance.to_vec()));
+        }
     }
 
     Ok(())
@@ -2411,46 +2480,49 @@ fn apply_choice_value(
     field_name: &str,
     label: &str,
 ) -> Result<(), CommandError> {
-    let (field_id, index) = {
-        let field_id = find_form_field_any(incremental, field_name)
-            .map(|found| found.field_id)
-            .ok_or_else(|| {
-                lopdf_error(
-                    "could not find a choice field in the saved document",
-                    field_name,
-                )
-            })?;
-        let field = dictionary_any(incremental, field_id)
-            .ok_or_else(|| lopdf_error("could not read the choice field dictionary", field_name))?;
-        let index = field
-            .get(b"Opt")
-            .ok()
-            .and_then(|options| resolve_object_any(incremental, options))
-            .and_then(|options| options.as_array().ok())
-            .and_then(|options| {
-                options
-                    .iter()
-                    .position(|option| option_label(option).as_deref() == Some(label))
+    let fields: Vec<(lopdf::ObjectId, Option<i64>)> = {
+        let found = find_form_fields_any(incremental, field_name);
+        if found.is_empty() {
+            return Err(lopdf_error(
+                "could not find a choice field in the saved document",
+                field_name,
+            ));
+        }
+        found
+            .into_iter()
+            .map(|found| {
+                let field_id = found.field_id;
+                let index = inherited_field_entry_any(incremental, field_id, b"Opt")
+                    .and_then(|options| resolve_object_any(incremental, &options).cloned())
+                    .and_then(|options| options.as_array().ok().cloned())
+                    .and_then(|options| {
+                        options
+                            .iter()
+                            .position(|option| option_label(option).as_deref() == Some(label))
+                    })
+                    .map(|index| index as i64);
+                (field_id, index)
             })
-            .map(|index| index as i64);
-        (field_id, index)
+            .collect()
     };
 
-    incremental
-        .opt_clone_object_to_new_document(field_id)
-        .map_err(|error| lopdf_error("could not clone the choice field", error))?;
-    let field = incremental
-        .new_document
-        .get_dictionary_mut(field_id)
-        .map_err(|error| lopdf_error("could not edit the choice field", error))?;
-    field.set(b"V".to_vec(), text_string_object(label));
-    match index {
-        Some(index) => field.set(
-            b"I".to_vec(),
-            lopdf::Object::Array(vec![lopdf::Object::Integer(index)]),
-        ),
-        None => {
-            field.remove(b"I");
+    for (field_id, index) in fields {
+        incremental
+            .opt_clone_object_to_new_document(field_id)
+            .map_err(|error| lopdf_error("could not clone the choice field", error))?;
+        let field = incremental
+            .new_document
+            .get_dictionary_mut(field_id)
+            .map_err(|error| lopdf_error("could not edit the choice field", error))?;
+        field.set(b"V".to_vec(), text_string_object(label));
+        match index {
+            Some(index) => field.set(
+                b"I".to_vec(),
+                lopdf::Object::Array(vec![lopdf::Object::Integer(index)]),
+            ),
+            None => {
+                field.remove(b"I");
+            }
         }
     }
 
@@ -2462,22 +2534,26 @@ fn apply_text_value(
     field_name: &str,
     text: &str,
 ) -> Result<(), CommandError> {
-    let field_id = find_form_field_any(incremental, field_name)
+    let field_ids: Vec<lopdf::ObjectId> = find_form_fields_any(incremental, field_name)
+        .into_iter()
         .map(|found| found.field_id)
-        .ok_or_else(|| {
-            lopdf_error(
-                "could not find a text field in the saved document",
-                field_name,
-            )
-        })?;
-    incremental
-        .opt_clone_object_to_new_document(field_id)
-        .map_err(|error| lopdf_error("could not clone the text field", error))?;
-    let field = incremental
-        .new_document
-        .get_dictionary_mut(field_id)
-        .map_err(|error| lopdf_error("could not edit the text field", error))?;
-    field.set(b"V".to_vec(), text_string_object(text));
+        .collect();
+    if field_ids.is_empty() {
+        return Err(lopdf_error(
+            "could not find a text field in the saved document",
+            field_name,
+        ));
+    }
+    for field_id in field_ids {
+        incremental
+            .opt_clone_object_to_new_document(field_id)
+            .map_err(|error| lopdf_error("could not clone the text field", error))?;
+        let field = incremental
+            .new_document
+            .get_dictionary_mut(field_id)
+            .map_err(|error| lopdf_error("could not edit the text field", error))?;
+        field.set(b"V".to_vec(), text_string_object(text));
+    }
     Ok(())
 }
 
@@ -2486,53 +2562,61 @@ fn apply_checkbox_value(
     field_name: &str,
     checked: bool,
 ) -> Result<(), CommandError> {
-    let (field_id, widget_ids, on_state) = {
-        let found = find_form_field_any(incremental, field_name).ok_or_else(|| {
-            lopdf_error(
+    let checkboxes: Vec<(lopdf::ObjectId, Vec<lopdf::ObjectId>, Vec<u8>)> = {
+        let found = find_form_fields_any(incremental, field_name);
+        if found.is_empty() {
+            return Err(lopdf_error(
                 "could not find a checkbox field in the saved document",
                 field_name,
-            )
-        })?;
-        let field_id = found.field_id;
-        let widget_ids = if found.widget_ids.is_empty() {
-            vec![field_id]
-        } else {
-            found.widget_ids
-        };
-        let on_state = widget_ids
-            .iter()
-            .find_map(|id| {
-                dictionary_any(incremental, *id)
-                    .and_then(|widget| widget_on_state_any(incremental, widget))
+            ));
+        }
+        found
+            .into_iter()
+            .map(|found| {
+                let field_id = found.field_id;
+                let widget_ids = if found.widget_ids.is_empty() {
+                    vec![field_id]
+                } else {
+                    found.widget_ids
+                };
+                let on_state = widget_ids
+                    .iter()
+                    .find_map(|id| {
+                        dictionary_any(incremental, *id)
+                            .and_then(|widget| widget_on_state_any(incremental, widget))
+                    })
+                    .unwrap_or_else(|| b"Yes".to_vec());
+                (field_id, widget_ids, on_state)
             })
-            .unwrap_or_else(|| b"Yes".to_vec());
-        (field_id, widget_ids, on_state)
+            .collect()
     };
 
-    incremental
-        .opt_clone_object_to_new_document(field_id)
-        .map_err(|error| lopdf_error("could not clone the checkbox field", error))?;
-    for id in &widget_ids {
+    for (field_id, widget_ids, on_state) in checkboxes {
         incremental
-            .opt_clone_object_to_new_document(*id)
-            .map_err(|error| lopdf_error("could not clone a checkbox widget", error))?;
-    }
-    let appearance = if checked {
-        on_state.clone()
-    } else {
-        b"Off".to_vec()
-    };
-    let field = incremental
-        .new_document
-        .get_dictionary_mut(field_id)
-        .map_err(|error| lopdf_error("could not edit the checkbox field", error))?;
-    field.set(b"V".to_vec(), lopdf::Object::Name(appearance.clone()));
-    for id in &widget_ids {
-        let widget = incremental
+            .opt_clone_object_to_new_document(field_id)
+            .map_err(|error| lopdf_error("could not clone the checkbox field", error))?;
+        for id in &widget_ids {
+            incremental
+                .opt_clone_object_to_new_document(*id)
+                .map_err(|error| lopdf_error("could not clone a checkbox widget", error))?;
+        }
+        let appearance = if checked {
+            on_state.clone()
+        } else {
+            b"Off".to_vec()
+        };
+        let field = incremental
             .new_document
-            .get_dictionary_mut(*id)
-            .map_err(|error| lopdf_error("could not edit a checkbox widget", error))?;
-        widget.set(b"AS".to_vec(), lopdf::Object::Name(appearance.clone()));
+            .get_dictionary_mut(field_id)
+            .map_err(|error| lopdf_error("could not edit the checkbox field", error))?;
+        field.set(b"V".to_vec(), lopdf::Object::Name(appearance.clone()));
+        for id in &widget_ids {
+            let widget = incremental
+                .new_document
+                .get_dictionary_mut(*id)
+                .map_err(|error| lopdf_error("could not edit a checkbox widget", error))?;
+            widget.set(b"AS".to_vec(), lopdf::Object::Name(appearance.clone()));
+        }
     }
     Ok(())
 }

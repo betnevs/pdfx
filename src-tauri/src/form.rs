@@ -352,7 +352,7 @@ pub(crate) struct FormOverlay {
 /// wrote into the document itself are not repeated here — discovery reads
 /// them from Pdfium, and an overlay entry would otherwise hide a later write.
 pub(crate) fn overlay_for(edit: &EditSession, _pages: &crate::page_ops::PageModel) -> FormOverlay {
-    collect_values(edit, false)
+    collect_values(edit, false, None)
 }
 
 /// Last applied value per field, including values Pdfium already wrote.
@@ -360,16 +360,30 @@ pub(crate) fn overlay_for(edit: &EditSession, _pages: &crate::page_ops::PageMode
 /// The save pipeline needs these to rebuild the widget appearances: the value
 /// edit itself is idempotent, but a stale `/AP` would still draw the old value
 /// if no appearance followed.
-pub(crate) fn applied_values(edit: &EditSession) -> FormOverlay {
-    collect_values(edit, true)
+pub(crate) fn applied_values(
+    edit: &EditSession,
+    pages: &crate::page_ops::PageModel,
+) -> FormOverlay {
+    collect_values(edit, true, Some(pages))
 }
 
-fn collect_values(edit: &EditSession, include_pdfium_written: bool) -> FormOverlay {
+fn collect_values(
+    edit: &EditSession,
+    include_pdfium_written: bool,
+    live_pages: Option<&crate::page_ops::PageModel>,
+) -> FormOverlay {
     let mut overlay = FormOverlay::default();
     for entry in &edit.undo_stack {
         let EditAction::Field(action) = entry else {
             continue;
         };
+        // A field on a deleted page is pruned from `/Fields` before the object
+        // edits run; writing its value would fail the save.
+        if let Some(pages) = live_pages {
+            if pages.logical(action.page_index).is_none() {
+                continue;
+            }
+        }
         if let Some(group) = &action.radio_group {
             if let FieldValueSnapshot::Radio(state) = &action.after {
                 match state {
@@ -418,7 +432,7 @@ pub(crate) fn save_object_edits(
     edit: &EditSession,
     pages: &crate::page_ops::PageModel,
 ) -> Vec<crate::save::ObjectEdit> {
-    let overlay = applied_values(edit);
+    let overlay = applied_values(edit, pages);
     let mut edits = Vec::new();
 
     let mut groups: Vec<_> = overlay.radio.iter().collect();
@@ -990,16 +1004,27 @@ pub(crate) fn apply_field_snapshot(
 /// also routed through the overlay, which can always write the correct object
 /// at save time.
 fn pdfium_can_write_field(source_bytes: &[u8], raw_name: &str) -> bool {
+    #[allow(clippy::too_many_arguments)]
     fn walk(
         document: &lopdf::Document,
         fields: &[lopdf::Object],
         prefix: &str,
         target: &str,
-    ) -> Option<bool> {
+        visited: &mut std::collections::HashSet<lopdf::ObjectId>,
+        depth: usize,
+        matches: &mut Vec<bool>,
+    ) {
+        if depth > 64 {
+            return;
+        }
         for entry in fields {
             let Some(id) = entry.as_reference().ok() else {
                 continue;
             };
+            // Malformed `/Kids` graphs can be cyclic; never revisit a field.
+            if !visited.insert(id) {
+                continue;
+            }
             let Some(dictionary) = document.get_dictionary(id).ok() else {
                 continue;
             };
@@ -1037,15 +1062,21 @@ fn pdfium_can_write_field(source_bytes: &[u8], raw_name: &str) -> bool {
                     .and_then(|kids| kids.as_array().ok())
                     .map(|kids| !kids.is_empty())
                     .unwrap_or(false);
-                return Some(!has_widget_kids);
+                matches.push(!has_widget_kids);
+                continue;
             }
             for kid in &kids {
-                if let Some(found) = walk(document, std::slice::from_ref(kid), &full, target) {
-                    return Some(found);
-                }
+                walk(
+                    document,
+                    std::slice::from_ref(kid),
+                    &full,
+                    target,
+                    visited,
+                    depth + 1,
+                    matches,
+                );
             }
         }
-        None
     }
 
     let Ok(document) = lopdf::Document::load_mem(source_bytes) else {
@@ -1064,7 +1095,19 @@ fn pdfium_can_write_field(source_bytes: &[u8], raw_name: &str) -> bool {
     else {
         return false;
     };
-    walk(&document, fields, "", raw_name).unwrap_or(false)
+    let mut matches = Vec::new();
+    walk(
+        &document,
+        fields,
+        "",
+        raw_name,
+        &mut std::collections::HashSet::new(),
+        0,
+        &mut matches,
+    );
+    // Pdfium resolves a name to a single field object. Ambiguous names must go
+    // through the save overlay, which updates every object carrying the name.
+    matches.len() == 1 && matches[0]
 }
 
 fn fill_for(
