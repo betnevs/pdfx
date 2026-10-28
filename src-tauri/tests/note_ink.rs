@@ -1242,3 +1242,316 @@ fn notes_and_ink_take_their_author_from_settings_at_creation_time() {
     );
     close_document(document_id).expect("close document");
 }
+
+#[test]
+fn each_ink_gesture_is_a_separate_undo_action() {
+    // The overlay commits one annotation per pen-down/pen-up gesture, so two
+    // consecutive strokes must be two undo steps rather than one merged edit.
+    let pdf = synthetic::single_line_pdf();
+    let document_id = open_synthetic(&pdf);
+    let first = create_ink_with_author(
+        document_id.clone(),
+        "作者".to_owned(),
+        ink_request(vec![vec![(80.0, 300.0), (120.0, 320.0)]]),
+    )
+    .expect("first stroke")
+    .annotation
+    .expect("first view");
+    let second = create_ink_with_author(
+        document_id.clone(),
+        "作者".to_owned(),
+        ink_request(vec![vec![(160.0, 340.0), (200.0, 360.0)]]),
+    )
+    .expect("second stroke")
+    .annotation
+    .expect("second view");
+    assert_ne!(first.name, second.name);
+
+    undo_text_edit(document_id.clone()).expect("undo the second stroke");
+    let after_one_undo = list_annotations(document_id.clone()).expect("list after one undo");
+    assert_eq!(after_one_undo.len(), 1);
+    assert_eq!(after_one_undo[0].name, first.name);
+    undo_text_edit(document_id.clone()).expect("undo the first stroke");
+    assert!(list_annotations(document_id.clone())
+        .expect("list after two undos")
+        .is_empty());
+    redo_text_edit(document_id.clone()).expect("redo the first stroke");
+    redo_text_edit(document_id.clone()).expect("redo the second stroke");
+    let redone = list_annotations(document_id.clone()).expect("list after redo");
+    assert_eq!(
+        redone.iter().map(|view| &view.name).collect::<Vec<_>>(),
+        vec![&first.name, &second.name]
+    );
+    close_document(document_id).expect("close document");
+}
+
+#[test]
+fn ink_point_cap_rejects_oversized_strokes_without_history() {
+    let pdf = synthetic::single_line_pdf();
+    let document_id = open_synthetic(&pdf);
+    let oversized: Vec<InkPoint> = (0..=20_000)
+        .map(|index| InkPoint {
+            x: (index % 100) as f32,
+            y: (index / 100) as f32,
+        })
+        .collect();
+    let error = create_ink_with_author(
+        document_id.clone(),
+        "作者".to_owned(),
+        CreateInkRequest {
+            page_index: 0,
+            color: "#c62828".to_owned(),
+            opacity: 80,
+            line_width: 6.0,
+            strokes: vec![oversized],
+        },
+    )
+    .expect_err("20,001 points exceed the cap");
+    assert_eq!(error.code, CommandErrorCode::InvalidArgument);
+    let history = edit_history(document_id.clone()).expect("history");
+    assert!(
+        !history.dirty,
+        "a rejected stroke must not dirty the document"
+    );
+    assert!(!history.can_undo);
+    assert!(list_annotations(document_id.clone())
+        .expect("list after rejection")
+        .is_empty());
+    close_document(document_id).expect("close document");
+}
+
+#[test]
+fn repeat_saves_do_not_duplicate_note_or_ink_annotations() {
+    let dir = TempDir::new("note-ink-repeat-save");
+    let pdf = synthetic::single_line_pdf();
+    let source_bytes = std::fs::read(pdf.path_string()).expect("read source");
+    let document_id = open_synthetic(&pdf);
+    let note = create_note_with_author(
+        document_id.clone(),
+        "重复作者".to_owned(),
+        note_request(
+            TextMarkupRect {
+                x: 120.0,
+                y: 260.0,
+                width: 40.0,
+                height: 40.0,
+            },
+            "第一版",
+        ),
+    )
+    .expect("create note")
+    .annotation
+    .expect("note view");
+    let ink = create_ink_with_author(
+        document_id.clone(),
+        "重复作者".to_owned(),
+        ink_request(vec![vec![(200.0, 500.0), (280.0, 520.0)]]),
+    )
+    .expect("create ink")
+    .annotation
+    .expect("ink view");
+
+    let output = dir.path().join("repeat.pdf");
+    save_as(&document_id, &output);
+    update_note_text(document_id.clone(), note.name.clone(), "第二版".to_owned())
+        .expect("edit note after first save");
+    update_annotation_style(
+        document_id.clone(),
+        ink.name.clone(),
+        "#1565c0".to_owned(),
+        60,
+        Some(9.0),
+    )
+    .expect("restyle ink after first save");
+    save_document_with_progress(
+        &document_id,
+        SaveDocumentRequest {
+            save_as_path: None,
+            confirm_unencrypted_output: false,
+        },
+        &mut |_| {},
+    )
+    .expect("save changes after the second round of edits");
+    close_document(document_id).expect("close source");
+
+    assert_eq!(
+        std::fs::read(pdf.path_string()).expect("read source after saves"),
+        source_bytes,
+        "saving annotations must never modify the source document"
+    );
+
+    let parsed = lopdf::Document::load(&output).expect("lopdf parses the output");
+    let annotations = page_annotations(&parsed, 1);
+    let notes = annotations
+        .iter()
+        .filter(|annotation| {
+            annotation
+                .get(b"Subtype")
+                .ok()
+                .and_then(|object| object.as_name().ok())
+                == Some(b"Text".as_slice())
+        })
+        .count();
+    let inks = annotations
+        .iter()
+        .filter(|annotation| {
+            annotation
+                .get(b"Subtype")
+                .ok()
+                .and_then(|object| object.as_name().ok())
+                == Some(b"Ink".as_slice())
+        })
+        .count();
+    assert_eq!(notes, 1, "repeat saves must not duplicate the sticky note");
+    assert_eq!(
+        inks, 1,
+        "repeat saves must not duplicate the ink annotation"
+    );
+    let saved_note = find_annotation(&annotations, b"Text");
+    assert_eq!(
+        text_of(saved_note.get(b"Contents").expect("/Contents")),
+        "第二版"
+    );
+    let saved_ink = find_annotation(&annotations, b"Ink");
+    let colour = numbers(saved_ink.get(b"C").expect("/C"));
+    assert!((colour[0] - 0.0824).abs() < 0.01, "red: {colour:?}");
+    assert!((colour[1] - 0.3961).abs() < 0.01, "green: {colour:?}");
+    assert!((colour[2] - 0.7529).abs() < 0.01, "blue: {colour:?}");
+    let border = numbers(saved_ink.get(b"Border").expect("/Border"));
+    assert!((border[2] - 9.0).abs() < 0.01, "line width: {border:?}");
+
+    let reopened = open_document(output.to_string_lossy().into_owned(), None)
+        .expect("reopen the saved output");
+    let views = list_annotations(reopened.document_id.clone()).expect("list reopened");
+    assert_eq!(
+        views.len(),
+        2,
+        "reopen must see exactly one note and one ink"
+    );
+    assert_eq!(
+        views.iter().map(|view| view.kind).collect::<Vec<_>>(),
+        vec![AnnotationKind::Note, AnnotationKind::Ink]
+    );
+    close_document(reopened.document_id).expect("close reopened");
+}
+
+#[test]
+fn notes_and_ink_use_display_geometry_on_rotated_cropped_pages() {
+    let dir = TempDir::new("note-ink-rotated-crop");
+    let pdf = synthetic::rotated_crop_pdf();
+    let document_id = open_synthetic(&pdf);
+    let page = page_info(document_id.clone(), 0).expect("rotated page info");
+    let note_rect = TextMarkupRect {
+        x: page.width * 0.2,
+        y: page.height * 0.2,
+        width: 40.0,
+        height: 40.0,
+    };
+    let ink_start = InkPoint {
+        x: page.width * 0.5,
+        y: page.height * 0.6,
+    };
+    let ink_end = InkPoint {
+        x: page.width * 0.7,
+        y: page.height * 0.7,
+    };
+    let note = create_note_with_author(
+        document_id.clone(),
+        "旋转作者".to_owned(),
+        CreateNoteRequest {
+            page_index: 0,
+            color: "#f9a825".to_owned(),
+            opacity: 100,
+            text: "旋转便签".to_owned(),
+            rect: note_rect,
+        },
+    )
+    .expect("note on rotated cropped page")
+    .annotation
+    .expect("note view");
+    let ink = create_ink_with_author(
+        document_id.clone(),
+        "旋转作者".to_owned(),
+        CreateInkRequest {
+            page_index: 0,
+            color: "#c62828".to_owned(),
+            opacity: 100,
+            line_width: 5.0,
+            strokes: vec![vec![ink_start, ink_end]],
+        },
+    )
+    .expect("ink on rotated cropped page")
+    .annotation
+    .expect("ink view");
+
+    let listed = list_annotations(document_id.clone()).expect("list annotations");
+    assert_close(listed[0].rects[0].x, note_rect.x, "rotated note x");
+    assert_close(listed[0].rects[0].y, note_rect.y, "rotated note y");
+    assert_close(
+        listed[0].rects[0].width,
+        note_rect.width,
+        "rotated note width",
+    );
+    assert_close(
+        listed[0].rects[0].height,
+        note_rect.height,
+        "rotated note height",
+    );
+    assert_close(
+        listed[1].strokes[0][0].x,
+        ink_start.x,
+        "rotated ink start x",
+    );
+    assert_close(
+        listed[1].strokes[0][0].y,
+        ink_start.y,
+        "rotated ink start y",
+    );
+    assert_close(listed[1].strokes[0][1].x, ink_end.x, "rotated ink end x");
+    assert_close(listed[1].strokes[0][1].y, ink_end.y, "rotated ink end y");
+
+    let output = dir.path().join("rotated-crop.pdf");
+    save_as(&document_id, &output);
+    close_document(document_id).expect("close source");
+
+    let parsed = lopdf::Document::load(&output).expect("lopdf parses the output");
+    let annotations = page_annotations(&parsed, 1);
+    assert_normal_appearance_is_stream(&parsed, find_annotation(&annotations, b"Text"));
+    assert_normal_appearance_is_stream(&parsed, find_annotation(&annotations, b"Ink"));
+
+    let reopened = open_document(output.to_string_lossy().into_owned(), None)
+        .expect("reopen the saved output");
+    let reopened_views =
+        list_annotations(reopened.document_id.clone()).expect("list reopened annotations");
+    assert_eq!(reopened_views.len(), 2);
+    assert_eq!(reopened_views[0].name, note.name);
+    assert_eq!(reopened_views[1].name, ink.name);
+    assert_close(
+        reopened_views[0].rects[0].x,
+        note_rect.x,
+        "reopened rotated note x",
+    );
+    assert_close(
+        reopened_views[1].strokes[0][0].x,
+        ink_start.x,
+        "reopened rotated ink x",
+    );
+    let pixels = render_pixels(&reopened.document_id, 0, 1.0);
+    assert!(
+        pixels.ink_near(
+            (note_rect.x + note_rect.width / 2.0) as u32,
+            (note_rect.y + note_rect.height / 2.0) as u32,
+            |(red, green, blue)| red > 200 && (120..=215).contains(&green) && blue < 120
+        ),
+        "the note icon should render at its display-space position"
+    );
+    assert!(
+        pixels.ink_near(
+            ink_start.x as u32,
+            ink_start.y as u32,
+            |(red, green, blue)| red > 170 && green < 140 && blue < 140
+        ),
+        "the ink stroke should render at its display-space position"
+    );
+    close_document(reopened.document_id).expect("close reopened");
+}
