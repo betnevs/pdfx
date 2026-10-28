@@ -1,0 +1,277 @@
+/* Application theme tokens.
+ *
+ * Light is the base palette. A pinned dark theme sets `data-theme="dark"` on
+ * <html>; while the user follows the system (no attribute), the same dark
+ * palette is selected by `prefers-color-scheme`. The three token blocks must
+ * stay in sync; the theme tests enforce that.
+ *
+ * The PDF page is document content, not UI chrome: `--pdfx-page*` tokens are
+ * identical in both themes so the canvas is never tinted or inverted.
+ */
+
+:root {
+  color-scheme: light;
+
+  --pdfx-bg: #f4f2ee;
+  --pdfx-surface: #fbfaf7;
+  --pdfx-raised: #ffffff;
+  --pdfx-workspace: #f0eee9;
+  --pdfx-dot: #d9d4ca;
+  --pdfx-page: #ffffff;
+  --pdfx-page-ink: #1f2430;
+  --pdfx-page-control-bg: #ffffff;
+  --pdfx-page-control-border: #948d82;
+  --pdfx-page-danger-text: #a3271f;
+  --pdfx-placeholder: #efede7;
+  --pdfx-overlay: rgba(24, 26, 32, 0.42);
+  --pdfx-overlay-page: rgba(31, 36, 48, 0.38);
+
+  --pdfx-text: #1f2430;
+  --pdfx-text-secondary: #4d5260;
+  --pdfx-muted: #666a75;
+  --pdfx-disabled-text: #9b968c;
+  --pdfx-disabled-surface: #f6f4f0;
+  --pdfx-disabled-border: #e2ddd5;
+
+  --pdfx-border: #ddd8cf;
+  --pdfx-border-strong: #c7c1b6;
+  --pdfx-border-control: #948d82;
+  --pdfx-border-hover: #a9a297;
+  --pdfx-focus-ring: #e8453c;
+  --pdfx-focus-halo: rgba(143, 136, 124, 0.35);
+
+  --pdfx-accent: #c83931;
+  --pdfx-accent-hover: #b7352e;
+  --pdfx-on-accent: #ffffff;
+  --pdfx-accent-soft: #fdf1ef;
+  --pdfx-accent-text: #8a2f27;
+
+  --pdfx-danger-text: #8a4a43;
+  --pdfx-danger-strong: #a3271f;
+  --pdfx-danger-soft: #fdf1ef;
+  --pdfx-danger-border: #e3b4ae;
+
+  --pdfx-warning-text: #8a5a16;
+  --pdfx-warning-strong-text: #6b4b12;
+  --pdfx-warning-soft: #fff8e8;
+  --pdfx-warning-border: #d9b36a;
+
+  --pdfx-blue: #3f6ad8;
+  --pdfx-blue-soft: #e6ecfb;
+  --pdfx-blue-text: #24469c;
+  --pdfx-blue-ui: #3f6ad8;
+  --pdfx-blue-preview: rgba(63, 106, 216, 0.08);
+  --pdfx-match-highlight: rgba(255, 196, 0, 0.35);
+
+  --pdfx-pill-bg: rgba(31, 36, 48, 0.86);
+  --pdfx-pill-bg-soft: rgba(31, 36, 48, 0.72);
+  --pdfx-pill-text: #ffffff;
+  --pdfx-pill-border: rgba(255, 255, 255, 0.45);
+  --pdfx-pill-hover: rgba(255, 255, 255, 0.16);
+  --pdfx-pill-active: rgba(255, 255, 255, 0.24);
+  --pdfx-status-success: #b9f0c2;
+  --pdfx-status-warning: #ffd7a1;
+  --pdfx-status-danger: #ffb4b4;
+
+  --pdfx-page-shadow:
+    0 1px 2px rgba(31, 36, 48, 0.14),
+    0 8px 28px rgba(31, 36, 48, 0.12);
+  --pdfx-thumbnail-shadow: 0 1px 3px rgba(31, 36, 48, 0.2);
+  --pdfx-dialog-shadow:
+    0 2px 6px rgba(31, 36, 48, 0.2),
+    0 18px 48px rgba(31, 36, 48, 0.28);
+  --pdfx-popover-shadow: 0 2px 12px rgba(0, 0, 0, 0.2);
+  --pdfx-settings-shadow: 0 24px 60px rgba(8, 10, 16, 0.35);
+  --pdfx-editor-bg: rgba(255, 255, 255, 0.94);
+
+  --pdfx-scrollbar-thumb: #cdc6ba;
+  --pdfx-scrollbar-track: transparent;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --pdfx-bg: #12151b;
+  --pdfx-surface: #1b1f27;
+  --pdfx-raised: #242a35;
+  --pdfx-workspace: #181c23;
+  --pdfx-dot: #2b313d;
+  --pdfx-page: #ffffff;
+  --pdfx-page-ink: #1f2430;
+  --pdfx-page-control-bg: #ffffff;
+  --pdfx-page-control-border: #948d82;
+  --pdfx-page-danger-text: #a3271f;
+  --pdfx-placeholder: #232935;
+  --pdfx-overlay: rgba(2, 4, 8, 0.66);
+  --pdfx-overlay-page: rgba(2, 4, 8, 0.62);
+
+  --pdfx-text: #e7e9ef;
+  --pdfx-text-secondary: #c9cfda;
+  --pdfx-muted: #a6adbb;
+  --pdfx-disabled-text: #7d8698;
+  --pdfx-disabled-surface: #20252e;
+  --pdfx-disabled-border: #2b323e;
+
+  --pdfx-border: #313846;
+  --pdfx-border-strong: #465063;
+  --pdfx-border-control: #6b7589;
+  --pdfx-border-hover: #5a6474;
+  --pdfx-focus-ring: #ff8a82;
+  --pdfx-focus-halo: rgba(255, 255, 255, 0.28);
+
+  --pdfx-accent: #c83931;
+  --pdfx-accent-hover: #b7352e;
+  --pdfx-on-accent: #ffffff;
+  --pdfx-accent-soft: #3a2323;
+  --pdfx-accent-text: #ff9a92;
+
+  --pdfx-danger-text: #ffb4b4;
+  --pdfx-danger-strong: #ff8f8f;
+  --pdfx-danger-soft: #3a2323;
+  --pdfx-danger-border: #5a3230;
+
+  --pdfx-warning-text: #f0c674;
+  --pdfx-warning-strong-text: #f0d49a;
+  --pdfx-warning-soft: #33291a;
+  --pdfx-warning-border: #6b5424;
+
+  --pdfx-blue: #3f6ad8;
+  --pdfx-blue-soft: #24345c;
+  --pdfx-blue-text: #a9c1ff;
+  --pdfx-blue-ui: #7c9cf0;
+  --pdfx-blue-preview: rgba(63, 106, 216, 0.08);
+  --pdfx-match-highlight: rgba(255, 196, 0, 0.35);
+
+  --pdfx-pill-bg: rgba(10, 12, 17, 0.9);
+  --pdfx-pill-bg-soft: rgba(10, 12, 17, 0.8);
+  --pdfx-pill-text: #ffffff;
+  --pdfx-pill-border: rgba(255, 255, 255, 0.45);
+  --pdfx-pill-hover: rgba(255, 255, 255, 0.16);
+  --pdfx-pill-active: rgba(255, 255, 255, 0.24);
+  --pdfx-status-success: #b9f0c2;
+  --pdfx-status-warning: #ffd7a1;
+  --pdfx-status-danger: #ffb4b4;
+
+  --pdfx-page-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.45),
+    0 10px 32px rgba(0, 0, 0, 0.5);
+  --pdfx-thumbnail-shadow: 0 1px 3px rgba(0, 0, 0, 0.55);
+  --pdfx-dialog-shadow:
+    0 2px 8px rgba(0, 0, 0, 0.5),
+    0 18px 48px rgba(0, 0, 0, 0.55);
+  --pdfx-popover-shadow: 0 2px 14px rgba(0, 0, 0, 0.55);
+  --pdfx-settings-shadow: 0 24px 60px rgba(0, 0, 0, 0.6);
+  --pdfx-editor-bg: rgba(255, 255, 255, 0.94);
+
+  --pdfx-scrollbar-thumb: #3d4554;
+  --pdfx-scrollbar-track: transparent;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    color-scheme: dark;
+
+    --pdfx-bg: #12151b;
+    --pdfx-surface: #1b1f27;
+    --pdfx-raised: #242a35;
+    --pdfx-workspace: #181c23;
+    --pdfx-dot: #2b313d;
+    --pdfx-page: #ffffff;
+    --pdfx-page-ink: #1f2430;
+    --pdfx-page-control-bg: #ffffff;
+    --pdfx-page-control-border: #948d82;
+    --pdfx-page-danger-text: #a3271f;
+    --pdfx-placeholder: #232935;
+    --pdfx-overlay: rgba(2, 4, 8, 0.66);
+    --pdfx-overlay-page: rgba(2, 4, 8, 0.62);
+
+    --pdfx-text: #e7e9ef;
+    --pdfx-text-secondary: #c9cfda;
+    --pdfx-muted: #a6adbb;
+    --pdfx-disabled-text: #7d8698;
+    --pdfx-disabled-surface: #20252e;
+    --pdfx-disabled-border: #2b323e;
+
+    --pdfx-border: #313846;
+    --pdfx-border-strong: #465063;
+    --pdfx-border-control: #6b7589;
+    --pdfx-border-hover: #5a6474;
+    --pdfx-focus-ring: #ff8a82;
+    --pdfx-focus-halo: rgba(255, 255, 255, 0.28);
+
+    --pdfx-accent: #c83931;
+    --pdfx-accent-hover: #b7352e;
+    --pdfx-on-accent: #ffffff;
+    --pdfx-accent-soft: #3a2323;
+    --pdfx-accent-text: #ff9a92;
+
+    --pdfx-danger-text: #ffb4b4;
+    --pdfx-danger-strong: #ff8f8f;
+    --pdfx-danger-soft: #3a2323;
+    --pdfx-danger-border: #5a3230;
+
+    --pdfx-warning-text: #f0c674;
+    --pdfx-warning-strong-text: #f0d49a;
+    --pdfx-warning-soft: #33291a;
+    --pdfx-warning-border: #6b5424;
+
+    --pdfx-blue: #3f6ad8;
+    --pdfx-blue-soft: #24345c;
+    --pdfx-blue-text: #a9c1ff;
+    --pdfx-blue-ui: #7c9cf0;
+    --pdfx-blue-preview: rgba(63, 106, 216, 0.08);
+    --pdfx-match-highlight: rgba(255, 196, 0, 0.35);
+
+    --pdfx-pill-bg: rgba(10, 12, 17, 0.9);
+    --pdfx-pill-bg-soft: rgba(10, 12, 17, 0.8);
+    --pdfx-pill-text: #ffffff;
+    --pdfx-pill-border: rgba(255, 255, 255, 0.45);
+    --pdfx-pill-hover: rgba(255, 255, 255, 0.16);
+    --pdfx-pill-active: rgba(255, 255, 255, 0.24);
+    --pdfx-status-success: #b9f0c2;
+    --pdfx-status-warning: #ffd7a1;
+    --pdfx-status-danger: #ffb4b4;
+
+    --pdfx-page-shadow:
+      0 1px 2px rgba(0, 0, 0, 0.45),
+      0 10px 32px rgba(0, 0, 0, 0.5);
+    --pdfx-thumbnail-shadow: 0 1px 3px rgba(0, 0, 0, 0.55);
+    --pdfx-dialog-shadow:
+      0 2px 8px rgba(0, 0, 0, 0.5),
+      0 18px 48px rgba(0, 0, 0, 0.55);
+    --pdfx-popover-shadow: 0 2px 14px rgba(0, 0, 0, 0.55);
+    --pdfx-settings-shadow: 0 24px 60px rgba(0, 0, 0, 0.6);
+    --pdfx-editor-bg: rgba(255, 255, 255, 0.94);
+
+    --pdfx-scrollbar-thumb: #3d4554;
+    --pdfx-scrollbar-track: transparent;
+  }
+}
+
+/* Scrollbars follow the theme where the engine allows custom colors. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--pdfx-scrollbar-thumb) var(--pdfx-scrollbar-track);
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--pdfx-scrollbar-track);
+}
+
+::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: var(--pdfx-scrollbar-thumb);
+  background-clip: content-box;
+}
+
+/* Selected UI text uses the brand accent with an accessible text color. */
+::selection {
+  background: var(--pdfx-accent);
+  color: var(--pdfx-on-accent);
+}

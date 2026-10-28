@@ -2,8 +2,8 @@
   font-family:
     -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
     "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
-  color: #1f2430;
-  background-color: #f4f2ee;
+  color: var(--pdfx-text);
+  background-color: var(--pdfx-bg);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -35,8 +35,8 @@ body {
   align-items: center;
   justify-content: space-between;
   padding: 12px 20px;
-  border-bottom: 1px solid #ddd8cf;
-  background: #fbfaf7;
+  border-bottom: 1px solid var(--pdfx-border);
+  background: var(--pdfx-surface);
 }
 
 .brand {
@@ -58,15 +58,15 @@ body {
   width: 28px;
   height: 28px;
   border-radius: 7px;
-  background: #e8453c;
-  color: #fff;
+  background: var(--pdfx-accent);
+  color: var(--pdfx-on-accent);
   font-size: 15px;
   font-weight: 700;
 }
 
 .app-mode {
   font-size: 13px;
-  color: #6b6f7a;
+  color: var(--pdfx-muted);
 }
 
 .header-actions {
@@ -87,10 +87,10 @@ body {
 
 .dirty-indicator {
   padding: 2px 7px;
-  border: 1px solid #e0b56d;
+  border: 1px solid var(--pdfx-warning-border);
   border-radius: 999px;
-  background: #fff6e6;
-  color: #7a4c10;
+  background: var(--pdfx-warning-soft);
+  color: var(--pdfx-warning-strong-text);
   font-size: 11px;
   line-height: 1.4;
   white-space: nowrap;
@@ -104,29 +104,29 @@ button {
   padding: 7px 14px;
   border: 0;
   border-radius: 7px;
-  background: #e8453c;
-  color: #fff;
+  background: var(--pdfx-accent);
+  color: var(--pdfx-on-accent);
   font-size: 13px;
   font-weight: 600;
   cursor: pointer;
 }
 
 .open-button:hover {
-  background: #d63a32;
+  background: var(--pdfx-accent-hover);
 }
 
 .secondary-button {
   padding: 7px 14px;
-  border: 1px solid #c7c1b6;
+  border: 1px solid var(--pdfx-border-control);
   border-radius: 7px;
-  background: #fff;
-  color: #1f2430;
+  background: var(--pdfx-raised);
+  color: var(--pdfx-text);
   font-size: 13px;
   cursor: pointer;
 }
 
 .secondary-button:hover {
-  border-color: #a9a297;
+  border-color: var(--pdfx-border-hover);
 }
 
 .workspace {
@@ -139,8 +139,9 @@ button {
   padding: 24px;
   overflow: auto;
   background:
-    radial-gradient(circle at 1px 1px, #d9d4ca 1px, transparent 0) 0 0 / 22px 22px,
-    #f0eee9;
+    radial-gradient(circle at 1px 1px, var(--pdfx-dot) 1px, transparent 0) 0 0 / 22px
+      22px,
+    var(--pdfx-workspace);
 }
 
 .app-notice {
@@ -149,15 +150,15 @@ button {
   justify-content: center;
   gap: 14px;
   padding: 8px 20px;
-  border-bottom: 1px solid #e3b4ae;
-  background: #fdf1ef;
-  color: #8a2f27;
+  border-bottom: 1px solid var(--pdfx-danger-border);
+  background: var(--pdfx-accent-soft);
+  color: var(--pdfx-accent-text);
   font-size: 13px;
 }
 
 .app-notice button {
   padding: 3px 10px;
-  border: 1px solid #d9a39d;
+  border: 1px solid var(--pdfx-danger-border);
   border-radius: 6px;
   background: transparent;
   color: inherit;
@@ -168,9 +169,9 @@ button {
 .empty-workspace {
   max-width: 420px;
   padding: 48px 40px;
-  border: 1px dashed #c7c1b6;
+  border: 1px dashed var(--pdfx-border-strong);
   border-radius: 14px;
-  background: rgba(251, 250, 247, 0.92);
+  background: var(--pdfx-surface);
   text-align: center;
 }
 
@@ -182,23 +183,23 @@ button {
 
 .empty-workspace p {
   margin: 0 0 22px;
-  color: #6b6f7a;
+  color: var(--pdfx-muted);
   font-size: 14px;
   line-height: 1.6;
 }
 
 .loading-state {
   padding: 48px;
-  color: #6b6f7a;
+  color: var(--pdfx-muted);
   font-size: 14px;
 }
 
 .error-panel {
   max-width: 480px;
   padding: 36px 40px;
-  border: 1px solid #e3b4ae;
+  border: 1px solid var(--pdfx-danger-border);
   border-radius: 14px;
-  background: rgba(253, 246, 245, 0.96);
+  background: var(--pdfx-danger-soft);
   text-align: center;
 }
 
@@ -215,7 +216,7 @@ button {
 }
 
 .error-detail {
-  color: #8a4a43;
+  color: var(--pdfx-danger-text);
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
   font-size: 12px !important;
   word-break: break-word;
@@ -240,34 +241,34 @@ button {
   justify-content: space-between;
   gap: 10px 18px;
   padding: 6px 10px;
-  border: 1px solid #ddd8cf;
+  border: 1px solid var(--pdfx-border);
   border-radius: 9px;
-  background: rgba(251, 250, 247, 0.96);
+  background: var(--pdfx-surface);
 }
 
 .document-toolbar button {
   padding: 5px 11px;
-  border: 1px solid #d4cec4;
+  border: 1px solid var(--pdfx-border-control);
   border-radius: 6px;
-  background: #fff;
-  color: #1f2430;
+  background: var(--pdfx-raised);
+  color: var(--pdfx-text);
   font-size: 12px;
   cursor: pointer;
 }
 
 .document-toolbar button:hover:not(:disabled) {
-  border-color: #b3ab9f;
+  border-color: var(--pdfx-border-hover);
 }
 
 .document-toolbar button:disabled {
-  color: #a9a297;
+  color: var(--pdfx-disabled-text);
   cursor: default;
 }
 
 .document-toolbar button[aria-pressed="true"] {
-  border-color: #e8453c;
-  background: #fdf1ef;
-  color: #8a2f27;
+  border-color: var(--pdfx-accent);
+  background: var(--pdfx-accent-soft);
+  color: var(--pdfx-accent-text);
 }
 
 .page-nav,
@@ -280,10 +281,10 @@ button {
 .page-input,
 .zoom-input {
   padding: 4px 7px;
-  border: 1px solid #d4cec4;
+  border: 1px solid var(--pdfx-border-control);
   border-radius: 6px;
-  background: #fff;
-  color: #1f2430;
+  background: var(--pdfx-raised);
+  color: var(--pdfx-text);
   font-size: 12px;
 }
 
@@ -298,14 +299,14 @@ button {
 }
 
 .page-total {
-  color: #6b6f7a;
+  color: var(--pdfx-muted);
   font-size: 12px;
 }
 
 .toolbar-divider {
   width: 1px;
   height: 18px;
-  background: #ddd8cf;
+  background: var(--pdfx-border);
 }
 
 .document-body {
@@ -321,9 +322,9 @@ button {
   width: 172px;
   overflow-x: hidden;
   overflow-y: auto;
-  border: 1px solid #ddd8cf;
+  border: 1px solid var(--pdfx-border);
   border-radius: 9px;
-  background: rgba(251, 250, 247, 0.92);
+  background: var(--pdfx-surface);
 }
 
 .thumbnail-track {
@@ -358,30 +359,30 @@ button {
 .thumbnail img {
   max-width: 100%;
   max-height: 100%;
-  background: #fff;
-  box-shadow: 0 1px 3px rgba(31, 36, 48, 0.2);
+  background: var(--pdfx-page);
+  box-shadow: var(--pdfx-thumbnail-shadow);
 }
 
 .thumbnail-placeholder {
   width: 100%;
   height: 100%;
   min-height: 88px;
-  border: 1px dashed #c7c1b6;
+  border: 1px dashed var(--pdfx-border-strong);
   border-radius: 3px;
-  background: #efede7;
+  background: var(--pdfx-placeholder);
 }
 
 .thumbnail[aria-current="page"] .thumbnail-frame {
-  box-shadow: 0 0 0 2px #e8453c;
+  box-shadow: 0 0 0 2px var(--pdfx-focus-ring);
 }
 
 .thumbnail-number {
-  color: #6b6f7a;
+  color: var(--pdfx-muted);
   font-size: 11px;
 }
 
 .thumbnail[aria-current="page"] .thumbnail-number {
-  color: #8a2f27;
+  color: var(--pdfx-accent-text);
   font-weight: 600;
 }
 
@@ -390,16 +391,17 @@ button {
   flex: 1;
   min-width: 0;
   overflow: auto;
-  border: 1px solid #ddd8cf;
+  border: 1px solid var(--pdfx-border);
   border-radius: 9px;
   background:
-    radial-gradient(circle at 1px 1px, #d9d4ca 1px, transparent 0) 0 0 / 22px 22px,
-    #f0eee9;
+    radial-gradient(circle at 1px 1px, var(--pdfx-dot) 1px, transparent 0) 0 0 / 22px
+      22px,
+    var(--pdfx-workspace);
   scrollbar-gutter: stable;
 }
 
 .page-stage:focus-visible {
-  outline: 2px solid #e8453c;
+  outline: 2px solid var(--pdfx-focus-ring);
   outline-offset: -2px;
 }
 
@@ -416,10 +418,9 @@ button {
   position: relative;
   flex: none;
   margin: auto;
-  background: #fff;
-  box-shadow:
-    0 1px 2px rgba(31, 36, 48, 0.14),
-    0 8px 28px rgba(31, 36, 48, 0.12);
+  /* Document content: paper-white in every UI theme, never filtered. */
+  background: var(--pdfx-page);
+  box-shadow: var(--pdfx-page-shadow);
 }
 
 .page-image {
@@ -441,7 +442,7 @@ button {
 }
 
 .page-text-layer:focus-visible {
-  outline: 2px solid #3f6ad8;
+  outline: 2px solid var(--pdfx-blue);
   outline-offset: 2px;
 }
 
@@ -457,8 +458,8 @@ button {
 .text-layer-message {
   padding: 6px 12px;
   border-radius: 999px;
-  background: rgba(31, 36, 48, 0.72);
-  color: #fff;
+  background: var(--pdfx-pill-bg-soft);
+  color: var(--pdfx-pill-text);
   font-size: 12px;
   line-height: 1.4;
 }
@@ -466,7 +467,7 @@ button {
 .text-highlight {
   position: absolute;
   border-radius: 1px;
-  background: rgba(255, 196, 0, 0.35);
+  background: var(--pdfx-match-highlight);
   pointer-events: none;
 }
 
@@ -479,8 +480,8 @@ button {
   gap: 8px;
   padding: 4px 8px;
   border-radius: 6px;
-  background: rgba(31, 36, 48, 0.86);
-  color: #fff;
+  background: var(--pdfx-pill-bg);
+  color: var(--pdfx-pill-text);
   font-size: 12px;
   line-height: 1.4;
   user-select: none;
@@ -488,20 +489,20 @@ button {
 
 .text-selection-actions button {
   padding: 2px 8px;
-  border: 1px solid rgba(255, 255, 255, 0.45);
+  border: 1px solid var(--pdfx-pill-border);
   border-radius: 4px;
   background: transparent;
-  color: #fff;
+  color: var(--pdfx-pill-text);
   font: inherit;
   cursor: pointer;
 }
 
 .text-selection-actions button:hover {
-  background: rgba(255, 255, 255, 0.16);
+  background: var(--pdfx-pill-hover);
 }
 
 .text-copy-status {
-  color: #b9f0c2;
+  color: var(--pdfx-status-success);
 }
 
 .text-edit-toolbar {
@@ -516,8 +517,8 @@ button {
   max-width: calc(100% - 16px);
   padding: 4px 8px;
   border-radius: 6px;
-  background: rgba(31, 36, 48, 0.86);
-  color: #fff;
+  background: var(--pdfx-pill-bg);
+  color: var(--pdfx-pill-text);
   font-size: 12px;
   line-height: 1.4;
   user-select: none;
@@ -526,20 +527,20 @@ button {
 
 .text-edit-toolbar button {
   padding: 2px 8px;
-  border: 1px solid rgba(255, 255, 255, 0.45);
+  border: 1px solid var(--pdfx-pill-border);
   border-radius: 4px;
   background: transparent;
-  color: #fff;
+  color: var(--pdfx-pill-text);
   font: inherit;
   cursor: pointer;
 }
 
 .text-edit-toolbar button:hover:enabled {
-  background: rgba(255, 255, 255, 0.16);
+  background: var(--pdfx-pill-hover);
 }
 
 .text-edit-toolbar button[aria-pressed="true"] {
-  background: rgba(255, 255, 255, 0.24);
+  background: var(--pdfx-pill-active);
 }
 
 .text-edit-toolbar button:disabled {
@@ -548,15 +549,15 @@ button {
 }
 
 .text-edit-reason {
-  color: #ffd7a1;
+  color: var(--pdfx-status-warning);
 }
 
 .text-edit-notice--info {
-  color: #b9f0c2;
+  color: var(--pdfx-status-success);
 }
 
 .text-edit-notice--error {
-  color: #ffb4b4;
+  color: var(--pdfx-status-danger);
 }
 
 .text-edit-toolbar-holder {
@@ -573,7 +574,7 @@ button {
 .text-box-outline {
   position: absolute;
   box-sizing: border-box;
-  border: 1px dashed rgba(63, 106, 216, 0.9);
+  border: 1px dashed var(--pdfx-blue);
   transform-origin: 0 0;
   pointer-events: auto;
   cursor: move;
@@ -581,7 +582,7 @@ button {
 
 .text-box-outline--selected {
   border-style: solid;
-  box-shadow: 0 0 0 1px rgba(63, 106, 216, 0.45);
+  box-shadow: 0 0 0 1px var(--pdfx-blue);
 }
 
 .text-box-outline-label {
@@ -592,8 +593,8 @@ button {
   overflow: hidden;
   padding: 1px 5px;
   border-radius: 2px 2px 0 0;
-  background: #3f6ad8;
-  color: #fff;
+  background: var(--pdfx-blue);
+  color: var(--pdfx-on-accent);
   font-size: 10px;
   line-height: 1.4;
   text-overflow: ellipsis;
@@ -607,10 +608,10 @@ button {
   width: 10px;
   height: 10px;
   padding: 0;
-  border: 1px solid #fff;
+  border: 1px solid var(--pdfx-page);
   border-radius: 50%;
-  background: #3f6ad8;
-  box-shadow: 0 0 0 1px rgba(63, 106, 216, 0.7);
+  background: var(--pdfx-blue);
+  box-shadow: 0 0 0 1px var(--pdfx-blue);
   cursor: nwse-resize;
   touch-action: none;
 }
@@ -624,16 +625,16 @@ button {
   top: -15px;
   right: -5px;
   cursor: grab;
-  background: #fff;
-  border-color: #3f6ad8;
+  background: var(--pdfx-page);
+  border-color: var(--pdfx-blue);
 }
 
 .text-box-create-preview {
   position: absolute;
   z-index: 2;
   box-sizing: border-box;
-  border: 1.5px dashed #3f6ad8;
-  background: rgba(63, 106, 216, 0.08);
+  border: 1.5px dashed var(--pdfx-blue);
+  background: var(--pdfx-blue-preview);
   pointer-events: none;
 }
 
@@ -651,11 +652,11 @@ button {
   gap: 6px;
   width: 232px;
   padding: 8px;
-  border: 1px solid rgba(31, 36, 48, 0.18);
+  border: 1px solid var(--pdfx-border);
   border-radius: 6px;
-  background: rgba(255, 255, 255, 0.97);
-  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.2);
-  color: #1f2430;
+  background: var(--pdfx-surface);
+  box-shadow: var(--pdfx-popover-shadow);
+  color: var(--pdfx-text);
   font-size: 12px;
   user-select: none;
 }
@@ -675,9 +676,9 @@ button {
   flex: 1;
   min-width: 0;
   padding: 2px 4px;
-  border: 1px solid #c8c3ba;
+  border: 1px solid var(--pdfx-border-control);
   border-radius: 4px;
-  background: #fff;
+  background: var(--pdfx-raised);
   color: inherit;
   font: inherit;
 }
@@ -686,9 +687,9 @@ button {
   width: 42px;
   height: 24px;
   padding: 1px;
-  border: 1px solid #c8c3ba;
+  border: 1px solid var(--pdfx-border-control);
   border-radius: 4px;
-  background: #fff;
+  background: var(--pdfx-raised);
 }
 
 .text-box-style-group {
@@ -700,18 +701,18 @@ button {
 .text-box-style-group button,
 .text-box-delete {
   padding: 2px 8px;
-  border: 1px solid rgba(31, 36, 48, 0.35);
+  border: 1px solid var(--pdfx-border-strong);
   border-radius: 4px;
-  background: #fff;
-  color: #1f2430;
+  background: var(--pdfx-raised);
+  color: var(--pdfx-text);
   font: inherit;
   cursor: pointer;
 }
 
 .text-box-style-group button[aria-pressed="true"] {
-  border-color: #3f6ad8;
-  background: #e6ecfb;
-  color: #24469c;
+  border-color: var(--pdfx-blue-ui);
+  background: var(--pdfx-blue-soft);
+  color: var(--pdfx-blue-text);
 }
 
 .text-box-style-panel button:disabled {
@@ -721,14 +722,14 @@ button {
 
 .text-box-font-note {
   margin: 0;
-  color: #6b6f7a;
+  color: var(--pdfx-muted);
   font-size: 11px;
   line-height: 1.4;
 }
 
 .text-box-delete {
   align-self: flex-start;
-  color: #a3271f;
+  color: var(--pdfx-danger-strong);
 }
 
 .text-box-editor {
@@ -739,10 +740,12 @@ button {
   gap: 4px;
   min-width: 140px;
   padding: 3px;
-  border: 1px solid #3f6ad8;
+  border: 1px solid var(--pdfx-blue);
   border-radius: 2px;
-  background: rgba(255, 255, 255, 0.94);
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.28);
+  /* The editor floats on the PDF page, so it keeps page colors in both themes. */
+  background: var(--pdfx-editor-bg);
+  color: var(--pdfx-page-ink);
+  box-shadow: var(--pdfx-popover-shadow);
   cursor: text;
   user-select: text;
 }
@@ -768,10 +771,10 @@ button {
 
 .text-box-actions button {
   padding: 2px 8px;
-  border: 1px solid rgba(31, 36, 48, 0.35);
+  border: 1px solid var(--pdfx-page-control-border);
   border-radius: 4px;
-  background: #fff;
-  color: #1f2430;
+  background: var(--pdfx-page-control-bg);
+  color: var(--pdfx-page-ink);
   font-size: 12px;
   cursor: pointer;
 }
@@ -782,7 +785,7 @@ button {
 }
 
 .text-box-error {
-  color: #a3271f;
+  color: var(--pdfx-page-danger-text);
   font-size: 12px;
 }
 
@@ -792,9 +795,9 @@ button {
   justify-content: space-between;
   gap: 16px;
   padding: 7px 20px;
-  border-top: 1px solid #ddd8cf;
-  background: #fbfaf7;
-  color: #6b6f7a;
+  border-top: 1px solid var(--pdfx-border);
+  background: var(--pdfx-surface);
+  color: var(--pdfx-muted);
   font-size: 12px;
 }
 
@@ -816,10 +819,10 @@ button {
   max-width: 720px;
   margin: 0;
   padding: 7px 12px;
-  border: 1px solid #d9b36a;
+  border: 1px solid var(--pdfx-warning-border);
   border-radius: 7px;
-  background: #fff8e8;
-  color: #6b4b12;
+  background: var(--pdfx-warning-soft);
+  color: var(--pdfx-warning-strong-text);
   font-size: 12px;
   line-height: 1.5;
   text-align: center;
@@ -833,24 +836,24 @@ button {
 
 .editing-tools button {
   padding: 5px 11px;
-  border: 1px solid #d4cec4;
+  border: 1px solid var(--pdfx-border-control);
   border-radius: 6px;
-  background: #fff;
-  color: #1f2430;
+  background: var(--pdfx-raised);
+  color: var(--pdfx-text);
   font-size: 12px;
   cursor: pointer;
 }
 
 .editing-tools button:disabled {
-  border-color: #e2ddd5;
-  background: #f6f4f0;
-  color: #9b968c;
+  border-color: var(--pdfx-disabled-border);
+  background: var(--pdfx-disabled-surface);
+  color: var(--pdfx-disabled-text);
   cursor: not-allowed;
 }
 
 .save-warning {
   margin: 0;
-  color: #8a5a16;
+  color: var(--pdfx-warning-text);
   font-size: 12px;
   line-height: 1.5;
   text-align: center;
@@ -859,7 +862,7 @@ button {
 .save-progress,
 .save-result {
   margin: 0;
-  color: #4b5563;
+  color: var(--pdfx-muted);
   font-size: 12px;
   line-height: 1.5;
   text-align: center;
@@ -868,10 +871,10 @@ button {
 .save-error {
   max-width: 720px;
   padding: 8px 12px;
-  border: 1px solid #e3b4ae;
+  border: 1px solid var(--pdfx-danger-border);
   border-radius: 7px;
-  background: #fdf1ef;
-  color: #8a2f27;
+  background: var(--pdfx-danger-soft);
+  color: var(--pdfx-danger-text);
   font-size: 12px;
   line-height: 1.5;
   text-align: center;
@@ -901,7 +904,7 @@ button {
   align-items: center;
   justify-content: center;
   padding: 24px;
-  background: rgba(31, 36, 48, 0.38);
+  background: var(--pdfx-overlay-page);
 }
 
 .password-dialog {
@@ -911,10 +914,8 @@ button {
   width: min(380px, 100%);
   padding: 22px 24px;
   border-radius: 12px;
-  background: #fbfaf7;
-  box-shadow:
-    0 2px 6px rgba(31, 36, 48, 0.2),
-    0 18px 48px rgba(31, 36, 48, 0.28);
+  background: var(--pdfx-surface);
+  box-shadow: var(--pdfx-dialog-shadow);
 }
 
 .password-dialog h2 {
@@ -925,7 +926,7 @@ button {
 .password-file {
   margin: 0;
   overflow: hidden;
-  color: #4d5260;
+  color: var(--pdfx-text-secondary);
   font-size: 13px;
   font-weight: 600;
   text-overflow: ellipsis;
@@ -934,7 +935,7 @@ button {
 
 .password-hint {
   margin: 0 0 4px;
-  color: #6b6f7a;
+  color: var(--pdfx-muted);
   font-size: 12px;
   line-height: 1.55;
 }
@@ -942,32 +943,32 @@ button {
 .password-error {
   margin: 0;
   padding: 7px 10px;
-  border: 1px solid #e3b4ae;
+  border: 1px solid var(--pdfx-danger-border);
   border-radius: 6px;
-  background: #fdf1ef;
-  color: #8a4a43;
+  background: var(--pdfx-danger-soft);
+  color: var(--pdfx-danger-text);
   font-size: 12px;
 }
 
 .password-label {
-  color: #4d5260;
+  color: var(--pdfx-text-secondary);
   font-size: 12px;
   font-weight: 600;
 }
 
 .password-dialog input {
   padding: 8px 10px;
-  border: 1px solid #ccc6bb;
+  border: 1px solid var(--pdfx-border-control);
   border-radius: 7px;
-  background: #fff;
-  color: #1f2430;
+  background: var(--pdfx-raised);
+  color: var(--pdfx-text);
   font: inherit;
   font-size: 14px;
 }
 
 .password-dialog input:focus {
-  border-color: #8f887c;
-  outline: 2px solid rgba(143, 136, 124, 0.35);
+  border-color: var(--pdfx-border-hover);
+  outline: 2px solid var(--pdfx-focus-halo);
   outline-offset: 0;
 }
 

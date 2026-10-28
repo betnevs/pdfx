@@ -1,0 +1,186 @@
+/* Settings panel. Every color comes from the tokens in theme.css, so the
+ * panel follows the system color scheme and pinned choices without overrides.
+ */
+
+.settings-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: var(--pdfx-overlay);
+}
+
+.settings-panel {
+  display: flex;
+  flex-direction: column;
+  width: min(560px, 100%);
+  max-height: min(760px, calc(100vh - 48px));
+  overflow: hidden;
+  border: 1px solid var(--pdfx-border);
+  border-radius: 14px;
+  background: var(--pdfx-surface);
+  color: var(--pdfx-text);
+  box-shadow: var(--pdfx-settings-shadow);
+}
+
+.settings-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--pdfx-border);
+}
+
+.settings-header h2 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 650;
+}
+
+.settings-close {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--pdfx-muted);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.settings-close:hover {
+  background: var(--pdfx-accent-soft);
+  color: var(--pdfx-accent-text);
+}
+
+.settings-body {
+  flex: 1;
+  min-height: 0;
+  padding: 4px 20px 20px;
+  overflow-y: auto;
+}
+
+.settings-section {
+  padding: 16px 0;
+  border-bottom: 1px solid var(--pdfx-border);
+}
+
+.settings-section:last-child {
+  border-bottom: 0;
+}
+
+.settings-section h3 {
+  margin: 0 0 10px;
+  font-size: 13px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  color: var(--pdfx-muted);
+  text-transform: uppercase;
+}
+
+.settings-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 10px;
+  font-size: 14px;
+}
+
+.settings-field:last-child {
+  margin-bottom: 0;
+}
+
+.settings-field select,
+.settings-field input {
+  min-width: 200px;
+  padding: 6px 9px;
+  border: 1px solid var(--pdfx-border-control);
+  border-radius: 7px;
+  background: var(--pdfx-raised);
+  color: var(--pdfx-text);
+  font: inherit;
+  font-size: 13px;
+}
+
+.settings-field input {
+  flex: 1;
+  max-width: 280px;
+}
+
+.settings-field select:focus-visible,
+.settings-field input:focus-visible {
+  outline: 2px solid var(--pdfx-focus-ring);
+  outline-offset: 1px;
+}
+
+.settings-checkbox {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.settings-checkbox input {
+  margin-top: 3px;
+  accent-color: var(--pdfx-accent);
+}
+
+.settings-hint {
+  margin: 8px 0 10px;
+  color: var(--pdfx-muted);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+.settings-guidance {
+  margin: 10px 0 0;
+  padding: 9px 11px;
+  border: 1px solid var(--pdfx-border);
+  border-radius: 8px;
+  background: var(--pdfx-accent-soft);
+  color: var(--pdfx-accent-text);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+.settings-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  min-height: 44px;
+  padding: 8px 20px;
+  border-top: 1px solid var(--pdfx-border);
+  color: var(--pdfx-muted);
+  font-size: 12.5px;
+}
+
+.settings-footer [role="alert"] {
+  color: var(--pdfx-danger-text);
+}
+
+@media (max-width: 520px) {
+  .settings-backdrop {
+    padding: 12px;
+  }
+
+  .settings-field {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .settings-field select,
+  .settings-field input {
+    width: 100%;
+    max-width: none;
+  }
+}

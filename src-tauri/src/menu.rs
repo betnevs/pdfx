@@ -23,9 +23,15 @@ pub fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     let save_as = MenuItemBuilder::with_id("file.save_as", "另存为…")
         .accelerator("CmdOrCtrl+Shift+S")
         .build(app)?;
+    let settings = MenuItemBuilder::with_id("app.settings", "设置…")
+        .accelerator("CmdOrCtrl+,")
+        .build(app)?;
 
-    let file = SubmenuBuilder::new(app, "文件")
-        .item(&open)
+    #[cfg(target_os = "macos")]
+    let file_builder = SubmenuBuilder::new(app, "文件").item(&open);
+    #[cfg(not(target_os = "macos"))]
+    let file_builder = SubmenuBuilder::new(app, "文件").item(&open).item(&settings);
+    let file = file_builder
         .separator()
         .item(&save)
         .item(&save_as)
@@ -84,6 +90,8 @@ pub fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     {
         let app_menu = SubmenuBuilder::new(app, "PDFX")
             .about(None)
+            .separator()
+            .item(&settings)
             .separator()
             .services()
             .separator()

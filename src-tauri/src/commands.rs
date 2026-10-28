@@ -10,9 +10,12 @@ use pdfium_render::prelude::{
     PdfSecurityHandlerRevision, PdfiumError, PdfiumInternalError,
 };
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
 use crate::engine::Engine;
+use crate::file_association;
+use crate::logging;
+use crate::settings::{self, Settings, SettingsStore, SettingsUpdateResult};
 
 /// Rendering limits. A full-page bitmap above this size is rejected instead of
 /// exhausting memory; the frontend switches to `render_page_region` (viewport
@@ -293,8 +296,32 @@ pub(crate) fn with_open_document<R>(
 }
 
 /// The `open_document` command.
+///
+/// Every open, successful or not, is recorded in the local rolling log; no
+/// document contents leave the device.
 #[tauri::command]
 pub fn open_document(path: String, password: Option<String>) -> Result<DocumentView, CommandError> {
+    let result = open_document_impl(path, password);
+    match &result {
+        Ok(view) => logging::event(
+            "document.open",
+            &format!(
+                "name={} pages={} path={}",
+                view.name, view.page_count, view.path
+            ),
+        ),
+        Err(error) => logging::error(
+            "document.open.failed",
+            &format!("code={:?} message={}", error.code, error.message),
+        ),
+    }
+    result
+}
+
+fn open_document_impl(
+    path: String,
+    password: Option<String>,
+) -> Result<DocumentView, CommandError> {
     let path = PathBuf::from(path);
     let bytes = fs::read(&path).map_err(|error| match error.kind() {
         std::io::ErrorKind::NotFound => CommandError::new(
@@ -419,6 +446,7 @@ pub(crate) fn document_permissions(
 pub fn close_document(document_id: String) -> Result<(), CommandError> {
     let mut registry = registry().lock().expect("document registry poisoned");
     registry.documents.remove(&document_id);
+    logging::event("document.close", &format!("documentId={document_id}"));
     Ok(())
 }
 
@@ -1259,4 +1287,88 @@ fn map_open_error(error: &PdfiumError, password_supplied: bool) -> CommandError 
         CommandErrorCode::CorruptDocument,
         format!("PDFium could not open the document: {error:?}"),
     )
+}
+
+/// The result of a completed diagnostic export.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagnosticsExportView {
+    pub path: String,
+    pub bytes: u64,
+    pub log_files: u32,
+}
+
+fn settings_store(app: &AppHandle) -> Result<SettingsStore, CommandError> {
+    let directory = app.path().app_config_dir().map_err(|error| {
+        CommandError::new(
+            CommandErrorCode::Internal,
+            format!("could not resolve the app config directory: {error}"),
+        )
+    })?;
+    Ok(SettingsStore::new(directory))
+}
+
+fn map_settings_error(error: settings::SettingsError) -> CommandError {
+    match error {
+        settings::SettingsError::InvalidArgument(message) => {
+            CommandError::new(CommandErrorCode::InvalidArgument, message)
+        }
+        other => CommandError::new(CommandErrorCode::Internal, other.to_string()),
+    }
+}
+
+/// The `get_settings` command. Missing or corrupt settings load as defaults.
+#[tauri::command]
+pub fn get_settings(app: AppHandle) -> Result<Settings, CommandError> {
+    Ok(settings_store(&app)?.load())
+}
+
+/// The `update_settings` command. Persists the settings, then applies a change
+/// to the file-association preference through the platform boundary.
+#[tauri::command]
+pub fn update_settings(
+    app: AppHandle,
+    settings: Settings,
+) -> Result<SettingsUpdateResult, CommandError> {
+    let store = settings_store(&app)?;
+    let platform = file_association::platform_for(&app);
+    let result =
+        settings::apply_update(&store, platform.as_ref(), settings).map_err(map_settings_error)?;
+
+    // The annotation author is deliberately not logged: it is user-entered.
+    logging::event(
+        "settings.update",
+        &format!(
+            "language={:?} theme={:?} fileAssociationEnabled={} association={:?}",
+            result.settings.language,
+            result.settings.theme,
+            result.settings.file_association_enabled,
+            result.association.as_ref().map(|outcome| outcome.status)
+        ),
+    );
+
+    Ok(result)
+}
+
+/// The `export_diagnostics` command. Writes a copy of the local logs plus
+/// version and platform information to a path the user chose.
+#[tauri::command]
+pub fn export_diagnostics(destination: String) -> Result<DiagnosticsExportView, CommandError> {
+    let export = logging::export_diagnostics(
+        std::path::Path::new(&destination),
+        "PDFX",
+        env!("CARGO_PKG_VERSION"),
+    )
+    .map_err(|error| {
+        CommandError::new(
+            CommandErrorCode::Internal,
+            format!("could not export diagnostics: {error}"),
+        )
+    })?;
+
+    Ok(DiagnosticsExportView {
+        path: export.path.to_string_lossy().into_owned(),
+        bytes: export.bytes,
+        log_files: export.log_files,
+    })
 }
