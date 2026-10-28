@@ -2,6 +2,7 @@ pub mod annotations;
 pub mod commands;
 pub mod engine;
 pub mod file_association;
+mod fonts;
 pub mod form;
 pub mod logging;
 mod menu;

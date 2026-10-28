@@ -100,6 +100,27 @@ impl PdfFontToken {
     pub(crate) fn handle(&self) -> FPDF_FONT {
         self.0
     }
+
+    /// Returns the opaque handle as an integer.
+    ///
+    /// PDFX caches bundled-font tokens in its per-document edit session. The
+    /// session must remain `Send` because it lives in the global document
+    /// registry, which a raw pointer would prevent.
+    #[inline]
+    pub fn to_usize(self) -> usize {
+        self.0 as usize
+    }
+
+    /// Reconstructs a token from [`PdfFontToken::to_usize()`].
+    ///
+    /// The handle is an opaque, non-owning reference into a document's font
+    /// collection. It is only valid while that document is alive; PDFX stores
+    /// it exclusively in the owning document's session, which is dropped
+    /// before the document.
+    #[inline]
+    pub fn from_usize(handle: usize) -> Self {
+        Self(handle as FPDF_FONT)
+    }
 }
 
 /// Allows font-handling functions to take either a [PdfFont] owned instance, a [PdfFont] reference,
@@ -534,6 +555,47 @@ impl<'a> PdfFonts<'a> {
         is_cid_font: bool,
     ) -> Result<PdfFontToken, PdfiumError> {
         self.new_font_from_bytes(font_data, FPDF_FONT_TRUETYPE, is_cid_font)
+    }
+
+    /// Attempts to load the given byte data as a subsetted TrueType CID font,
+    /// returning a reusable [PdfFontToken] if the font was successfully loaded.
+    ///
+    /// Unlike [PdfFonts::load_true_type_from_bytes()], Pdfium uses the caller's
+    /// ToUnicode CMap and CIDToGIDMap stream instead of generating them from
+    /// the font program. PDFX uses this to embed a `subsetter`-produced subset
+    /// with dense per-subset CIDs (see ADR-0010): `cid_to_gid_map_data` maps
+    /// each CID to its glyph ID in the subset and must include a zero entry for
+    /// CID 0, while the CMap maps every used CID to its Unicode text.
+    pub fn load_cid_type2_from_bytes(
+        &mut self,
+        font_data: &[u8],
+        to_unicode_cmap: &str,
+        cid_to_gid_map_data: &[u8],
+    ) -> Result<PdfFontToken, PdfiumError> {
+        let handle = unsafe {
+            self.bindings().FPDFText_LoadCidType2Font(
+                self.document_handle,
+                font_data.as_ptr(),
+                font_data.len() as u32,
+                to_unicode_cmap,
+                cid_to_gid_map_data.as_ptr(),
+                cid_to_gid_map_data.len() as u32,
+            )
+        };
+
+        if handle.is_null() {
+            Err(PdfiumError::PdfiumLibraryInternalError(
+                PdfiumInternalError::Unknown,
+            ))
+        } else {
+            let font = PdfFont::from_pdfium(handle, None, true);
+
+            let token = PdfFontToken::from_font(&font);
+
+            self.fonts.insert(token, font);
+
+            Ok(token)
+        }
     }
 
     #[inline]
