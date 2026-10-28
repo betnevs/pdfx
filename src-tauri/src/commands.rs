@@ -447,17 +447,13 @@ pub fn render_page_region(
         .set_fixed_size(full_width as i32, full_height as i32)
         .set_origin(-(x as i32), -(y as i32));
 
-    let mut bitmap = PdfBitmap::empty(
-        width as i32,
-        height as i32,
-        PdfBitmapFormat::default(),
-    )
-    .map_err(|error| {
-        CommandError::new(
-            CommandErrorCode::RenderFailed,
-            format!("could not allocate a {width}x{height} bitmap: {error:?}"),
-        )
-    })?;
+    let mut bitmap = PdfBitmap::empty(width as i32, height as i32, PdfBitmapFormat::default())
+        .map_err(|error| {
+            CommandError::new(
+                CommandErrorCode::RenderFailed,
+                format!("could not allocate a {width}x{height} bitmap: {error:?}"),
+            )
+        })?;
 
     page.render_into_bitmap_with_config(&mut bitmap, &config)
         .map_err(|error| {

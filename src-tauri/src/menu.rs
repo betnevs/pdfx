@@ -87,7 +87,5 @@ pub fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         builder = builder.item(&app_menu);
     }
 
-    builder
-        .items(&[&file, &edit, &view, &help])
-        .build()
+    builder.items(&[&file, &edit, &view, &help]).build()
 }
