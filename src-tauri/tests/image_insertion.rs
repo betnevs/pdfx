@@ -528,6 +528,7 @@ fn a_saved_image_reopens_with_its_position_size_and_rotation() {
         SaveDocumentRequest {
             save_as_path: Some(output.to_string_lossy().into_owned()),
             confirm_unencrypted_output: false,
+            confirm_signature_invalidation: false,
             password: None,
         },
         &mut |progress| stages.push(progress.stage),
@@ -642,6 +643,7 @@ fn a_saved_image_stays_on_its_page_and_rotated_pages_use_display_geometry() {
         pdfx_lib::save::SaveDocumentRequest {
             save_as_path: Some(output.to_string_lossy().into_owned()),
             confirm_unencrypted_output: false,
+            confirm_signature_invalidation: false,
             password: None,
         },
         &mut |_| {},
@@ -675,6 +677,7 @@ fn undo_after_save_removes_the_image_from_a_later_save() {
     let request = |path: Option<String>| pdfx_lib::save::SaveDocumentRequest {
         save_as_path: path,
         confirm_unencrypted_output: false,
+        confirm_signature_invalidation: false,
         password: None,
     };
     let first = pdfx_lib::save::save_document_with_progress(

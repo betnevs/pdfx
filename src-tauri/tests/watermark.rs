@@ -222,6 +222,7 @@ fn save_as(document_id: &str, path: &Path) {
             save_as_path: Some(path.to_string_lossy().into_owned()),
             password: None,
             confirm_unencrypted_output: false,
+            confirm_signature_invalidation: false,
         },
         &mut |_| {},
     )

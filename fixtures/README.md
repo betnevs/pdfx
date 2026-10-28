@@ -24,6 +24,9 @@ Rust 测试通过 `src-tauri/tests/support/fixtures.rs` 读取 `manifest.json`�
 | encrypted | `encrypted-owner-restrictions.pdf` | 用户密码为空；所有者限制修改、复制与注释，允许打印 | 用户（空）/ 所有者 `pdfx-owner` |
 | encrypted | `encrypted-print-denied.pdf` | 用户密码为空；所有者仅禁止打印，编辑、复制与注释仍允许 | 用户（空）/ 所有者 `pdfx-owner` |
 | form | `form-acroform.pdf` | 两页 AcroForm：文本、复选框、单选组、列表框、下拉框；含必填、只读与带 JavaScript 动作的字段 | — |
+| signature | `signature-signed.pdf` | 已签名字段（`/V` 指向含 `/ByteRange`、`/Contents` 的占位签名字典）与通过 `/Parent` 继承 `/FT` 的空签名字段，另含普通文本字段 | — |
+| signature | `signature-field-only.pdf` | 两个空签名字段（终态 widget + 嵌套继承 `/FT`），不含 `/V` | — |
+| signature | `encrypted-signature-restricted.pdf` | 用户密码为空；所有者限制修改、复制与注释；含已签名与空签名字段 | 用户（空）/ 所有者 `pdfx-owner` |
 | structure | `structure-metadata.pdf` | 两级书签、URI 链接、Info/XMP 元数据、内嵌附件 | — |
 | large | `large-500-pages.pdf` | 500 页最小“大文件”样例（约 146KB） | — |
 | rotated | `rotated-mixed-size.pdf` | 旋转 90/0/270，三种页面尺寸 | — |
@@ -42,11 +45,11 @@ swift fixtures/verify.swift           # 用 PDFKit 独立断言每个样例的�
 
 `--large-pages N` 可生成不同页数的替代大文件（例如 `--large-pages 2000` 做压力样例）。默认 500 页是刻意缩小的提交版本，避免仓库膨胀。
 
-PDFKit 验证脚本覆盖：文本可提取、扫描件无文本层、加密文件锁定/解锁与权限位、表单 Widget、书签/链接/附件/XMP、页数、旋转、页面尺寸、截断文件不可打开。生成器与验证器使用不同的 PDF 实现，避免“自己验证自己”。
+PDFKit 验证脚本覆盖：文本可提取、扫描件无文本层、加密文件锁定/解锁与权限位、表单 Widget、签名结构与签名 Widget、书签/链接/附件/XMP、页数、旋转、页面尺寸、截断文件不可打开。生成器与验证器使用不同的 PDF 实现，避免“自己验证自己”。
 
 ## 暂未包含（后续票）
 
 - 中文/混排、Embedded Font、Font Subset、CID/Type0 字体样例：需要引入许可明确的字体文件，属于字体管线票的范围。
-- 各类 Annotation、AcroForm 创建结果、数字签名、透明与图片混合：随对应功能票补充。
+- 各类 Annotation、AcroForm 创建结果、透明与图片混合：随对应功能票补充。
 
 新增类别时，先扩展 `generate.py` 的 `build_all()` 与 `manifest.json` 条目，再在 `verify.swift` 中加入独立断言，最后同步 `src-tauri/tests/fixtures.rs` 的必需类别列表。

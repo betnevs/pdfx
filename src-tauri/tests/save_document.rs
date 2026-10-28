@@ -88,6 +88,7 @@ fn save_request_confirmed(
     SaveDocumentRequest {
         save_as_path: save_as_path.map(path_string),
         confirm_unencrypted_output,
+        confirm_signature_invalidation: false,
         password: None,
     }
 }
@@ -97,6 +98,7 @@ fn save_request_with_password(save_as_path: Option<&Path>, password: &str) -> Sa
     SaveDocumentRequest {
         save_as_path: save_as_path.map(path_string),
         confirm_unencrypted_output: false,
+        confirm_signature_invalidation: false,
         password: Some(password.to_owned()),
     }
 }

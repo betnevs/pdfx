@@ -97,6 +97,11 @@ pub struct SaveDocumentRequest {
     /// Set only after the user accepted that an encrypted Source Document is
     /// written as an unencrypted Output Document (ADR-0007).
     pub confirm_unencrypted_output: bool,
+    /// Set only after the user accepted that saving a document containing
+    /// digital signature structures invalidates those signatures. The
+    /// confirmation is per-save: it is never remembered.
+    #[serde(default)]
+    pub confirm_signature_invalidation: bool,
     /// User Password the Output Document must require to open. `None` keeps
     /// the ADR-0007 default and writes an unencrypted output; the value is
     /// used only for this save and is never stored or logged.
@@ -119,6 +124,15 @@ pub struct SaveResultView {
     pub encrypted: bool,
     /// The previous Output Document, preserved before it was replaced.
     pub backup_path: Option<String>,
+    /// Signature structures still present in the document after the save, or
+    /// `None` for an ordinary document. Counts only; never signer details.
+    #[serde(default)]
+    pub signature: Option<crate::signature::SignatureSummary>,
+    /// True when the save invalidated an actual signature: the document
+    /// contained at least one signature dictionary (`/V`) before and after the
+    /// write. The warning banner switches to its invalidated state.
+    #[serde(default)]
+    pub signature_invalidated: bool,
     /// Clean state after the write. Undo/redo history is untouched.
     pub history: EditHistoryView,
 }
@@ -260,6 +274,19 @@ pub fn save_document_with_progress(
             });
         }
 
+        // A document containing signature structures is only written after the
+        // user explicitly accepted that saving invalidates them. The check sits
+        // before serialization so a refusal writes no bytes, leaves the
+        // Source and any previous Output untouched, and keeps the dirty state
+        // and history for a retry. PDFX never modifies the signature objects.
+        let signature = entry.signature;
+        if signature.is_some() && !request.confirm_signature_invalidation {
+            return Err(CommandError::new(
+                CommandErrorCode::SignatureInvalidationConfirmationRequired,
+                "the document contains digital signature structures; saving invalidates them",
+            ));
+        }
+
         emit(document_id, SaveStage::Preparing, 0, progress);
         emit(document_id, SaveStage::Serializing, 1, progress);
         let output_bytes = serialize_live_document(entry)?;
@@ -319,6 +346,8 @@ pub fn save_document_with_progress(
             backup_path: written
                 .backup_path
                 .map(|path| path.to_string_lossy().into_owned()),
+            signature,
+            signature_invalidated: signature.is_some_and(|summary| summary.signed_count > 0),
             history: entry.edit.history_view(),
         })
     })
