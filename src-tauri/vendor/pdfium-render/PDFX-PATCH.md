@@ -47,7 +47,7 @@ safe wrapper lives in `src-tauri/src/pdfium_adapter.rs`.
 
 ## Patch scope
 
-Five files change. Each hunk is additive; no upstream behaviour changes.
+Eight files change. Each hunk is additive; no upstream behaviour changes.
 
 ### `src/pdf/document.rs`
 
@@ -84,6 +84,14 @@ Five files change. Each hunk is additive; no upstream behaviour changes.
 
 Added to the `PdfPageAnnotation` enum (available on every annotation type):
 
+- `name()` / `set_name(name)` — `/NM` string value, the stable annotation
+  identity PDFX uses across edits and undo/redo.
+- `creation_date()` / `set_creation_date_string(date)` — raw `/CreationDate`
+  string access. Unlike upstream's date-typed `set_creation_date()`, undo can
+  restore the timestamp it read without constructing a new one.
+- `string_value(key)` / `set_string_value(key, value)` — arbitrary annotation
+  dictionary string values. PDFX mirrors colour and opacity in private keys so
+  it can read them back after Pdfium installs an appearance stream.
 - `border_width()` — `FPDFAnnot_GetBorder()`.
 - `set_border_width(width)` — `FPDFAnnot_SetBorder(annot, 0.0, 0.0, width)`.
   Pdfium drops an existing appearance stream when the border is set, so PDFX
@@ -93,6 +101,21 @@ Added to the `PdfPageAnnotation` enum (available on every annotation type):
   `/BBox` is the annotation `/Rect` at call time, so bounds must be set first.
 - `add_ink_stroke(points)` / `ink_stroke_count()` — delegate to the ink
   variant, returning `PdfiumError::UnknownPdfAnnotationType` otherwise.
+
+### `src/pdf/document/page/annotation/highlight.rs`
+
+- Added `PdfPageHighlightAnnotation::close(self)` calling
+  `FPDFPage_CloseAnnot()`.
+
+### `src/pdf/document/page/annotation/underline.rs`
+
+- Added `PdfPageUnderlineAnnotation::close(self)` calling
+  `FPDFPage_CloseAnnot()`.
+
+### `src/pdf/document/page/annotation/strikeout.rs`
+
+- Added `PdfPageStrikeoutAnnotation::close(self)` calling
+  `FPDFPage_CloseAnnot()`.
 
 ## Verification
 
@@ -127,9 +150,9 @@ cargo test
    sha256 here.
 2. Replace everything in this directory with the new crate contents plus
    `LICENSE.md`, keeping `PDFX-PATCH.md`.
-3. Re-apply the hunks above (five files). `diff -u` against the pristine crate
+3. Re-apply the hunks above (eight files). `diff -u` against the pristine crate
    source (cargo registry unpack directory or a fresh extract of the `.crate`)
-   is the authoritative patch; keep the diff to those five files.
+   is the authoritative patch; keep the diff to those eight files.
 4. Update `src-tauri/Cargo.toml` version if the patched range changes, then
    build. `pdfium-render` tracks the PDFium API, so re-run the adapter tests
    against the pinned PDFium build first.
@@ -141,10 +164,11 @@ cargo test
 
 - Upstream concrete annotation types (e.g. `PdfPageCircleAnnotation`) have no
   `Drop`; only the `PdfPageAnnotation` enum closes its annotation handle. The
-  patch adds `close(self)` to the two types PDFX creates, and the adapter calls
-  it immediately after setting bounds. Other concrete annotation types keep
-  upstream behaviour, so callers creating them directly must close them
-  explicitly if the patch is extended to expose them. Later adapter operations
-  fetch the annotation through the enum, which does close the handle.
+  patch adds `close(self)` to the five types PDFX creates (circle, ink,
+  highlight, underline, strikeout), and the adapter calls it immediately after
+  setting bounds. Other concrete annotation types keep upstream behaviour, so
+  callers creating them directly must close them explicitly if the patch is
+  extended to expose them. Later adapter operations fetch the annotation
+  through the enum, which does close the handle.
 - The patch adds no raw-handle accessor. Any future capability must be added
   here with a typed, safe method rather than exposing `FPDF_*` handles.

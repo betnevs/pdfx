@@ -16,6 +16,7 @@ use crate::file_association::{AssociationResult, FileAssociationPlatform};
 use crate::updater;
 
 pub const SETTINGS_FILE_NAME: &str = "settings.json";
+/// Fallback used when the operating system does not expose a usable username.
 pub const DEFAULT_ANNOTATION_AUTHOR: &str = "PDFX 用户";
 const MAX_ANNOTATION_AUTHOR_CHARS: usize = 64;
 
@@ -62,12 +63,34 @@ impl Default for Settings {
         Self {
             language: InterfaceLanguage::default(),
             theme: Theme::default(),
-            annotation_author: DEFAULT_ANNOTATION_AUTHOR.to_owned(),
+            annotation_author: default_annotation_author(),
             // File associations stay off until the user opts in.
             file_association_enabled: false,
             update_manifest_url: String::new(),
         }
     }
+}
+
+/// The system username, used as the initial annotation author.
+///
+/// The value is read locally from the environment and is only written into
+/// annotations the user creates; it is never logged or sent anywhere. A missing
+/// or unusable username falls back to [`DEFAULT_ANNOTATION_AUTHOR`].
+pub fn default_annotation_author() -> String {
+    for key in ["USER", "USERNAME"] {
+        let Ok(value) = std::env::var(key) else {
+            continue;
+        };
+        let candidate = value.trim();
+        if candidate.is_empty()
+            || candidate.chars().count() > MAX_ANNOTATION_AUTHOR_CHARS
+            || candidate.chars().any(char::is_control)
+        {
+            continue;
+        }
+        return candidate.to_owned();
+    }
+    DEFAULT_ANNOTATION_AUTHOR.to_owned()
 }
 
 impl Settings {
