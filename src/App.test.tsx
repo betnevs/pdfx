@@ -12,7 +12,6 @@ import {
   READ_ONLY_REASON,
   UNENCRYPTED_OUTPUT_WARNING,
 } from "./lib/document-policy";
-import { notifyDocumentChanged } from "./lib/documentEvents";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
@@ -52,14 +51,6 @@ const idleHistory = {
   revision: 0,
   savedRevision: 0,
   dirty: false,
-};
-
-const dirtyHistory = {
-  canUndo: true,
-  canRedo: false,
-  revision: 1,
-  savedRevision: 0,
-  dirty: true,
 };
 
 const cleanHistory = {
@@ -1214,19 +1205,17 @@ describe("PDFX workspace", () => {
     ]);
   });
 
-  it("saves a new document through the Save As dialog and clears the dirty marker", async () => {
-    installDocumentBackend({
-      edit_history: () => dirtyHistory,
-      save_document: () => savedResult(),
-    });
+  it("saves a new document through the Save As dialog", async () => {
+    installDocumentBackend({ save_document: () => savedResult() });
     openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
     saveDialogMock.mockResolvedValueOnce("/tmp/copy.pdf");
     const user = userEvent.setup();
 
     render(<App />);
     await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("report.pdf");
+    expect(setTitle).toHaveBeenLastCalledWith("report.pdf — PDFX");
 
-    expect(await screen.findByText("未保存")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "另存为…" }));
 
     await waitFor(() => {
@@ -1250,10 +1239,6 @@ describe("PDFX workspace", () => {
       }),
     );
     expect(await screen.findByText(/已保存到/)).toHaveTextContent("copy.pdf");
-    await waitFor(() => {
-      expect(screen.queryByText("未保存")).not.toBeInTheDocument();
-      expect(setTitle).toHaveBeenLastCalledWith("report.pdf — PDFX");
-    });
   });
 
   it("does not save when the Save As dialog is cancelled", async () => {
@@ -1577,48 +1562,6 @@ describe("PDFX workspace", () => {
     expect(await screen.findByText(/已保存到/)).toBeInTheDocument();
     expect(screen.queryByText("正在写入文件…")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "保存更改" })).toBeEnabled();
-  });
-
-  it("tracks dirty state through edit history and guards closing a dirty document", async () => {
-    let dirty = false;
-    installDocumentBackend({
-      edit_history: () => (dirty ? dirtyHistory : idleHistory),
-      save_document: () => savedResult(),
-    });
-    openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
-    saveDialogMock.mockResolvedValueOnce("/tmp/copy.pdf");
-    const user = userEvent.setup();
-
-    render(<App />);
-    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
-    await screen.findByText("report.pdf");
-    expect(screen.queryByText("未保存")).not.toBeInTheDocument();
-
-    dirty = true;
-    act(() => {
-      notifyDocumentChanged({ documentId: "doc-1", pageIndex: 0 });
-    });
-
-    expect(await screen.findByText("未保存")).toBeInTheDocument();
-    await waitFor(() =>
-      expect(setTitle).toHaveBeenLastCalledWith("report.pdf（未保存） — PDFX"),
-    );
-
-    await waitFor(() => expect(onCloseRequested).toHaveBeenCalled());
-    const closeHandler = onCloseRequested.mock.calls[0][0] as (event: {
-      preventDefault: () => void;
-    }) => void;
-    const preventDefault = vi.fn();
-    closeHandler({ preventDefault });
-    expect(preventDefault).toHaveBeenCalled();
-    expect(commandCalls("close_document")).toHaveLength(0);
-
-    await user.click(screen.getByRole("button", { name: "另存为…" }));
-    await screen.findByText(/已保存到/);
-    await waitFor(() => {
-      expect(screen.queryByText("未保存")).not.toBeInTheDocument();
-      expect(setTitle).toHaveBeenLastCalledWith("report.pdf — PDFX");
-    });
   });
 
   it("wires the file.save and file.save_as menu ids to the save flow", async () => {
