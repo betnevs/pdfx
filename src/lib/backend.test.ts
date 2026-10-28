@@ -6,9 +6,11 @@ import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialo
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  choosePageImageDestination,
   choosePdfFile,
   chooseSaveFile,
   closeDocument,
+  exportPage,
   extractTextLayer,
   initialDocumentPath,
   isFullscreen,
@@ -19,6 +21,7 @@ import {
   openDocument,
   openDocumentInNewWindow,
   pageInfo,
+  printDocument,
   renderPage,
   renderPageRegion,
   renderThumbnail,
@@ -67,6 +70,60 @@ describe("backend command seam", () => {
     vi.mocked(openDialog).mockResolvedValue(null);
 
     await expect(choosePdfFile()).resolves.toBeNull();
+  });
+
+  it("maps page export and print to their Tauri commands", async () => {
+    const exported = {
+      path: "/tmp/report-page-2.png",
+      format: "png",
+      dpi: 300,
+      width: 2550,
+      height: 3300,
+      bytes: 1234,
+    };
+    invokeMock.mockResolvedValue(exported);
+
+    await expect(
+      exportPage("doc-1", 1, "png", 300, "/tmp/report-page-2.png"),
+    ).resolves.toEqual(exported);
+    expect(invokeMock).toHaveBeenCalledWith("export_page", {
+      documentId: "doc-1",
+      pageIndex: 1,
+      format: "png",
+      dpi: 300,
+      destination: "/tmp/report-page-2.png",
+    });
+
+    await printDocument("doc-1");
+    expect(invokeMock).toHaveBeenCalledWith("print_document", {
+      documentId: "doc-1",
+    });
+  });
+
+  it("asks the save dialog for the selected image format", async () => {
+    vi.mocked(saveDialog).mockResolvedValue("/tmp/report-page-2.jpg");
+
+    await expect(
+      choosePageImageDestination("/tmp/report-page-2.jpg", "jpg"),
+    ).resolves.toBe("/tmp/report-page-2.jpg");
+    expect(saveDialog).toHaveBeenCalledWith({
+      defaultPath: "/tmp/report-page-2.jpg",
+      filters: [{ name: "JPG", extensions: ["jpg"] }],
+    });
+
+    vi.mocked(saveDialog).mockResolvedValue(null);
+    await expect(
+      choosePageImageDestination("/tmp/report-page-2.png", "png"),
+    ).resolves.toBeNull();
+  });
+
+  it("recognizes the export and print error codes", () => {
+    expect(
+      toCommandError({ code: "file_write_failed", message: "disk full" }),
+    ).toEqual({ code: "file_write_failed", message: "disk full" });
+    expect(
+      toCommandError({ code: "print_failed", message: "no printer" }),
+    ).toEqual({ code: "print_failed", message: "no printer" });
   });
 
   it("maps document commands to their Tauri command names and camelCase arguments", async () => {

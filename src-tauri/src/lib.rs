@@ -5,6 +5,7 @@ mod fonts;
 pub mod logging;
 mod menu;
 pub mod pdfium_adapter;
+pub mod print_export;
 pub mod save;
 pub mod settings;
 pub mod text_edit;
@@ -61,6 +62,8 @@ pub fn run() {
             text_edit::undo_text_edit,
             text_edit::redo_text_edit,
             text_edit::mark_document_saved,
+            print_export::export_page,
+            print_export::print_document,
             save::save_document,
             commands::get_settings,
             commands::update_settings,

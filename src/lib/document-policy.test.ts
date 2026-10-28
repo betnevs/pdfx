@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { DocumentPermissions, DocumentView } from "./backend";
 import {
   documentPolicy,
+  PRINT_DISABLED_REASON,
   READ_ONLY_REASON,
   SAVE_CHANGES_READ_ONLY,
   UNENCRYPTED_OUTPUT_WARNING,
@@ -48,7 +49,18 @@ describe("document policy", () => {
       editingDisabledReason: null,
       saveChangesDisabledReason: null,
       unencryptedOutputWarning: null,
+      printDisabledReason: null,
     });
+  });
+
+  it("explains why printing is unavailable when the owner denied it", () => {
+    const policy = documentPolicy(
+      documentView({ permissions: { ...allGranted, canPrint: false } }),
+    );
+
+    expect(policy.readOnly).toBe(false);
+    expect(policy.printDisabledReason).toBe(PRINT_DISABLED_REASON);
+    expect(policy.printDisabledReason).toContain("打印");
   });
 
   it("warns that saving an encrypted document produces an unencrypted copy", () => {
