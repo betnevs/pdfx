@@ -96,6 +96,17 @@ body {
   white-space: nowrap;
 }
 
+.recovered-indicator {
+  padding: 2px 7px;
+  border: 1px solid var(--pdfx-border-control);
+  border-radius: 999px;
+  background: var(--pdfx-accent-soft);
+  color: var(--pdfx-accent-text);
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
 button {
   font: inherit;
 }
@@ -186,6 +197,66 @@ button {
   color: var(--pdfx-muted);
   font-size: 14px;
   line-height: 1.6;
+}
+
+.recent-files {
+  margin-top: 26px;
+  padding-top: 18px;
+  border-top: 1px solid var(--pdfx-border-control);
+  text-align: left;
+}
+
+.recent-files h3 {
+  margin: 0 0 8px;
+  color: var(--pdfx-muted);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.recent-files ul {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.recent-file {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 7px 9px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.recent-file:hover,
+.recent-file:focus-visible {
+  border-color: var(--pdfx-border-control);
+  background: var(--pdfx-raised);
+}
+
+.recent-file-name {
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 550;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recent-file-path {
+  overflow: hidden;
+  color: var(--pdfx-muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .loading-state {
@@ -2378,6 +2449,77 @@ button {
   justify-content: flex-end;
   gap: 8px;
   margin-top: 6px;
+}
+
+/* Start-up recovery question: one row per Recovery File. */
+
+.recovery-dialog {
+  width: min(560px, 100%);
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+}
+
+.recovery-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 280px;
+  margin: 2px 0 0;
+  padding: 0;
+  overflow: auto;
+  list-style: none;
+}
+
+.recovery-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--pdfx-border-control);
+  border-radius: 8px;
+  background: var(--pdfx-raised);
+}
+
+.recovery-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.recovery-name {
+  overflow: hidden;
+  color: var(--pdfx-text);
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recovery-path {
+  overflow: hidden;
+  color: var(--pdfx-muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recovery-meta {
+  color: var(--pdfx-muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.recovery-actions {
+  display: flex;
+  flex: none;
+  gap: 6px;
+}
+
+.recovery-actions button {
+  padding: 5px 10px;
+  font-size: 12px;
 }
 
 /* Annotation column: stamp catalogue above the document-wide list. */

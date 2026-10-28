@@ -102,6 +102,10 @@ pub enum CommandErrorCode {
     UnencryptedOutputConfirmationRequired,
     /// Permission Restrictions forbid saving changes to this document.
     ReadOnlyDocument,
+    /// Writing, reading or removing a Recovery File failed.
+    RecoveryFailed,
+    /// The requested Recovery File no longer exists.
+    RecoveryNotFound,
     /// The requested form widget no longer exists in the open document.
     FormFieldNotFound,
     /// The form widget carries the ReadOnly field flag.
@@ -155,6 +159,20 @@ pub struct DocumentPermissions {
     pub can_copy_content: bool,
 }
 
+/// The Source Document's security state, remembered independently of the live
+/// PDFium copy.
+///
+/// A Document restored from a Recovery File keeps the Source's encryption and
+/// Permission Restrictions even though the snapshot PDF itself is already
+/// decrypted: ADR-0007 still requires an explicit confirmation before writing
+/// an unencrypted Output Document, and a restricted Source stays restricted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DocumentSecurity {
+    pub(crate) encrypted: bool,
+    pub(crate) read_only: bool,
+    pub(crate) permissions: DocumentPermissions,
+}
+
 /// A document as seen by the frontend. It never contains PDFium handles.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -174,6 +192,15 @@ pub struct DocumentView {
     /// `permissions` for finer gating.
     pub read_only: bool,
     pub permissions: DocumentPermissions,
+    /// Output Document this Document will save to, when it has one. Restoring
+    /// a Recovery File reuses the previous Output Document only while it still
+    /// exists and is not the Source Document.
+    #[serde(default)]
+    pub output_path: Option<String>,
+    /// True when the Document was opened from a Recovery File. `path` is then
+    /// the original Source Document (provenance) and is never written.
+    #[serde(default)]
+    pub recovered: bool,
 }
 
 /// A rendered page encoded as PNG. The payload is base64 so it crosses the IPC
@@ -299,6 +326,10 @@ pub(crate) struct OpenDocument {
     /// so detached page-object snapshots held by undo/redo are destroyed
     /// before PDFium closes the owning document.
     pub(crate) edit: crate::text_edit::EditSession,
+    /// Snapshot bookkeeping for this Document, created on the first edit.
+    pub(crate) recovery: Option<crate::recovery::RecoveryState>,
+    /// The Source Document's security, preserved by a recovered Document.
+    pub(crate) source_security: DocumentSecurity,
     pub(crate) document: PdfDocument<'static>,
 }
 
@@ -345,13 +376,16 @@ pub(crate) fn with_open_document<R>(
 pub fn open_document(path: String, password: Option<String>) -> Result<DocumentView, CommandError> {
     let result = open_document_impl(path, password);
     match &result {
-        Ok(view) => logging::event(
-            "document.open",
-            &format!(
-                "name={} pages={} path={}",
-                view.name, view.page_count, view.path
-            ),
-        ),
+        Ok(view) => {
+            logging::event(
+                "document.open",
+                &format!(
+                    "name={} pages={} path={}",
+                    view.name, view.page_count, view.path
+                ),
+            );
+            crate::recovery::record_recent_document(std::path::Path::new(&view.path));
+        }
         Err(error) => logging::error(
             "document.open.failed",
             &format!("code={:?} message={}", error.code, error.message),
@@ -380,6 +414,45 @@ fn open_document_impl(
         ),
     })?;
 
+    let display_name = document_name(&path);
+    insert_document(
+        path,
+        bytes,
+        password,
+        NewDocument {
+            display_name,
+            output_path: None,
+            recovered: false,
+            encrypted: None,
+            read_only: None,
+            permissions: None,
+            recovery: None,
+            edit: crate::text_edit::EditSession::default(),
+        },
+    )
+}
+
+/// Everything that differs between opening a Source Document and opening a
+/// Recovery File. `None` security fields mean "derive from the live PDFium
+/// document", which is what a normal open does.
+struct NewDocument {
+    display_name: String,
+    output_path: Option<String>,
+    recovered: bool,
+    encrypted: Option<bool>,
+    read_only: Option<bool>,
+    permissions: Option<DocumentPermissions>,
+    recovery: Option<crate::recovery::RecoveryState>,
+    edit: crate::text_edit::EditSession,
+}
+
+/// Opens bytes into a new registry entry and returns its frontend view.
+fn insert_document(
+    path: PathBuf,
+    bytes: Vec<u8>,
+    password: Option<String>,
+    options: NewDocument,
+) -> Result<DocumentView, CommandError> {
     let engine = Engine::shared()
         .map_err(|message| CommandError::new(CommandErrorCode::PdfiumUnavailable, message))?;
 
@@ -411,13 +484,16 @@ fn open_document_impl(
         (page.width().value, page.height().value)
     };
 
-    let (encrypted, read_only, permissions) = document_permissions(&document);
+    let (actual_encrypted, actual_read_only, actual_permissions) = document_permissions(&document);
+    let encrypted = options.encrypted.unwrap_or(actual_encrypted);
+    let read_only = options.read_only.unwrap_or(actual_read_only);
+    let permissions = options.permissions.unwrap_or(actual_permissions);
 
     registry.next_id += 1;
     let document_id = format!("doc-{}", registry.next_id);
     let view = DocumentView {
         document_id: document_id.clone(),
-        name: document_name(&path),
+        name: options.display_name,
         path: path.to_string_lossy().into_owned(),
         page_count: page_count as u32,
         page_width,
@@ -425,15 +501,27 @@ fn open_document_impl(
         encrypted,
         read_only,
         permissions,
+        output_path: options.output_path.clone(),
+        recovered: options.recovered,
+    };
+    let save = crate::save::SaveState {
+        output_path: options.output_path.map(PathBuf::from),
+        ..Default::default()
     };
     registry.documents.insert(
         document_id,
         OpenDocument {
             source_path: path,
             source_bytes: bytes,
-            save: crate::save::SaveState::default(),
+            save,
             pages: crate::page_ops::PageModel::new(page_count as u32),
-            edit: crate::text_edit::EditSession::default(),
+            edit: options.edit,
+            recovery: options.recovery,
+            source_security: DocumentSecurity {
+                encrypted,
+                read_only,
+                permissions,
+            },
             document,
         },
     );
@@ -485,12 +573,147 @@ pub(crate) fn document_permissions(
 
 /// The `close_document` command. Closing an unknown document is a no-op so a
 /// window teardown is always safe.
+///
+/// A normal close discards the Document's Recovery File: the close guard only
+/// closes after saving or explicitly discarding the edits. An abnormal exit
+/// never reaches this command, which is exactly when the Recovery File must
+/// survive for the next start-up.
 #[tauri::command]
 pub fn close_document(document_id: String) -> Result<(), CommandError> {
     let mut registry = registry().lock().expect("document registry poisoned");
-    registry.documents.remove(&document_id);
+    if let Some(mut entry) = registry.documents.remove(&document_id) {
+        crate::recovery::clear_for_entry(&mut entry);
+    }
     logging::event("document.close", &format!("documentId={document_id}"));
     Ok(())
+}
+
+/// The `recovery_candidates` command: valid Recovery Files, newest first.
+///
+/// The scan deliberately removes orphan or unreadable pairs so a broken file
+/// cannot prompt forever. It never opens anything.
+#[tauri::command]
+pub fn recovery_candidates() -> Result<Vec<crate::recovery::RecoverySnapshot>, CommandError> {
+    let Some(store) = crate::recovery::recovery_store() else {
+        return Ok(Vec::new());
+    };
+    store
+        .scan()
+        .map(|scan| scan.candidates)
+        .map_err(crate::recovery::map_recovery_error)
+}
+
+/// The `restore_recovery` command: opens a Recovery File as the Document.
+///
+/// The snapshot bytes become the live document (including every unsaved edit);
+/// the original Source path is provenance only and the previous Output path is
+/// reused only while it still exists and is not the Source Document. The
+/// Recovery File stays on disk until the restored Document is saved or closed,
+/// so a second crash is still recoverable.
+#[tauri::command]
+pub fn restore_recovery(session_id: String) -> Result<DocumentView, CommandError> {
+    let Some(store) = crate::recovery::recovery_store() else {
+        return Err(CommandError::new(
+            CommandErrorCode::RecoveryNotFound,
+            "recovery storage is unavailable",
+        ));
+    };
+    let restored = store
+        .read_snapshot(&session_id)
+        .map_err(crate::recovery::map_recovery_error)?
+        .ok_or_else(|| {
+            CommandError::new(
+                CommandErrorCode::RecoveryNotFound,
+                format!("no recovery file for session {session_id}"),
+            )
+        })?;
+    let snapshot = restored.snapshot;
+
+    let output_path = snapshot
+        .output_path
+        .as_deref()
+        .filter(|target| {
+            target.is_file() && !crate::target_path::same_file(target, &snapshot.source_path)
+        })
+        .map(|target| target.to_string_lossy().into_owned());
+
+    // Start the restored history above the crashed revision and mark it dirty:
+    // the snapshot contains edits the last save never wrote. The undo/redo
+    // stacks are empty (they cannot cross a process), so only Save can make it
+    // clean again.
+    let revision = snapshot.revision.saturating_add(1);
+    let edit = crate::text_edit::EditSession {
+        current_state: revision,
+        next_state: revision,
+        saved_state: snapshot.revision,
+        ..Default::default()
+    };
+    let display_name = if snapshot.display_name.is_empty() {
+        document_name(&snapshot.source_path)
+    } else {
+        snapshot.display_name.clone()
+    };
+
+    let view = insert_document(
+        snapshot.source_path.clone(),
+        restored.bytes,
+        None,
+        NewDocument {
+            display_name,
+            output_path,
+            recovered: true,
+            encrypted: Some(snapshot.source_encrypted),
+            read_only: Some(snapshot.source_read_only),
+            permissions: snapshot.source_permissions,
+            recovery: Some(crate::recovery::RecoveryState::restored(
+                session_id.clone(),
+                store,
+            )),
+            edit,
+        },
+    )?;
+
+    crate::recovery::record_recent_document(&snapshot.source_path);
+    logging::event(
+        "recovery.restore",
+        &format!(
+            "sessionId={session_id} documentId={} pages={}",
+            view.document_id, view.page_count
+        ),
+    );
+    Ok(view)
+}
+
+/// The `discard_recovery` command: forget one Recovery File.
+#[tauri::command]
+pub fn discard_recovery(session_id: String) -> Result<(), CommandError> {
+    let Some(store) = crate::recovery::recovery_store() else {
+        return Ok(());
+    };
+    store
+        .remove_snapshot(&session_id)
+        .map_err(crate::recovery::map_recovery_error)?;
+    logging::event("recovery.discard", &format!("sessionId={session_id}"));
+    Ok(())
+}
+
+/// The `list_recent_files` command. Reading the list never opens a Document.
+#[tauri::command]
+pub fn list_recent_files() -> Result<Vec<crate::recovery::RecentFile>, CommandError> {
+    Ok(crate::recovery::recent_files_store()
+        .map(|store| store.list())
+        .unwrap_or_default())
+}
+
+/// The `forget_recent_file` command: removes one missing or unwanted entry.
+#[tauri::command]
+pub fn forget_recent_file(path: String) -> Result<Vec<crate::recovery::RecentFile>, CommandError> {
+    match crate::recovery::recent_files_store() {
+        Some(store) => store
+            .forget(&path)
+            .map_err(crate::recovery::map_recovery_error),
+        None => Ok(Vec::new()),
+    }
 }
 
 /// Serializes the current in-memory document, including every applied edit.

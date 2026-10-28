@@ -3232,3 +3232,167 @@ describe("page operations", () => {
     await waitFor(() => expect(lastMenuState().get("edit.redo")).toBe(true));
   });
 });
+
+describe("recovery and recent files", () => {
+  const recoveryCandidate = {
+    formatVersion: 1,
+    sessionId: "s123-1700000000000-1",
+    sourcePath: "/tmp/report.pdf",
+    outputPath: "/tmp/copy.pdf",
+    displayName: "report.pdf",
+    sourceEncrypted: false,
+    sourceReadOnly: false,
+    sourcePermissions: allGrantedPermissions,
+    dirty: true,
+    revision: 3,
+    savedRevision: 1,
+    createdAtMillis: 1_700_000_000_000,
+    appVersion: "0.1.0",
+  };
+
+  it("offers recovery at startup and restores the unsaved document", async () => {
+    installDocumentBackend({
+      recovery_candidates: () => [recoveryCandidate],
+      restore_recovery: () => ({
+        ...documentView,
+        recovered: true,
+        outputPath: "/tmp/copy.pdf",
+      }),
+      edit_history: () => dirtyHistory,
+    });
+    const user = userEvent.setup();
+
+    render(<App />);
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "恢复未保存的文档？",
+    });
+    expect(within(dialog).getByText("report.pdf")).toBeInTheDocument();
+    expect(commandCalls("open_document")).toHaveLength(0);
+
+    await user.click(
+      within(dialog).getByRole("button", { name: "恢复 report.pdf" }),
+    );
+
+    await waitFor(() => {
+      expect(commandCalls("restore_recovery")).toEqual([
+        ["restore_recovery", { sessionId: recoveryCandidate.sessionId }],
+      ]);
+    });
+    await screen.findByText("report.pdf");
+    expect(
+      screen.queryByRole("dialog", { name: "恢复未保存的文档？" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText("已恢复")).toBeInTheDocument();
+    expect(commandCalls("open_document")).toHaveLength(0);
+    await waitFor(() =>
+      expect(setTitle).toHaveBeenLastCalledWith("report.pdf（未保存） — PDFX"),
+    );
+  });
+
+  it("discards a recovery file and keeps the empty workspace", async () => {
+    installDocumentBackend({
+      recovery_candidates: () => [recoveryCandidate],
+      discard_recovery: () => undefined,
+    });
+    const user = userEvent.setup();
+
+    render(<App />);
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "恢复未保存的文档？",
+    });
+    await user.click(
+      within(dialog).getByRole("button", { name: "丢弃 report.pdf" }),
+    );
+
+    await waitFor(() => {
+      expect(commandCalls("discard_recovery")).toEqual([
+        ["discard_recovery", { sessionId: recoveryCandidate.sessionId }],
+      ]);
+    });
+    expect(
+      screen.queryByRole("dialog", { name: "恢复未保存的文档？" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { level: 2, name: "空工作区" }),
+    ).toBeInTheDocument();
+    expect(commandCalls("open_document")).toHaveLength(0);
+  });
+
+  const recentFiles = [
+    {
+      path: "/tmp/report.pdf",
+      name: "report.pdf",
+      lastOpenedMillis: 1_700_000_000_000,
+    },
+    {
+      path: "/tmp/notes.pdf",
+      name: "notes.pdf",
+      lastOpenedMillis: 1_699_000_000_000,
+    },
+  ];
+
+  it("lists recent files and opens one on demand without auto-opening", async () => {
+    installDocumentBackend({ list_recent_files: () => recentFiles });
+    const user = userEvent.setup();
+
+    render(<App />);
+
+    expect(
+      await screen.findByRole("heading", { level: 3, name: "最近文件" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "打开 report.pdf" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "打开 notes.pdf" }),
+    ).toBeInTheDocument();
+    // Listing the recent files never opens a document by itself.
+    expect(commandCalls("open_document")).toHaveLength(0);
+
+    await user.click(screen.getByRole("button", { name: "打开 report.pdf" }));
+
+    await waitFor(() => {
+      expect(commandCalls("open_document")).toEqual([
+        ["open_document", { path: "/tmp/report.pdf", password: null }],
+      ]);
+    });
+    await screen.findByText("report.pdf");
+    expect(
+      screen.queryByRole("heading", { level: 3, name: "最近文件" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("reports a missing recent file and removes it from the list", async () => {
+    installDocumentBackend({
+      list_recent_files: () => [recentFiles[0]],
+      open_document: () => {
+        throw { code: "file_not_found", message: "no such file" };
+      },
+      forget_recent_file: () => [],
+    });
+    const user = userEvent.setup();
+
+    render(<App />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "打开 report.pdf" }),
+    );
+
+    expect(
+      await screen.findByText("找不到文件，它可能已被移动或删除。"),
+    ).toBeInTheDocument();
+    await waitFor(() => {
+      expect(commandCalls("forget_recent_file")).toEqual([
+        ["forget_recent_file", { path: "/tmp/report.pdf" }],
+      ]);
+    });
+    expect(
+      screen.queryByRole("button", { name: "打开 report.pdf" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { level: 2, name: "空工作区" }),
+    ).toBeInTheDocument();
+  });
+});

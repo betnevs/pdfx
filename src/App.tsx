@@ -15,6 +15,7 @@ import {
   DeletePageDialog,
   InsertBlankPageDialog,
 } from "./components/PageOperationDialogs";
+import { RecoveryPrompt } from "./components/RecoveryPrompt";
 import { SaveConfirmDialog } from "./components/SaveConfirmDialog";
 import {
   choosePdfFile,
@@ -60,6 +61,8 @@ import {
 import { useAnnotations } from "./lib/useAnnotations";
 import { useDocumentSave } from "./lib/useDocumentSave";
 import { useDocumentViewer } from "./lib/useDocumentViewer";
+import { useRecoverySnapshots, useRecoveryStartup } from "./lib/useRecovery";
+import { useRecentFiles } from "./lib/useRecentFiles";
 import { useSettings } from "./lib/useSettings";
 
 type AppInfoState =
@@ -118,6 +121,8 @@ const ERROR_MESSAGES: Partial<Record<CommandErrorCode, string>> = {
   document_not_found: "文档已关闭。",
   render_failed: "无法渲染页面。",
   window_failed: "无法打开新窗口。",
+  recovery_failed: "无法处理恢复文件，请重试。",
+  recovery_not_found: "恢复文件已不存在，可能已被删除或恢复。",
   internal: "操作失败，请重试。",
 };
 
@@ -157,6 +162,11 @@ export function App() {
   const [notice, setNotice] = useState<CommandError | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const settings = useSettings();
+  // A `?open=` window belongs to one Document; the start-up recovery question
+  // belongs to the main window only.
+  const launchedWithDocument = useRef(initialDocumentPath() !== null).current;
+  const recovery = useRecoveryStartup(!launchedWithDocument);
+  const recent = useRecentFiles(!launchedWithDocument);
   const [passwordPrompt, setPasswordPrompt] = useState<PasswordPromptState | null>(null);
   const [pageDialog, setPageDialog] = useState<PageDialogState | null>(null);
 
@@ -246,6 +256,10 @@ export function App() {
       if (first) {
         locateField(first);
       }
+    },
+    // Every successful save also becomes a recent file.
+    onSaved: () => {
+      void recent.refresh();
     },
   });
   const saveRef = useRef(save);
@@ -398,6 +412,18 @@ export function App() {
     setPageDialog({ kind: "delete", pageIndex: viewer.pageIndex });
   }
 
+  // While the open Document is dirty, ask the backend for throttled Recovery
+  // File snapshots. The backend rejects writes while nothing changed.
+  useRecoverySnapshots(openDocumentView?.documentId ?? null, save.dirty);
+
+  // The recovery question is modal and belongs to the empty start screen; it
+  // keeps the menu unavailable until the user restores, discards or dismisses.
+  const recoveryPromptOpen =
+    !launchedWithDocument &&
+    editor.status === "empty" &&
+    recovery.open &&
+    recovery.candidates.length > 0;
+
   // A focused text control owns Cmd/Ctrl+Z, PageUp/PageDown and Home/End. The
   // menu state below disables those items, which also releases their native
   // accelerators, so the keys reach the control and the platform's own undo.
@@ -432,6 +458,7 @@ export function App() {
       closePrompt !== null ||
       passwordPrompt !== null ||
       save.confirmation !== null ||
+      recoveryPromptOpen ||
       settingsOpen ||
       pageDialog !== null,
     textInputFocused,
@@ -705,7 +732,11 @@ export function App() {
     };
   }, []);
 
-  async function openPath(path: string, password: string | null = null) {
+  async function openPath(
+    path: string,
+    password: string | null = null,
+    options: { fromRecentFile?: boolean } = {},
+  ) {
     if (openingRef.current) {
       return;
     }
@@ -723,6 +754,7 @@ export function App() {
         try {
           await openDocumentInNewWindow(path);
           setNotice(null);
+          void recent.refresh();
         } catch (error) {
           // Keep the current document visible; only window creation failed.
           setNotice(toCommandError(error));
@@ -736,12 +768,25 @@ export function App() {
       openedDocumentId = document.documentId;
       setPasswordPrompt(null);
       setEditor({ status: "open", document });
+      void recent.refresh();
     } catch (error) {
       if (openedDocumentId) {
         await closeDocument(openedDocumentId).catch(() => {});
       }
 
       const commandError = toCommandError(error);
+      if (
+        options.fromRecentFile &&
+        commandError.code === "file_not_found"
+      ) {
+        // A recent-files click that hits a moved or deleted file returns to
+        // the start screen, explains why, and drops the stale entry.
+        setEditor(previous);
+        setPasswordPrompt(null);
+        setNotice(commandError);
+        recent.forget(path);
+        return;
+      }
       if (
         commandError.code === "password_required" ||
         commandError.code === "invalid_password"
@@ -777,6 +822,20 @@ export function App() {
     const prompt = passwordPrompt;
     setPasswordPrompt({ ...prompt, busy: true, error: null });
     void openPath(prompt.path, password);
+  }
+
+  async function restoreRecoveryCandidate(sessionId: string) {
+    const document = await recovery.restore(sessionId);
+    if (!document) {
+      return;
+    }
+    // The snapshot already contains the unsaved edits, so no password prompt
+    // or loading workspace is needed; the source path stays provenance only.
+    setNotice(null);
+    setPasswordPrompt(null);
+    setEditor({ status: "open", document });
+    // Restoring records the original Source Document as recently opened.
+    void recent.refresh();
   }
 
   function cancelPasswordPrompt() {
@@ -946,6 +1005,14 @@ export function App() {
               未保存
             </span>
           )}
+          {open?.document.recovered && (
+            <span
+              className="recovered-indicator"
+              title="此文档从恢复文件打开，原文件未被修改。"
+            >
+              已恢复
+            </span>
+          )}
           <span className="app-mode">本地 PDF 编辑器</span>
           <button
             type="button"
@@ -1047,6 +1114,17 @@ export function App() {
         />
       )}
 
+      {recoveryPromptOpen && (
+        <RecoveryPrompt
+          candidates={recovery.candidates}
+          busySessionId={recovery.busySessionId}
+          error={recovery.error ? errorMessage(recovery.error.code) : null}
+          onRestore={(sessionId) => void restoreRecoveryCandidate(sessionId)}
+          onDiscard={recovery.discard}
+          onDismiss={recovery.dismiss}
+        />
+      )}
+
       <main className="workspace" aria-label="PDFX 工作区">
         {editor.status === "empty" && (
           <section className="empty-workspace">
@@ -1055,6 +1133,31 @@ export function App() {
             <button type="button" className="secondary-button" onClick={promptOpen}>
               选择 PDF 文件
             </button>
+            {recent.files.length > 0 && (
+              <div className="recent-files">
+                <h3>最近文件</h3>
+                <ul>
+                  {recent.files.map((file) => (
+                    <li key={file.path}>
+                      <button
+                        type="button"
+                        className="recent-file"
+                        aria-label={`打开 ${file.name}`}
+                        title={file.path}
+                        onClick={() => {
+                          void openPath(file.path, null, {
+                            fromRecentFile: true,
+                          });
+                        }}
+                      >
+                        <span className="recent-file-name">{file.name}</span>
+                        <span className="recent-file-path">{file.path}</span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
           </section>
         )}
 
