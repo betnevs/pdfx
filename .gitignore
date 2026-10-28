@@ -43,3 +43,6 @@ test-results/
 # Technical spike native assets and outputs (fetched by scripts/setup-native.sh)
 spikes/pdf-engine/vendor/
 spikes/pdf-engine/out/
+
+# Native PDFium library fetched by scripts/setup-native.sh
+src-tauri/vendor/
