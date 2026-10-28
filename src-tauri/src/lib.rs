@@ -13,6 +13,7 @@ pub mod logging;
 mod menu;
 pub mod pdfium_adapter;
 pub mod print_export;
+pub mod recovery;
 pub mod save;
 pub mod settings;
 mod stamp_glyphs;
@@ -111,6 +112,12 @@ pub fn run() {
             print_export::print_document,
             flatten_export::export_flattened_copy,
             save::save_document,
+            recovery::recovery_snapshot,
+            commands::recovery_candidates,
+            commands::restore_recovery,
+            commands::discard_recovery,
+            commands::list_recent_files,
+            commands::forget_recent_file,
             commands::get_settings,
             commands::update_settings,
             commands::export_diagnostics,
@@ -135,6 +142,22 @@ pub fn run() {
                 "app.start",
                 &format!("version={}", env!("CARGO_PKG_VERSION")),
             );
+
+            // Recovery Files and the recent-files list live in the application
+            // data directory, separate from user documents and settings. A
+            // failure here degrades those features but never blocks the shell.
+            match app.path().app_data_dir() {
+                Ok(directory) => {
+                    if let Err(error) = recovery::initialize(directory) {
+                        eprintln!("[pdfx] could not initialize recovery storage: {error}");
+                        logging::error("recovery.init.failed", &error.to_string());
+                    }
+                }
+                Err(error) => {
+                    eprintln!("[pdfx] could not resolve the application data directory: {error}");
+                    logging::error("recovery.init.failed", &error.to_string());
+                }
+            }
 
             // A missing library must not stop the shell from starting; opening a
             // document reports the setup instructions through the command error.
