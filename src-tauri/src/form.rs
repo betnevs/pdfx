@@ -730,12 +730,9 @@ fn fill_for(
         ));
     }
     if field.created {
-        // Created text fields live in the session store until the save
-        // pipeline writes them; their value change is a content edit with a
-        // full-record snapshot, so undo restores the empty value.
-        let FormFieldValueInput::Text { text } = value else {
-            return Err(invalid_value("此表单字段只接受文本值。"));
-        };
+        // Created fields live in the session store until the save pipeline
+        // writes them; their value change is a content edit with a full-record
+        // snapshot, so undo restores the previous state.
         let uid =
             crate::form_create::created_uid(&field_id).ok_or_else(|| field_not_found(&field_id))?;
         let before = entry
@@ -744,23 +741,55 @@ fn fill_for(
             .find_by_uid(uid)
             .cloned()
             .ok_or_else(|| field_not_found(&field_id))?;
-        let history = if before.value == text {
-            entry.edit.history_view()
-        } else {
-            let mut after = before.clone();
-            after.value = text;
-            entry.edit.created_fields.restore(after.clone());
-            crate::text_edit::push_form_structure_action(
-                entry,
-                uid,
-                field.page_index,
-                Some(before.snapshot()),
-                Some(after.snapshot()),
-            )
+        let mut after = before.clone();
+        let after = match field.kind {
+            FormFieldKind::Text => {
+                let FormFieldValueInput::Text { text } = value else {
+                    return Err(invalid_value("此表单字段只接受文本值。"));
+                };
+                after.value = text;
+                after
+            }
+            FormFieldKind::Checkbox => {
+                let FormFieldValueInput::Checked { checked } = value else {
+                    return Err(invalid_value("此表单字段只接受选中状态。"));
+                };
+                after.checked = checked;
+                after
+            }
+            FormFieldKind::Radio => {
+                if !matches!(value, FormFieldValueInput::Checked { checked: true }) {
+                    return Err(invalid_value(
+                        "单选按钮不能取消选择；请选择组内的另一个选项。",
+                    ));
+                }
+                let index = crate::form_create::created_option_index(&field_id)
+                    .ok_or_else(|| field_not_found(&field_id))?;
+                if index >= before.widgets.len() {
+                    return Err(field_not_found(&field_id));
+                }
+                after.selected_option = Some(index);
+                after
+            }
+            _ => return Err(invalid_value("此表单字段类型不支持填写。")),
         };
-        let base_field = field_id.clone();
+        if after == before {
+            return Ok(FormFieldEditResultView {
+                field_id,
+                fields: discover_all(entry)?,
+                history: entry.edit.history_view(),
+            });
+        }
+        entry.edit.created_fields.restore(after.clone());
+        let history = crate::text_edit::push_form_structure_action(
+            entry,
+            uid,
+            field.page_index,
+            Some(before.snapshot()),
+            Some(after.snapshot()),
+        );
         return Ok(FormFieldEditResultView {
-            field_id: base_field,
+            field_id,
             fields: discover_all(entry)?,
             history,
         });
