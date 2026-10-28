@@ -1,6 +1,7 @@
 pub mod commands;
 pub mod engine;
 pub mod file_association;
+mod fonts;
 pub mod logging;
 mod menu;
 pub mod pdfium_adapter;

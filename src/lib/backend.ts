@@ -200,8 +200,9 @@ export interface TextBoxStyleView {
  *
  * `source` distinguishes PDF base-14 fonts from embedded font programs;
  * `embedded` says whether a program is written into the saved PDF and
- * `coverage` states which characters the font can render. Ticket 11 adds
- * embedded families without changing this shape.
+ * `coverage` states which characters the font can render. The registry lists
+ * the base-14 families plus the bundled Noto Sans SC CJK family; embedded
+ * source fonts in an opened document are reused without appearing here.
  */
 export interface TextBoxFontView {
   family: string;
@@ -516,9 +517,9 @@ export async function deleteTextBox(
 }
 
 /**
- * Lists the fonts the Text Box editor may use. Until the subset-embedding
- * pipeline lands these are the PDF base-14 Latin families only; the metadata
- * already carries `source`, `embedded` and `coverage` for later families.
+ * Lists the fonts the Text Box editor may use: the PDF base-14 Latin families
+ * and the bundled Noto Sans SC CJK family. The metadata carries `source`,
+ * `embedded` and `coverage` so the panel can describe each family honestly.
  */
 export async function textBoxFonts(): Promise<TextBoxFontView[]> {
   return invoke<TextBoxFontView[]>("text_box_fonts");

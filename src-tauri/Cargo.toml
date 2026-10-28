@@ -40,6 +40,10 @@ semver = "1"
 open = { version = "5", features = ["shellexecute-on-windows"] }
 # Glyph coverage checks before rewriting text with an embedded font.
 ttf-parser = "0.25"
+# Builds the CID font subsets embedded for CJK and fallback text. MIT OR
+# Apache-2.0; the default `variable-fonts` feature instances the bundled Noto
+# Sans SC variable font at a concrete weight.
+subsetter = "0.2.6"
 # Appends the object-level revision PDFium cannot write, as one incremental
 # revision after PDFium's (ADR-0004). Pinned to the version probed in the
 # engine spike.
