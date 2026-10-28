@@ -334,6 +334,19 @@ pub(crate) struct OpenDocument {
     /// The Source Document's security, preserved by a recovered Document.
     pub(crate) source_security: DocumentSecurity,
     pub(crate) document: PdfDocument<'static>,
+    /// Snapshots the copied pages were imported from.
+    ///
+    /// Pdfium's page importer clones page content and annotations but not the
+    /// form fields behind widgets that have a `/Parent` (radio groups and
+    /// hierarchical fields): the imported widget keeps a pointer into the
+    /// source document's field objects. Dropping the snapshot while the copy
+    /// is open would leave a dangling field pointer, so snapshots live for the
+    /// whole session and are declared after `document` to be dropped after it.
+    /// Each snapshot holds a full PDFium serialization of the document at copy
+    /// time, so memory grows by roughly one document copy per copied page;
+    /// this is the price of keeping copied widgets usable before the next save
+    /// and is released when the document closes.
+    pub(crate) copy_snapshots: Vec<PdfDocument<'static>>,
 }
 
 #[derive(Default)]
@@ -526,6 +539,7 @@ fn insert_document(
                 permissions,
             },
             document,
+            copy_snapshots: Vec::new(),
         },
     );
 

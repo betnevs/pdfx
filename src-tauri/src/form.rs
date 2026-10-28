@@ -86,6 +86,10 @@ pub struct FormFieldView {
     /// True for a field created by this session; only those fields expose the
     /// property panel and can be deleted before saving.
     pub created: bool,
+    /// The field name Pdfium reports, before copy-page namespacing. Session
+    /// internal: it keys inherited form values and is never sent to the UI.
+    #[serde(skip)]
+    pub(crate) raw_name: String,
 }
 
 fn read_error(context: &str, error: impl std::fmt::Debug) -> CommandError {
@@ -172,11 +176,16 @@ fn apply_choice_overlay(view: &mut FormFieldView, overlay: &FormOverlay) {
     let Some(value) = overlay.choice.get(&view.name) else {
         return;
     };
-    view.value = Some(value.clone());
+    set_choice_label(view, value);
+}
+
+/// Selects the option matching `label` in a choice field view.
+fn set_choice_label(view: &mut FormFieldView, label: &str) {
+    view.value = Some(label.to_owned());
     view.selected_index = view
         .options
         .iter()
-        .position(|option| option == value)
+        .position(|option| option == label)
         .map(|index| index as u32);
     view.selected_indices = view.selected_index.into_iter().collect();
 }
@@ -309,19 +318,31 @@ pub(crate) fn radio_states(source_bytes: &[u8]) -> RadioStates {
 /// setter at all. Those values are recorded by the unified edit history and
 /// written as object-level edits by the save pipeline; discovery overlays them
 /// on top of what Pdfium reports.
-#[derive(Debug, Default, Clone)]
+///
+/// Text and checkbox values are normally written into the PDFium document
+/// directly. On a copied page they are recorded here instead: the copy's
+/// widgets may still share a parent field with the original, so writing
+/// through Pdfium could update the original field's value. The save pipeline
+/// writes the overlay value into the copy's own field object.
+#[derive(Debug, Default, Clone, PartialEq)]
 pub(crate) struct FormOverlay {
     /// Radio group name -> selected on-state name.
     pub(crate) radio: std::collections::HashMap<String, String>,
     /// Choice field name -> selected label.
     pub(crate) choice: std::collections::HashMap<String, String>,
+    /// Text field name -> text value (copied pages only).
+    pub(crate) text: std::collections::HashMap<String, String>,
+    /// Checkbox field name -> checked state (copied pages only).
+    pub(crate) checked: std::collections::HashMap<String, bool>,
 }
 
 /// Derives the overlay from the actions currently applied to the document.
 ///
 /// Walking the undo stack is what makes undo/redo work without a second copy
-/// of form state: the last applied action per field wins.
-pub(crate) fn overlay_for(edit: &EditSession) -> FormOverlay {
+/// of form state: the last applied action per field wins. Text and checkbox
+/// values only enter the overlay for fields on copied pages; everywhere else
+/// Pdfium already holds the value.
+pub(crate) fn overlay_for(edit: &EditSession, pages: &crate::page_ops::PageModel) -> FormOverlay {
     let mut overlay = FormOverlay::default();
     for entry in &edit.undo_stack {
         let EditAction::Field(action) = entry else {
@@ -339,14 +360,25 @@ pub(crate) fn overlay_for(edit: &EditSession) -> FormOverlay {
                 }
             }
         }
-        if let FieldValueSnapshot::Choice(value) = &action.after {
-            if value.is_empty() {
-                overlay.choice.remove(&action.field_name);
-            } else {
-                overlay
-                    .choice
-                    .insert(action.field_name.clone(), value.clone());
+        match &action.after {
+            FieldValueSnapshot::Choice(value) => {
+                if value.is_empty() {
+                    overlay.choice.remove(&action.field_name);
+                } else {
+                    overlay
+                        .choice
+                        .insert(action.field_name.clone(), value.clone());
+                }
             }
+            FieldValueSnapshot::Text(text) if pages.copies.contains_key(&action.page_index) => {
+                overlay.text.insert(action.field_name.clone(), text.clone());
+            }
+            FieldValueSnapshot::Checked(checked)
+                if pages.copies.contains_key(&action.page_index) =>
+            {
+                overlay.checked.insert(action.field_name.clone(), *checked);
+            }
+            _ => {}
         }
     }
     overlay
@@ -354,20 +386,114 @@ pub(crate) fn overlay_for(edit: &EditSession) -> FormOverlay {
 
 /// Object-level edits the save pipeline appends for form values that live in
 /// the history overlay rather than in the PDFium document.
-pub(crate) fn save_object_edits(edit: &EditSession) -> Vec<crate::save::ObjectEdit> {
-    let overlay = overlay_for(edit);
+///
+/// Copied pages contribute two kinds of edits: values the user changed on the
+/// copy (the overlay) and the values the copy inherited from its source page
+/// when it was created (`CopiedPage::inherited`, keyed by the source's raw
+/// field name). An explicit change wins over an inherited value.
+pub(crate) fn save_object_edits(
+    edit: &EditSession,
+    pages: &crate::page_ops::PageModel,
+) -> Vec<crate::save::ObjectEdit> {
+    let overlay = overlay_for(edit, pages);
     let mut edits = Vec::new();
 
-    let mut groups: Vec<_> = overlay.radio.into_iter().collect();
-    groups.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut groups: Vec<_> = overlay.radio.iter().collect();
+    groups.sort_by(|left, right| left.0.cmp(right.0));
     for (field_name, state) in groups {
-        edits.push(crate::save::ObjectEdit::SetRadioGroup { field_name, state });
+        edits.push(crate::save::ObjectEdit::SetRadioGroup {
+            field_name: field_name.clone(),
+            state: state.clone(),
+        });
     }
 
-    let mut choices: Vec<_> = overlay.choice.into_iter().collect();
-    choices.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut choices: Vec<_> = overlay.choice.iter().collect();
+    choices.sort_by(|left, right| left.0.cmp(right.0));
     for (field_name, label) in choices {
-        edits.push(crate::save::ObjectEdit::SetChoiceValue { field_name, label });
+        edits.push(crate::save::ObjectEdit::SetChoiceValue {
+            field_name: field_name.clone(),
+            label: label.clone(),
+        });
+    }
+
+    let mut texts: Vec<_> = overlay.text.iter().collect();
+    texts.sort_by(|left, right| left.0.cmp(right.0));
+    for (field_name, text) in texts {
+        edits.push(crate::save::ObjectEdit::SetTextValue {
+            field_name: field_name.clone(),
+            text: text.clone(),
+        });
+    }
+
+    let mut checked: Vec<_> = overlay.checked.iter().collect();
+    checked.sort_by(|left, right| left.0.cmp(right.0));
+    for (field_name, state) in checked {
+        edits.push(crate::save::ObjectEdit::SetCheckboxValue {
+            field_name: field_name.clone(),
+            checked: *state,
+        });
+    }
+
+    let mut copies: Vec<_> = pages
+        .copies
+        .iter()
+        .filter(|(physical, _)| pages.order.contains(physical))
+        .collect();
+    copies.sort_by_key(|(physical, _)| **physical);
+    for (physical, copy) in copies {
+        let display = |raw: &str| crate::page_ops::copied_field_name(raw, *physical);
+
+        let mut inherited_radio: Vec<_> = copy.inherited.radio.iter().collect();
+        inherited_radio.sort_by(|left, right| left.0.cmp(right.0));
+        for (raw_name, state) in inherited_radio {
+            let field_name = display(raw_name);
+            if overlay.radio.contains_key(&field_name) {
+                continue;
+            }
+            edits.push(crate::save::ObjectEdit::SetRadioGroup {
+                field_name,
+                state: state.clone(),
+            });
+        }
+
+        let mut inherited_choice: Vec<_> = copy.inherited.choice.iter().collect();
+        inherited_choice.sort_by(|left, right| left.0.cmp(right.0));
+        for (raw_name, label) in inherited_choice {
+            let field_name = display(raw_name);
+            if overlay.choice.contains_key(&field_name) {
+                continue;
+            }
+            edits.push(crate::save::ObjectEdit::SetChoiceValue {
+                field_name,
+                label: label.clone(),
+            });
+        }
+
+        let mut inherited_text: Vec<_> = copy.inherited.text.iter().collect();
+        inherited_text.sort_by(|left, right| left.0.cmp(right.0));
+        for (raw_name, text) in inherited_text {
+            let field_name = display(raw_name);
+            if overlay.text.contains_key(&field_name) {
+                continue;
+            }
+            edits.push(crate::save::ObjectEdit::SetTextValue {
+                field_name,
+                text: text.clone(),
+            });
+        }
+
+        let mut inherited_checked: Vec<_> = copy.inherited.checked.iter().collect();
+        inherited_checked.sort_by(|left, right| left.0.cmp(right.0));
+        for (raw_name, state) in inherited_checked {
+            let field_name = display(raw_name);
+            if overlay.checked.contains_key(&field_name) {
+                continue;
+            }
+            edits.push(crate::save::ObjectEdit::SetCheckboxValue {
+                field_name,
+                checked: *state,
+            });
+        }
     }
 
     edits
@@ -381,15 +507,19 @@ struct RadioCursor<'a> {
 }
 
 impl RadioCursor<'_> {
-    fn next(&mut self, name: &str) -> Option<String> {
-        let states = self.states.get(name)?;
-        let used = self.used.entry(name.to_owned()).or_insert(0);
+    /// Hands out the next on-state for a widget. `key` namespaces the counter
+    /// (a copied page has its own widget sequence), while `states_key` names
+    /// the source group whose `/Kids` order the states follow.
+    fn next_for(&mut self, key: &str, states_key: &str) -> Option<String> {
+        let states = self.states.get(states_key)?;
+        let used = self.used.entry(key.to_owned()).or_insert(0);
         let state = states.get(*used).cloned().flatten();
         *used += 1;
         state
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn widget_view(
     annotation: &PdfPageAnnotation<'_>,
     page_index: u32,
@@ -398,6 +528,7 @@ fn widget_view(
     geometry: &DisplayGeometry,
     radio_cursor: &mut RadioCursor<'_>,
     overlay: &FormOverlay,
+    copies: &std::collections::HashMap<u32, crate::page_ops::CopiedPage>,
 ) -> Result<Option<FormFieldView>, CommandError> {
     let Some(field) = annotation.as_form_field() else {
         return Ok(None);
@@ -413,10 +544,16 @@ fn widget_view(
         bounds.top().value,
     );
 
-    let name = field.name().unwrap_or_default();
+    let raw_name = field.name().unwrap_or_default();
+    let copy = copies.get(&page_index);
+    let name = match copy {
+        Some(_) => crate::page_ops::copied_field_name(&raw_name, page_index),
+        None => raw_name.clone(),
+    };
     let mut view = FormFieldView {
         field_id: format!("{page_index}:{annotation_index}"),
         name,
+        raw_name: raw_name.clone(),
         kind: kind_of(field),
         page_index,
         order,
@@ -442,19 +579,72 @@ fn widget_view(
         created: false,
     };
     let radio_state = match field {
-        PdfFormField::RadioButton(_) => radio_cursor.next(&view.name),
+        PdfFormField::RadioButton(_) => radio_cursor.next_for(&view.name, &view.raw_name),
         _ => None,
     };
     describe_value(field, &mut view, radio_state, overlay);
+    if let Some(copy) = copy {
+        apply_copy_values(&mut view, field, overlay, copy);
+    }
     Ok(Some(view))
+}
+
+/// Applies the session overlay and the values a copied page inherited from its
+/// source. An explicit change on the copy always wins over the inherited value,
+/// and both win over what Pdfium reports.
+fn apply_copy_values(
+    view: &mut FormFieldView,
+    field: &PdfFormField<'_>,
+    overlay: &FormOverlay,
+    copy: &crate::page_ops::CopiedPage,
+) {
+    match field {
+        PdfFormField::RadioButton(_) => {
+            if overlay.radio.contains_key(&view.name) {
+                return;
+            }
+            let Some(state) = copy.inherited.radio.get(&view.raw_name) else {
+                return;
+            };
+            view.value = Some(state.clone());
+            view.checked = view.export_value.as_deref() == Some(state.as_str());
+        }
+        PdfFormField::Text(_) => {
+            if let Some(text) = overlay.text.get(&view.name) {
+                view.value = Some(text.clone());
+            } else if let Some(text) = copy.inherited.text.get(&view.raw_name) {
+                view.value = Some(text.clone());
+            }
+        }
+        PdfFormField::Checkbox(_) => {
+            if let Some(checked) = overlay.checked.get(&view.name) {
+                view.checked = *checked;
+            } else if let Some(checked) = copy.inherited.checked.get(&view.raw_name) {
+                view.checked = *checked;
+            }
+        }
+        PdfFormField::ComboBox(_) | PdfFormField::ListBox(_) => {
+            if overlay.choice.contains_key(&view.name) {
+                return;
+            }
+            if let Some(label) = copy.inherited.choice.get(&view.raw_name) {
+                set_choice_label(view, label);
+            }
+        }
+        PdfFormField::PushButton(_) | PdfFormField::Signature(_) | PdfFormField::Unknown(_) => {}
+    }
 }
 
 /// Discovers every interactive widget in document order: page by page, then
 /// each page's annotation order. This is the tab order the UI uses.
+///
+/// Widgets on a page created by `copy_page` are shown under a copy-namespaced
+/// name so their values never resolve to the source page's field.
 pub(crate) fn discover_fields(
     document: &PdfDocument<'static>,
     radio_states: &RadioStates,
     overlay: &FormOverlay,
+    copies: &std::collections::HashMap<u32, crate::page_ops::CopiedPage>,
 ) -> Result<Vec<FormFieldView>, CommandError> {
     let page_count = document.pages().len();
     let mut fields = Vec::new();
@@ -488,6 +678,7 @@ pub(crate) fn discover_fields(
                 &geometry,
                 &mut radio_cursor,
                 overlay,
+                copies,
             )? {
                 fields.push(view);
                 order += 1;
@@ -504,7 +695,8 @@ pub(crate) fn discover_all(entry: &OpenDocument) -> Result<Vec<FormFieldView>, C
     let existing = discover_fields(
         &entry.document,
         &radio_states(&entry.source_bytes),
-        &overlay_for(&entry.edit),
+        &overlay_for(&entry.edit, &entry.pages),
+        &entry.pages.copies,
     )?;
     Ok(crate::form_create::merge_views(
         existing,
@@ -712,39 +904,63 @@ fn snapshot_for(field: &FormFieldView) -> Option<FieldValueSnapshot> {
 }
 
 /// Restores a value recorded in the unified edit history.
+///
+/// Text and checkbox values on a copied page live in the history overlay, not
+/// in Pdfium (the copy's widget can share a parent field with the original), so
+/// restoring them is a no-op here; discovery reads the overlay instead.
 pub(crate) fn apply_field_snapshot(
     document: &PdfDocument<'static>,
     field_id: &str,
     snapshot: &FieldValueSnapshot,
+    pages: &crate::page_ops::PageModel,
 ) -> Result<(), CommandError> {
     match snapshot {
-        FieldValueSnapshot::Text(text) => with_field(document, field_id, |form| match form {
-            PdfFormField::Text(text_field) => text_field.set_value(text).map_err(|error| {
-                CommandError::new(
-                    CommandErrorCode::FormValueInvalid,
-                    format!("could not restore the text value: {error:?}"),
-                )
-            }),
-            _ => Err(field_not_found(field_id)),
-        }),
-        FieldValueSnapshot::Checked(checked) => with_field(document, field_id, |form| {
-            let result = match form {
-                PdfFormField::Checkbox(checkbox) => checkbox.set_checked(*checked),
-                _ => return Err(field_not_found(field_id)),
-            };
-            result.map_err(|error| {
-                CommandError::new(
-                    CommandErrorCode::FormValueInvalid,
-                    format!("could not restore the field value: {error:?}"),
-                )
+        FieldValueSnapshot::Text(text) => {
+            if field_is_on_copy(field_id, pages)? {
+                return Ok(());
+            }
+            with_field(document, field_id, |form| match form {
+                PdfFormField::Text(text_field) => text_field.set_value(text).map_err(|error| {
+                    CommandError::new(
+                        CommandErrorCode::FormValueInvalid,
+                        format!("could not restore the text value: {error:?}"),
+                    )
+                }),
+                _ => Err(field_not_found(field_id)),
             })
-        }),
+        }
+        FieldValueSnapshot::Checked(checked) => {
+            if field_is_on_copy(field_id, pages)? {
+                return Ok(());
+            }
+            with_field(document, field_id, |form| {
+                let result = match form {
+                    PdfFormField::Checkbox(checkbox) => checkbox.set_checked(*checked),
+                    _ => return Err(field_not_found(field_id)),
+                };
+                result.map_err(|error| {
+                    CommandError::new(
+                        CommandErrorCode::FormValueInvalid,
+                        format!("could not restore the field value: {error:?}"),
+                    )
+                })
+            })
+        }
         // Radio selections are restored by the history overlay that discovery
         // reads; nothing is written into the PDFium document for them.
         FieldValueSnapshot::Radio(_) => Ok(()),
         // Choice values are restored by the history overlay, like radios.
         FieldValueSnapshot::Choice(_) => Ok(()),
     }
+}
+
+/// Whether a field id addresses a widget on a page created by `copy_page`.
+fn field_is_on_copy(
+    field_id: &str,
+    pages: &crate::page_ops::PageModel,
+) -> Result<bool, CommandError> {
+    let (page_index, _) = parse_field_id(field_id)?;
+    Ok(pages.copies.contains_key(&page_index))
 }
 
 fn fill_for(
@@ -854,6 +1070,7 @@ fn fill_for(
     }
     let before =
         snapshot_for(&field).ok_or_else(|| invalid_value("this widget type cannot be filled"))?;
+    let is_copy = entry.pages.copies.contains_key(&field.page_index);
 
     let after = match field.kind {
         FormFieldKind::Radio => {
@@ -874,6 +1091,20 @@ fn fill_for(
                 )));
             }
             FieldValueSnapshot::Choice(value.clone())
+        }
+        _ if is_copy => {
+            // Copy-page widgets are filled through the history overlay so the
+            // write can never reach the source page's field object. The save
+            // pipeline applies the value to the copy's own field.
+            match (&field.kind, &value) {
+                (FormFieldKind::Text, FormFieldValueInput::Text { text }) => {
+                    FieldValueSnapshot::Text(text.clone())
+                }
+                (FormFieldKind::Checkbox, FormFieldValueInput::Checked { checked }) => {
+                    FieldValueSnapshot::Checked(*checked)
+                }
+                _ => return Err(invalid_value("this widget type cannot be filled")),
+            }
         }
         _ => {
             apply_input(&entry.document, &field, &value)?;
