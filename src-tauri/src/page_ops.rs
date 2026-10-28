@@ -536,6 +536,15 @@ pub fn copy_page(document_id: String, page_index: u32) -> Result<PageOperationVi
             eprintln!("[pdfx] could not restore copied link destinations: {error:?}");
         }
 
+        // The copy cloned the source page's content objects, so it carries the
+        // active watermark too. Keep it in the watermark's page list: otherwise
+        // a later replace or delete would leave an untracked second layer on
+        // the copied page.
+        if let Err(error) = crate::watermark::track_copied_page(entry, physical_page, new_physical)
+        {
+            eprintln!("[pdfx] could not track the copied page's watermark: {error:?}");
+        }
+
         let mut after = before.clone();
         after.order.insert((page_index + 1) as usize, new_physical);
         after.copies.insert(

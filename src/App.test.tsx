@@ -189,6 +189,7 @@ function installDocumentBackend(overrides: Record<string, CommandHandler> = {}) 
     page_images: () => [],
     page_line_objects: () => [],
     edit_history: () => idleHistory,
+    watermark_state: () => null,
     list_annotations: () => [],
     list_attachments: () => [],
     list_links: () => [],
@@ -763,6 +764,11 @@ describe("PDFX workspace", () => {
     expect(screen.getByRole("button", { name: "保存更改" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "另存为…" })).toBeEnabled();
     expect(screen.getByText(UNENCRYPTED_OUTPUT_WARNING)).toBeInTheDocument();
+    expect(
+      screen.getByText("文档为只读，无法修改水印。"),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "应用水印" })).toBeDisabled();
+    expect(screen.getByLabelText("水印文字")).toBeDisabled();
   });
 
   it("does not report an editable encrypted document as read-only but warns about unencrypted output", async () => {
@@ -2117,6 +2123,80 @@ describe("PDFX workspace", () => {
       ["close_document", { documentId: "doc-1" }],
     ]);
     expect(destroyWindowMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("applies and deletes a watermark from the annotation column and updates dirty and undo availability", async () => {
+    const watermark = {
+      kind: "text",
+      scope: "current",
+      text: "机密",
+      imageName: null,
+      imagePath: null,
+      opacity: 35,
+      rotation: 0,
+      scale: 100,
+      positionX: 0.5,
+      positionY: 0.5,
+      pageIndices: [0],
+    };
+    let history = idleHistory;
+    let active: typeof watermark | null = null;
+    installDocumentBackend({
+      edit_history: () => history,
+      watermark_state: () => active,
+      apply_watermark: () => {
+        history = dirtyHistory;
+        active = watermark;
+        return { watermark, history };
+      },
+      delete_watermark: () => {
+        history = { ...dirtyHistory, revision: 2 };
+        active = null;
+        return { watermark: null, history };
+      },
+    });
+    openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByRole("img", { name: "第 1 页" });
+
+    await user.type(screen.getByLabelText("水印文字"), "机密");
+    await user.click(screen.getByRole("button", { name: "应用水印" }));
+
+    await waitFor(() =>
+      expect(commandCalls("apply_watermark")).toEqual([
+        [
+          "apply_watermark",
+          {
+            documentId: "doc-1",
+            pageIndex: 0,
+            request: expect.objectContaining({
+              scope: "current",
+              kind: "text",
+              text: "机密",
+            }),
+          },
+        ],
+      ]),
+    );
+    expect(await screen.findByText("未保存")).toBeInTheDocument();
+    expect(
+      await screen.findByText("当前水印：文字「机密」（1 页）"),
+    ).toBeInTheDocument();
+    await waitFor(() => expect(lastMenuState().get("edit.undo")).toBe(true));
+
+    await user.click(screen.getByRole("button", { name: "删除水印" }));
+    await waitFor(() =>
+      expect(commandCalls("delete_watermark")).toEqual([
+        ["delete_watermark", { documentId: "doc-1" }],
+      ]),
+    );
+    expect(screen.getByText("已删除水印。")).toBeInTheDocument();
+    expect(
+      screen.queryByText("当前水印：文字「机密」（1 页）"),
+    ).not.toBeInTheDocument();
   });
 
   it("shows the unsaved marker from backend history and clears it on undo to the saved revision", async () => {

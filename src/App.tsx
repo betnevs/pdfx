@@ -4,6 +4,7 @@ import { DocumentAccess } from "./components/DocumentAccess";
 import { AnnotationPanel } from "./components/AnnotationPanel";
 import { AttachmentPanel, attachmentErrorMessage } from "./components/AttachmentPanel";
 import { StampPanel } from "./components/StampPanel";
+import { WatermarkPanel } from "./components/WatermarkPanel";
 import { DocumentToolbar, PageSurface, ThumbnailRail } from "./components/PageViewer";
 import {
   PrintExport,
@@ -569,12 +570,33 @@ export function App() {
         pageIndex: step.pageIndex,
         pageCount: step.pageCount,
         pageStructureChanged: step.pageStructureChanged,
+        // The backend does not report which pages an undo/redo touched, and a
+        // watermark action can span every page, so invalidate all thumbnails.
+        allPagesChanged: true,
       });
     } catch (error) {
       setNotice(toCommandError(error));
     } finally {
       historyActionInFlightRef.current = false;
     }
+  }, []);
+
+  /**
+   * Publishes a watermark change. The panel already adopted the command's
+   * history; thumbnails only need invalidation. An all-pages apply or a
+   * delete spans pages, while a current-page apply refreshes just that page.
+   */
+  const handleWatermarkApplied = useCallback((allPages: boolean) => {
+    const current = editorRef.current;
+    if (current.status !== "open") {
+      return;
+    }
+    notifyDocumentChanged({
+      documentId: current.document.documentId,
+      pageIndex: viewerRef.current.pageIndex,
+      allPagesChanged: allPages,
+      source: "watermark",
+    });
   }, []);
 
   // Windows also accepts Ctrl+Y for redo. The menu item carries a single
@@ -1322,6 +1344,14 @@ export function App() {
                   readOnly={open.document.readOnly}
                   onHistory={(history) => save.acceptHistory(history)}
                   onChanged={() => void attachments.reload()}
+                />
+                <WatermarkPanel
+                  documentId={open.document.documentId}
+                  pageIndex={viewer.pageIndex}
+                  readOnly={open.document.readOnly}
+                  canModifyContent={open.document.permissions.canModifyContent}
+                  onHistory={(history) => save.acceptHistory(history)}
+                  onApplied={handleWatermarkApplied}
                 />
                 <AnnotationPanel
                   documentId={open.document.documentId}

@@ -330,7 +330,7 @@ export function ThumbnailRail({
         if (detail.documentId !== documentId) {
           return;
         }
-        if (detail.pageStructureChanged) {
+        if (detail.pageStructureChanged || detail.allPagesChanged) {
           structureGenerationRef.current += 1;
           cacheRef.current.clear();
           pendingRef.current.clear();

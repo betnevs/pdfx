@@ -599,6 +599,8 @@ pub(crate) enum EditAction {
     Page(crate::page_ops::PageEditAction),
     /// Insertion or deletion of an embedded-file attachment.
     Attachment(crate::attachments::AttachmentEditAction),
+    /// Apply, replace or delete the session's watermark.
+    Watermark(crate::watermark::WatermarkEditAction),
 }
 
 /// The value a field edit restores during undo or redo.
@@ -784,6 +786,10 @@ pub struct EditSession {
     /// character set. Reusing a token prevents a repeated edit from embedding
     /// the same subset twice.
     pub(crate) bundled_fonts: fonts::BundledFontCache,
+    /// The one watermark this session has applied, if any. Its page-object
+    /// ranges are updated by [`shift_object_indexes`] when other edits move
+    /// page objects.
+    pub(crate) watermark: Option<crate::watermark::WatermarkState>,
 }
 
 impl EditSession {
@@ -1139,6 +1145,14 @@ fn target_for(
     let objects = page.objects();
     let object_index = object_index_for_raw_char(&page_text, objects, raw_index)
         .ok_or_else(|| no_editable_text(page_index))?;
+    if crate::watermark::is_watermark_object(entry, page_index, object_index) {
+        // The watermark is page content but not a Text Box; editing it would
+        // move page objects underneath the watermark's tracked range.
+        return Err(CommandError::new(
+            CommandErrorCode::NoEditableText,
+            format!("page {page_index} watermark text is not editable"),
+        ));
+    }
 
     if let Some(record) = entry
         .edit
@@ -1997,6 +2011,17 @@ pub(crate) fn shift_object_indexes(
             }
         }
     }
+    if let Some(state) = session.watermark.as_mut() {
+        if let Some(page) = state
+            .pages
+            .iter_mut()
+            .find(|page| page.physical_page == page_index)
+        {
+            if moves(page.start) {
+                page.start = (page.start as isize + delta).max(0) as usize;
+            }
+        }
+    }
 }
 
 /// Replaces `remove_count` page objects at `start` with `insert_objects` and
@@ -2330,7 +2355,8 @@ fn undo_for(entry: &mut OpenDocument) -> Result<EditStepView, CommandError> {
         | Some(EditAction::Line(_))
         | Some(EditAction::FormStructure(_))
         | Some(EditAction::Page(_))
-        | Some(EditAction::Attachment(_)) => ensure_content_editable(&entry.document)?,
+        | Some(EditAction::Attachment(_))
+        | Some(EditAction::Watermark(_)) => ensure_content_editable(&entry.document)?,
         Some(EditAction::Field(_)) => crate::form::ensure_forms_editable(&entry.document)?,
         Some(EditAction::Annotation(_)) | Some(EditAction::Link(_)) => {
             ensure_annotation_editable(&entry.document)?
@@ -2356,6 +2382,7 @@ fn undo_for(entry: &mut OpenDocument) -> Result<EditStepView, CommandError> {
         EditAction::Link(action) => undo_link(entry, action),
         EditAction::Page(action) => crate::page_ops::undo_page(entry, action),
         EditAction::Attachment(action) => crate::attachments::undo_attachment(entry, action),
+        EditAction::Watermark(action) => crate::watermark::undo_watermark(entry, action),
     }?;
     // Edit actions address physical pages; report the slot the user sees.
     // Page actions already report a logical slot.
@@ -2460,7 +2487,8 @@ fn redo_for(entry: &mut OpenDocument) -> Result<EditStepView, CommandError> {
         | Some(EditAction::Line(_))
         | Some(EditAction::FormStructure(_))
         | Some(EditAction::Page(_))
-        | Some(EditAction::Attachment(_)) => ensure_content_editable(&entry.document)?,
+        | Some(EditAction::Attachment(_))
+        | Some(EditAction::Watermark(_)) => ensure_content_editable(&entry.document)?,
         Some(EditAction::Field(_)) => crate::form::ensure_forms_editable(&entry.document)?,
         Some(EditAction::Annotation(_)) | Some(EditAction::Link(_)) => {
             ensure_annotation_editable(&entry.document)?
@@ -2486,6 +2514,7 @@ fn redo_for(entry: &mut OpenDocument) -> Result<EditStepView, CommandError> {
         EditAction::Link(action) => redo_link(entry, action),
         EditAction::Page(action) => crate::page_ops::redo_page(entry, action),
         EditAction::Attachment(action) => crate::attachments::redo_attachment(entry, action),
+        EditAction::Watermark(action) => crate::watermark::redo_watermark(entry, action),
     }?;
     // Edit actions address physical pages; report the slot the user sees.
     // Page actions already report a logical slot.

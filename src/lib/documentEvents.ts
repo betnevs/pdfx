@@ -30,16 +30,32 @@ export interface DocumentChangedDetail {
    */
   pageStructureChanged?: boolean;
   /**
+   * Every page's content may have changed even though the page order did not,
+   * for example after applying or removing an all-pages watermark, or after an
+   * undo/redo whose affected pages are only known to the backend. Thumbnail
+   * caches must be cleared for every page; page metadata is still valid.
+   */
+  allPagesChanged?: boolean;
+  /**
    * The tool that made the change, when another overlay needs to refresh
    * tool-specific state such as the shared undo availability. Omitted by
    * callers whose command results already carry that state.
    *
    * `"form"` marks a form fill whose overlay already updated from the command
-   * result; `"text"`, `"image"`, `"shape"`, `"line"`, `"link"` and
-   * `"annotation"` mark the Text Box, Image, Shape, Line/Arrow, link and
-   * text-markup edits whose command results returned the new history.
+   * result; `"text"`, `"image"`, `"shape"`, `"line"`, `"link"`,
+   * `"annotation"` and `"watermark"` mark the Text Box, Image, Shape,
+   * Line/Arrow, link, text-markup and watermark edits whose command results
+   * returned the new history.
    */
-  source?: "text" | "image" | "shape" | "line" | "link" | "annotation" | "form";
+  source?:
+    | "text"
+    | "image"
+    | "shape"
+    | "line"
+    | "link"
+    | "annotation"
+    | "watermark"
+    | "form";
 }
 
 export function notifyDocumentChanged(detail: DocumentChangedDetail): void {
@@ -77,6 +93,9 @@ export function onDocumentChanged(
       if (detail.pageStructureChanged === true) {
         message.pageStructureChanged = true;
       }
+      if (detail.allPagesChanged === true) {
+        message.allPagesChanged = true;
+      }
       if (
         detail.source === "text" ||
         detail.source === "image" ||
@@ -84,6 +103,7 @@ export function onDocumentChanged(
         detail.source === "line" ||
         detail.source === "link" ||
         detail.source === "annotation" ||
+        detail.source === "watermark" ||
         detail.source === "form"
       ) {
         message.source = detail.source;

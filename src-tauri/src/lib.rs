@@ -24,6 +24,7 @@ pub mod stamps;
 mod target_path;
 pub mod text_edit;
 pub mod updater;
+pub mod watermark;
 
 use tauri::{Emitter, Manager};
 
@@ -86,6 +87,10 @@ pub fn run() {
             text_edit::undo_text_edit,
             text_edit::redo_text_edit,
             text_edit::mark_document_saved,
+            watermark::apply_watermark,
+            watermark::watermark_image_preview,
+            watermark::watermark_state,
+            watermark::delete_watermark,
             form::form_fields,
             form::missing_required_fields,
             form::fill_form_field,
