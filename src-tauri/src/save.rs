@@ -321,11 +321,12 @@ pub(crate) fn serialize_live_document(
     object_edits.extend(crate::form::save_object_edits(&entry.edit));
     // Created form fields are re-derived from the session on every save, so
     // repeated saves cannot duplicate them and undo/redo is reflected in the
-    // output.
+    // output. Their appearances follow the page's current rotation.
     object_edits.extend(crate::form_create::save_object_edits(
         &entry.edit,
         &entry.pages,
-    ));
+        &entry.document,
+    )?);
     // Every lopdf-side change — object edits, deferred annotation dictionary
     // entries and the page arrangement — is written in one appended revision
     // after PDFium's incremental one, keeping a single writer per revision.

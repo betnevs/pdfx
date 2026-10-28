@@ -3487,6 +3487,76 @@ fn rotated_pages_get_upright_compensated_appearances() {
 }
 
 #[test]
+fn created_field_appearance_follows_a_later_page_rotation() {
+    let pdf = synthetic::rotated_crop_pdf();
+    let dir = support::temp::TempDir::new("create-text-rerotated");
+    let output = dir.path().join("output.pdf");
+
+    let document_id = open_synthetic(&pdf);
+    let mut request = create_request(FormFieldRect {
+        x: 40.0,
+        y: 200.0,
+        width: 180.0,
+        height: 30.0,
+    });
+    request.name = Some("rerotated".to_owned());
+    request.tooltip = None;
+    request.required = false;
+    create_form_text_field(document_id.clone(), 0, request)
+        .expect("create a field on the rotated first page");
+
+    // Rotate the page back to 0 after the field exists. The widget keeps its
+    // user-space rect, so its appearance matrix must be re-derived from the
+    // page's current rotation rather than the rotation at creation time.
+    pdfx_lib::page_ops::rotate_page(document_id.clone(), 0, 270)
+        .expect("rotate the page back to zero");
+    save_as(&document_id, &output);
+
+    let parsed = lopdf::Document::load(&output).expect("parse output");
+    let page_id = *parsed.get_pages().get(&1).expect("page one");
+    let page = parsed
+        .get_object(page_id)
+        .expect("page object")
+        .as_dict()
+        .expect("page dictionary");
+    assert_eq!(
+        page.get(b"Rotate")
+            .and_then(lopdf::Object::as_i64)
+            .unwrap_or(0),
+        0,
+        "the rotation itself is persisted"
+    );
+    let field = field_named(&parsed, "rerotated");
+    let rect = numbers(field.get(b"Rect").expect("/Rect"));
+    assert_rect_close(&rect, [250.0, 120.0, 280.0, 300.0]);
+    let appearance = lopdf_dict(&parsed, field.get(b"AP").expect("/AP"));
+    let normal = appearance.get(b"N").expect("/AP /N");
+    let stream = match normal {
+        lopdf::Object::Reference(id) => parsed.get_object(*id).unwrap().as_stream().unwrap(),
+        other => other.as_stream().unwrap(),
+    };
+    let content = String::from_utf8_lossy(
+        &stream
+            .get_plain_content()
+            .expect("plain appearance content"),
+    )
+    .into_owned();
+    assert!(
+        content.contains("1 0 0 1 250 120 cm"),
+        "appearance must use the current zero rotation: {content}"
+    );
+
+    // The field is still attached and discoverable after reopening.
+    let reopened = open_document(output.to_string_lossy().into_owned(), None)
+        .expect("reopen")
+        .document_id;
+    let fields = form_fields(reopened.clone()).expect("discover fields");
+    assert!(fields.iter().any(|field| field.name == "rerotated"));
+    close_document(reopened).expect("close reopened");
+    close_document(document_id).expect("close document");
+}
+
+#[test]
 fn checkbox_and_radio_appearances_compensate_page_rotation() {
     let pdf = synthetic::rotated_crop_pdf();
     let dir = support::temp::TempDir::new("create-check-radio-rotated");

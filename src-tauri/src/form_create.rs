@@ -19,6 +19,7 @@
 
 use std::collections::HashSet;
 
+use pdfium_render::prelude::PdfDocument;
 use serde::{Deserialize, Serialize};
 
 use crate::commands::{
@@ -1490,6 +1491,41 @@ impl CreatedField {
     }
 }
 
+/// The page's current `/Rotate`. A widget placed before a page rotation still
+/// needs an appearance that matches the final rotation, so the save pipeline
+/// re-reads it instead of trusting the snapshot taken at creation time.
+fn current_rotation(
+    document: &PdfDocument<'static>,
+    physical_page: u32,
+) -> Result<u16, CommandError> {
+    let page = load_page(document, physical_page)?;
+    page.rotation()
+        .map(|rotation| rotation.as_degrees() as u16)
+        .map_err(|error| {
+            CommandError::new(
+                CommandErrorCode::RenderFailed,
+                format!("could not read the rotation of page {physical_page}: {error:?}"),
+            )
+        })
+}
+
+/// Rewrites every rotation carried by a spec. Radio groups store one per kid;
+/// a group's kids all sit on the same page.
+fn with_rotation(mut spec: FormFieldSpec, rotation: u16) -> FormFieldSpec {
+    match &mut spec {
+        FormFieldSpec::Text(spec) => spec.rotation = rotation,
+        FormFieldSpec::Checkbox(spec) => spec.rotation = rotation,
+        FormFieldSpec::Radio(spec) => {
+            for option in &mut spec.options {
+                option.rotation = rotation;
+            }
+        }
+        FormFieldSpec::Choice(spec) => spec.rotation = rotation,
+        FormFieldSpec::Signature(spec) => spec.rotation = rotation,
+    }
+    spec
+}
+
 /// Object-level edits for the fields this session created. One edit carries
 /// every field, so the save pipeline stays at one writer per revision.
 /// Fields on deleted pages are omitted: the page tree no longer references
@@ -1498,44 +1534,33 @@ impl CreatedField {
 pub(crate) fn save_object_edits(
     edit: &EditSession,
     pages: &crate::page_ops::PageModel,
-) -> Vec<crate::save::ObjectEdit> {
+    document: &PdfDocument<'static>,
+) -> Result<Vec<crate::save::ObjectEdit>, CommandError> {
     let mut specs = Vec::new();
     for field in &edit.created_fields.fields {
         if pages.logical(field.page_index).is_none() {
             continue;
         }
-        match field.kind {
-            CreatedFieldKind::Text => {
-                if let Some(spec) = field.text_spec() {
-                    specs.push(FormFieldSpec::Text(spec));
-                }
-            }
-            CreatedFieldKind::Checkbox => {
-                if let Some(spec) = field.checkbox_spec() {
-                    specs.push(FormFieldSpec::Checkbox(spec));
-                }
-            }
-            CreatedFieldKind::Radio => {
-                if let Some(spec) = field.radio_spec() {
-                    specs.push(FormFieldSpec::Radio(spec));
-                }
-            }
+        let rotation = current_rotation(document, field.page_index)?;
+        let spec = match field.kind {
+            CreatedFieldKind::Text => field.text_spec().map(FormFieldSpec::Text),
+            CreatedFieldKind::Checkbox => field.checkbox_spec().map(FormFieldSpec::Checkbox),
+            CreatedFieldKind::Radio => field.radio_spec().map(FormFieldSpec::Radio),
             CreatedFieldKind::ComboBox | CreatedFieldKind::ListBox => {
-                if let Some(spec) = field.choice_spec() {
-                    specs.push(FormFieldSpec::Choice(spec));
-                }
+                field.choice_spec().map(FormFieldSpec::Choice)
             }
-            CreatedFieldKind::Signature => {
-                if let Some(spec) = field.signature_spec() {
-                    specs.push(FormFieldSpec::Signature(spec));
-                }
-            }
+            CreatedFieldKind::Signature => field.signature_spec().map(FormFieldSpec::Signature),
+        };
+        if let Some(spec) = spec {
+            specs.push(with_rotation(spec, rotation));
         }
     }
     if specs.is_empty() {
-        Vec::new()
+        Ok(Vec::new())
     } else {
-        vec![crate::save::ObjectEdit::CreateFormFields { fields: specs }]
+        Ok(vec![crate::save::ObjectEdit::CreateFormFields {
+            fields: specs,
+        }])
     }
 }
 
