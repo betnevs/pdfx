@@ -20,10 +20,11 @@ use std::time::SystemTime;
 
 use pdfx_lib::commands::{
     close_document, discard_recovery, extract_text, forget_recent_file, list_recent_files,
-    open_document, recovery_candidates, restore_recovery,
+    open_document, recovery_candidates, restore_recovery, CommandErrorCode,
 };
 use pdfx_lib::recovery::{
-    maybe_snapshot_at, maybe_snapshot_in, record_recent_document, RecentFilesStore, RecoveryStore,
+    maybe_snapshot_at, maybe_snapshot_in, record_recent_document, RecentFilesStore,
+    RecoverySnapshot, RecoveryStore, METADATA_FORMAT_VERSION,
 };
 use pdfx_lib::save::{save_document_with_progress, SaveDocumentRequest, SaveResultView};
 use pdfx_lib::text_edit::{apply_text_edit, create_text_box, edit_history, CreateTextBoxRequest};
@@ -479,6 +480,209 @@ fn normal_save_and_close_remove_the_recovery_file() {
         source_before,
         "closing a document never writes to the Source Document"
     );
+}
+
+#[test]
+fn a_clean_document_never_creates_a_recovery_file() {
+    let _serial = serial();
+    let dir = TempDir::new("recovery-clean-start");
+    let source = copy_fixture("text", &dir, "source.pdf");
+    let store = RecoveryStore::new(dir.path().join("appdata"));
+    let document = open(&source);
+
+    for now in [0, 2_000, 30_000, 60_000] {
+        assert!(
+            !maybe_snapshot_in(&store, &document.document_id, now)
+                .expect("tick")
+                .written,
+            "a document without unsaved edits has nothing to recover"
+        );
+    }
+    assert!(
+        !store.directory().exists(),
+        "a clean document must not even create the recovery directory"
+    );
+    assert!(store.scan().expect("scan").candidates.is_empty());
+
+    close_document(document.document_id).expect("close document");
+}
+
+#[test]
+fn a_tick_after_save_or_close_cannot_resurrect_the_recovery_file() {
+    let _serial = serial();
+    let dir = TempDir::new("recovery-resurrect");
+    let source = copy_fixture("text", &dir, "source.pdf");
+    let output = dir.path().join("output.pdf");
+    let store = RecoveryStore::new(dir.path().join("appdata"));
+    let document = open(&source);
+
+    create_box(&document.document_id, "Snapshot before the save");
+    assert!(
+        !maybe_snapshot_in(&store, &document.document_id, 0)
+            .expect("tick")
+            .written
+    );
+    let written = maybe_snapshot_in(&store, &document.document_id, 2_000).expect("tick");
+    assert!(written.written);
+    let session = written.session_id.expect("session id");
+
+    save_as(&document.document_id, &output);
+    // A recovery tick that was in flight while the save finished can only run
+    // after the save released the document registry; it then sees a clean
+    // history. Every later tick must also leave the removed file removed.
+    for now in [2_100, 10_000, 30_000, 60_000] {
+        assert!(
+            !maybe_snapshot_in(&store, &document.document_id, now)
+                .expect("tick")
+                .written,
+            "tick at {now} must not rewrite the Recovery File after a save"
+        );
+    }
+    assert!(
+        store
+            .read_snapshot(&session)
+            .expect("read snapshot")
+            .is_none(),
+        "no tick may resurrect the recovery pair after the save removed it"
+    );
+
+    // The same holds after a normal close: the entry is gone, so a late tick
+    // fails with DocumentNotFound and cannot write.
+    create_box(&document.document_id, "Snapshot before the close");
+    assert!(
+        !maybe_snapshot_in(&store, &document.document_id, 100_000)
+            .expect("tick")
+            .written
+    );
+    assert!(
+        maybe_snapshot_in(&store, &document.document_id, 102_000)
+            .expect("tick")
+            .written
+    );
+    let document_id = document.document_id.clone();
+    close_document(document.document_id).expect("close document");
+    let error = maybe_snapshot_in(&store, &document_id, 200_000)
+        .expect_err("a closed document has no recovery tick");
+    assert_eq!(error.code, CommandErrorCode::DocumentNotFound);
+    assert!(store.scan().expect("scan").candidates.is_empty());
+}
+
+#[test]
+fn restoring_reuses_the_previous_output_only_while_it_is_valid() {
+    let _serial = serial();
+    let _app = app_data();
+    let dir = TempDir::new("recovery-output");
+    let source = copy_fixture("text", &dir, "source.pdf");
+    let output = dir.path().join("output.pdf");
+
+    let document = open(&source);
+    create_box(&document.document_id, "Saved edit");
+    save_as(&document.document_id, &output);
+    let recent = list_recent_files().expect("list recent files");
+    assert!(
+        recent
+            .iter()
+            .any(|entry| entry.path == path_string(&output)),
+        "a successful Save As records the Output Document"
+    );
+    create_box(&document.document_id, "Unsaved edit");
+    assert!(
+        !maybe_snapshot_at(&document.document_id, 0)
+            .expect("tick")
+            .written
+    );
+    let session = maybe_snapshot_at(&document.document_id, 2_000)
+        .expect("tick")
+        .session_id
+        .expect("session id");
+    // The crashed process never ran close_document, which is the only reason
+    // its Recovery File survives; the original entry stays open in this test.
+
+    // The restore itself, not only the original open, puts the source back in
+    // the recent-files list.
+    forget_recent_file(path_string(&source)).expect("forget the source");
+    assert!(!list_recent_files()
+        .expect("list recent files")
+        .iter()
+        .any(|entry| entry.path == path_string(&source)));
+
+    // The previous Output Document is gone: the restore must not claim it.
+    fs::remove_file(&output).expect("remove the previous output");
+    let restored = restore_recovery(session.clone()).expect("restore");
+    assert!(restored.recovered);
+    let recent = list_recent_files().expect("list recent files");
+    assert!(
+        recent
+            .iter()
+            .any(|entry| entry.path == path_string(&source)),
+        "a restore records the Source Document"
+    );
+    assert!(
+        restored.output_path.is_none(),
+        "a deleted Output Document cannot remain the save target"
+    );
+    let error = save_document_with_progress(
+        &restored.document_id,
+        SaveDocumentRequest {
+            save_as_path: None,
+            confirm_unencrypted_output: false,
+        },
+        &mut |_| {},
+    )
+    .expect_err("Save Changes without a valid Output Document must use Save As");
+    assert_eq!(error.code, CommandErrorCode::NoOutputDocument);
+    close_document(restored.document_id).expect("close restored");
+
+    // A sidecar that names the Source Document as its Output is refused too.
+    let session_two = "s-output-is-source";
+    global_store()
+        .write_snapshot(
+            &RecoverySnapshot {
+                format_version: METADATA_FORMAT_VERSION,
+                session_id: session_two.to_owned(),
+                source_path: source.clone(),
+                output_path: Some(source.clone()),
+                display_name: "source.pdf".to_owned(),
+                source_encrypted: false,
+                source_read_only: false,
+                source_permissions: None,
+                dirty: true,
+                revision: 4,
+                saved_revision: 3,
+                created_at_millis: 1_700_000_000_000,
+                app_version: "0.1.0".to_owned(),
+            },
+            &fs::read(&source).expect("read source bytes"),
+        )
+        .expect("write the hand-made snapshot");
+    let restored = restore_recovery(session_two.to_owned()).expect("restore hand-made snapshot");
+    assert!(
+        restored.output_path.is_none(),
+        "the Source Document is never a save target"
+    );
+    assert_eq!(restored.path, path_string(&source));
+    close_document(restored.document_id).expect("close restored source-output");
+    // Release the simulated crashed session now that the file assertions are
+    // done; a real crash never reaches this cleanup.
+    close_document(document.document_id).expect("close original");
+}
+
+#[test]
+fn recovery_session_ids_cannot_escape_the_recovery_directory() {
+    let _serial = serial();
+    let _app = app_data();
+
+    for session in ["", "..", "../source", "/tmp/absolute", "s 1", "s.1"] {
+        let error = restore_recovery(session.to_owned())
+            .expect_err("a path-like session id must be rejected");
+        assert_eq!(
+            error.code,
+            CommandErrorCode::InvalidArgument,
+            "restore must reject {session:?} before touching the filesystem"
+        );
+        let error = discard_recovery(session.to_owned()).expect_err("discard must reject it too");
+        assert_eq!(error.code, CommandErrorCode::InvalidArgument);
+    }
 }
 
 #[test]

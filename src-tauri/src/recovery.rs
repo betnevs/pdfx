@@ -54,7 +54,9 @@ pub const SNAPSHOT_MAX_INTERVAL_MS: u64 = 30_000;
 
 const SNAPSHOT_SUFFIX: &str = ".pdfx-recovery.pdf";
 const METADATA_SUFFIX: &str = ".pdfx-recovery.json";
-const METADATA_FORMAT_VERSION: u32 = 1;
+/// Version of the JSON sidecar layout. A sidecar from a newer version is not
+/// offered for restore (the scan discards it) instead of being misread.
+pub const METADATA_FORMAT_VERSION: u32 = 1;
 const MAX_SESSION_ID_CHARS: usize = 128;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -1117,6 +1119,83 @@ mod tests {
     }
 
     #[test]
+    fn scanning_discards_a_newer_format_and_a_mismatched_session() {
+        let dir = scratch_dir("scan-formats");
+        let store = RecoveryStore::new(&dir);
+        let source = dir.join("input.pdf");
+        fs::write(&source, b"%PDF-1.7 source").expect("write source");
+
+        // A sidecar written by a newer app version cannot be understood here.
+        store
+            .write_snapshot(&snapshot("future", &source), b"%PDF-1.7 future")
+            .expect("write future snapshot");
+        let mut future = snapshot("future", &source);
+        future.format_version = METADATA_FORMAT_VERSION + 1;
+        fs::write(
+            store.metadata_path("future").expect("metadata path"),
+            serde_json::to_vec(&future).expect("encode future metadata"),
+        )
+        .expect("rewrite future sidecar");
+
+        // A sidecar whose session id does not match its file name must not be
+        // allowed to describe another session's snapshot.
+        store
+            .write_snapshot(&snapshot("mismatch", &source), b"%PDF-1.7 mismatch")
+            .expect("write mismatched snapshot");
+        let wrong = snapshot("other", &source);
+        fs::write(
+            store.metadata_path("mismatch").expect("metadata path"),
+            serde_json::to_vec(&wrong).expect("encode wrong metadata"),
+        )
+        .expect("rewrite mismatched sidecar");
+
+        let scan = store.scan().expect("scan");
+        assert!(
+            scan.candidates.is_empty(),
+            "a newer format and a mismatched session are not restorable"
+        );
+        assert_eq!(scan.discarded, 2);
+        assert!(!store.metadata_path("future").expect("path").exists());
+        assert!(!store.snapshot_path("future").expect("path").exists());
+        assert!(!store.metadata_path("mismatch").expect("path").exists());
+        assert!(!store.snapshot_path("mismatch").expect("path").exists());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_recovery_path_that_is_a_symlink_to_the_source_is_refused() {
+        let dir = scratch_dir("symlink-conflict");
+        let store = RecoveryStore::new(&dir);
+        fs::create_dir_all(store.directory()).expect("create recovery directory");
+        let source = dir.join("source.pdf");
+        fs::write(&source, b"%PDF-1.7 source").expect("write source");
+
+        let pdf_path = store.snapshot_path("link").expect("snapshot path");
+        std::os::unix::fs::symlink(&source, &pdf_path)
+            .expect("link the snapshot path to the source");
+
+        let error = store
+            .write_snapshot(&snapshot("link", &source), b"%PDF-1.7 snapshot")
+            .expect_err("a symlinked recovery path must not reach the Source Document");
+        assert!(matches!(error, RecoveryError::TargetConflict(_)));
+        assert_eq!(
+            fs::read(&source).expect("re-read source"),
+            b"%PDF-1.7 source",
+            "the Source Document is untouched"
+        );
+        assert!(
+            pdf_path
+                .symlink_metadata()
+                .expect("metadata")
+                .file_type()
+                .is_symlink(),
+            "the refused write does not replace the link either"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn metadata_carries_no_password_or_document_text() {
         let meta = snapshot("session", Path::new("/tmp/input.pdf"));
         let encoded = serde_json::to_string(&meta).expect("encode metadata");
@@ -1163,6 +1242,49 @@ mod tests {
             files[0].name,
             format!("f{}.pdf", MAX_RECENT_FILES + 2),
             "the newest entry is first"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn recent_files_treat_a_corrupt_or_newer_list_as_empty() {
+        let dir = scratch_dir("recent-corrupt");
+        let existing = dir.join("existing.pdf");
+        fs::write(&existing, b"%PDF-1.7").expect("write existing");
+        let list_path = dir.join(RECENT_FILES_FILE_NAME);
+        let entry = serde_json::json!({
+            "path": existing.to_string_lossy(),
+            "name": "existing.pdf",
+            "lastOpenedMillis": 1,
+        });
+
+        fs::write(&list_path, b"{not json").expect("write corrupt list");
+        assert!(RecentFilesStore::new(&dir).list().is_empty());
+        let files = RecentFilesStore::new(&dir)
+            .record(&existing.to_string_lossy(), 2)
+            .expect("record over a corrupt list");
+        assert_eq!(files.len(), 1, "a corrupt list is replaced, not trusted");
+
+        fs::write(
+            &list_path,
+            serde_json::to_vec(&serde_json::json!({
+                "version": 2,
+                "files": [entry],
+            }))
+            .expect("encode newer list"),
+        )
+        .expect("write newer list");
+        let store = RecentFilesStore::new(&dir);
+        assert!(
+            store.list().is_empty(),
+            "a list from a newer version is not misread"
+        );
+        assert_eq!(
+            store
+                .record(&existing.to_string_lossy(), 3)
+                .expect("record over a newer list")
+                .len(),
+            1
         );
         fs::remove_dir_all(&dir).ok();
     }
