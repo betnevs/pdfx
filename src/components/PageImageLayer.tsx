@@ -31,6 +31,7 @@ import {
   type Point,
 } from "../lib/imageGeometry";
 import { LinkTargetDialog } from "./LinkTargetDialog";
+import { SignatureDialog } from "./SignatureDialog";
 
 const READ_ONLY_REASON = "此文档不允许编辑内容";
 const ANNOTATION_PERMISSION_REASON = "此文档不允许添加注释";
@@ -159,6 +160,7 @@ export function PageImageLayer({
   } | null>(null);
   const [linkBusy, setLinkBusy] = useState(false);
   const [linkError, setLinkError] = useState<string | null>(null);
+  const [signatureOpen, setSignatureOpen] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
   const layerRef = useRef<HTMLDivElement>(null);
   const pageKey = useRef<string | null>(null);
@@ -272,6 +274,21 @@ export function PageImageLayer({
     } finally {
       setBusy(false);
     }
+  }
+
+  /**
+   * A signature is committed by its own dialog (which validates and encodes
+   * the payload); the overlay only adopts the canonical command result.
+   */
+  function signatureInserted(image: ImageObjectView) {
+    setImages((list) => [
+      ...list.filter((entry) => entry.imageId !== image.imageId),
+      image,
+    ]);
+    setSelectedId(image.imageId);
+    setSignatureOpen(false);
+    setNotice(null);
+    notifyDocumentChanged({ documentId, pageIndex, source: "image" });
   }
 
   async function removeSelected() {
@@ -506,6 +523,18 @@ export function PageImageLayer({
         </button>
         <button
           type="button"
+          disabled={readOnly || busy}
+          title={
+            readOnly
+              ? READ_ONLY_REASON
+              : "绘制、输入或上传签名并插入当前页"
+          }
+          onClick={() => setSignatureOpen(true)}
+        >
+          插入签名…
+        </button>
+        <button
+          type="button"
           disabled={readOnly || busy || selected === null}
           title={
             readOnly
@@ -558,13 +587,15 @@ export function PageImageLayer({
       {images.map((image) => {
         const rect = previewFor(image, interaction);
         const isSelected = selectedId === image.imageId;
+        const kindLabel = image.kind === "signature" ? "签名" : "图片";
         return (
           <div
             key={image.imageId}
             className={`image-outline${isSelected ? " image-outline--selected" : ""}`}
             role="group"
-            aria-label={`图片 ${image.name}`}
+            aria-label={`${kindLabel} ${image.name}`}
             data-testid={`image-outline-${image.imageId}`}
+            data-kind={image.kind}
             title={
               isSelected && outsidePage
                 ? OUTSIDE_PAGE_WARNING
@@ -579,7 +610,12 @@ export function PageImageLayer({
             }}
             onPointerDown={(event) => startMove(event, image)}
           >
-            <span className="image-outline-label">{image.name}</span>
+            <span className="image-outline-label">
+              {image.kind === "signature" && (
+                <span className="image-outline-kind">签名</span>
+              )}
+              {image.name}
+            </span>
             {isSelected && !readOnly && (
               <>
                 <button
@@ -601,6 +637,18 @@ export function PageImageLayer({
           </div>
         );
       })}
+
+      {signatureOpen &&
+        !readOnly &&
+        createPortal(
+          <SignatureDialog
+            documentId={documentId}
+            pageIndex={pageIndex}
+            onCancel={() => setSignatureOpen(false)}
+            onInserted={signatureInserted}
+          />,
+          document.body,
+        )}
 
       {linkDraft &&
         createPortal(
