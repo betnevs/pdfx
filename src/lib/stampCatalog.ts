@@ -26,10 +26,6 @@ export const STAMP_COLORS: Record<StampKind, string> = {
 
 /** Readable label for one annotation in the document-wide list. */
 export function annotationLabel(annotation: AnnotationView): string {
-  if (annotation.kind === "stamp") {
-    const kind = annotation.stamp?.kind;
-    return kind ? `图章 · ${STAMP_LABELS[kind]}` : "图章";
-  }
   switch (annotation.kind) {
     case "highlight":
       return "高亮";
@@ -37,5 +33,17 @@ export function annotationLabel(annotation: AnnotationView): string {
       return "下划线";
     case "strikeout":
       return "删除线";
+    case "square":
+      return "矩形";
+    case "circle":
+      return "椭圆";
+    case "note":
+      return "便签";
+    case "ink":
+      return "手绘";
+    case "stamp": {
+      const kind = annotation.stamp?.kind;
+      return kind ? `图章 · ${STAMP_LABELS[kind]}` : "图章";
+    }
   }
 }

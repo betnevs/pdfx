@@ -608,6 +608,7 @@ fn stamp_opacity_is_undoable_and_visible_in_rendered_pixels() {
         created.name.clone(),
         "#000000".to_owned(),
         30,
+        None,
     )
     .expect("change stamp opacity")
     .annotation
@@ -822,6 +823,7 @@ fn read_only_documents_refuse_stamp_changes() {
         "missing".to_owned(),
         "#15803d".to_owned(),
         50,
+        None,
     )
     .expect_err("restyling is denied");
     assert_eq!(update_error.code, CommandErrorCode::PermissionDenied);

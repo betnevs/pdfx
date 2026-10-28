@@ -22,10 +22,11 @@ export interface DocumentChangedDetail {
    * callers whose command results already carry that state.
    *
    * `"form"` marks a form fill whose overlay already updated from the command
-   * result; `"text"` and `"image"` mark the Text Box and Image edits whose
-   * command results returned the new history.
+   * result; `"text"`, `"image"`, `"shape"` and `"annotation"` mark the Text
+   * Box, Image, Shape and text-markup edits whose command results returned the
+   * new history.
    */
-  source?: "text" | "image" | "form";
+  source?: "text" | "image" | "shape" | "annotation" | "form";
 }
 
 export function notifyDocumentChanged(detail: DocumentChangedDetail): void {
@@ -57,6 +58,8 @@ export function onDocumentChanged(
       if (
         detail.source === "text" ||
         detail.source === "image" ||
+        detail.source === "shape" ||
+        detail.source === "annotation" ||
         detail.source === "form"
       ) {
         message.source = detail.source;

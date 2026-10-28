@@ -391,6 +391,7 @@ describe("PDFX workspace", () => {
         color: "#ffd400",
         opacity: 50,
         rects: [{ x: 100, y: 100, width: 12, height: 20 }],
+        shape: null,
         stamp: null,
       },
     ];

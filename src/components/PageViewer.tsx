@@ -27,6 +27,7 @@ import type { PageRender, ZoomMode } from "../lib/useDocumentViewer";
 import { FormLayer } from "./FormLayer";
 import { PageImageLayer } from "./PageImageLayer";
 import { PageTextLayer } from "./PageTextLayer";
+import { ShapeLayer } from "./ShapeLayer";
 import { StampLayer } from "./StampLayer";
 
 /** Fixed cell height keeps thumbnail virtualization independent of page sizes. */
@@ -488,7 +489,9 @@ export function PageSurface({
         pageIndex={pageIndex}
         readOnly={readOnly}
         canAnnotate={canAnnotate}
+        annotations={annotations}
         selectedAnnotation={selectedAnnotation}
+        onSelectAnnotation={onSelectAnnotation}
         scale={scale}
       />
       {info && (
@@ -514,6 +517,20 @@ export function PageSurface({
             onFocusField={onFormFocusField}
           />
         </>
+      )}
+      {info && (
+        <ShapeLayer
+          documentId={documentId}
+          pageIndex={pageIndex}
+          pageWidth={info.width}
+          pageHeight={info.height}
+          scale={scale}
+          readOnly={readOnly}
+          canAnnotate={canAnnotate}
+          annotations={annotations}
+          selectedAnnotation={selectedAnnotation}
+          onSelectAnnotation={onSelectAnnotation}
+        />
       )}
       {info && (
         <StampLayer

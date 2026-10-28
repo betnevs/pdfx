@@ -481,6 +481,18 @@ impl<'a> PdfPageAnnotation<'a> {
         }
     }
 
+    /// Returns every stroke in an [PdfPageAnnotationType::Ink] annotation, or
+    /// [PdfiumError::UnknownPdfAnnotationType] if this annotation is not an ink annotation.
+    ///
+    /// Each stroke is a list of page-space points, read through
+    /// `FPDFAnnot_GetInkListPath()`.
+    pub fn ink_strokes(&self) -> Result<Vec<Vec<(f32, f32)>>, PdfiumError> {
+        match self {
+            PdfPageAnnotation::Ink(annotation) => Ok(annotation.ink_strokes()),
+            _ => Err(PdfiumError::UnknownPdfAnnotationType),
+        }
+    }
+
     /// Returns the annotation name (`/NM`), if any.
     ///
     /// The name uniquely identifies the annotation among the annotations on

@@ -11,6 +11,8 @@ import {
 import {
   applyTextBoxStyle,
   applyTextEdit,
+  createInkAnnotation,
+  createNoteAnnotation,
   createTextBox,
   createTextMarkupAnnotation,
   deleteTextBox,
@@ -21,16 +23,19 @@ import {
   textBoxes,
   textEditTarget,
   toCommandError,
+  transformNoteAnnotation,
   transformTextBox,
   undoTextEdit,
   type AnnotationView,
   type CommandError,
   type EditHistoryView,
+  type InkPoint,
   type TextBoxFontView,
   type TextBoxStyleView,
   type TextBoxTargetView,
   type TextLayerView,
   type TextMarkupKind,
+  type TextMarkupRect,
 } from "../lib/backend";
 import { notifyDocumentChanged, onDocumentChanged } from "../lib/documentEvents";
 import {
@@ -100,11 +105,24 @@ type BoxInteraction =
       current: BoxPoint;
     };
 
+type NoteInteraction = {
+  kind: "move" | "resize";
+  annotation: AnnotationView;
+  start: InkPoint;
+  current: InkPoint;
+};
+
 const READ_ONLY_REASON = "此文档不允许编辑内容";
 const SCANNED_REASON = "此页没有可编辑文字";
 const ANNOTATION_PERMISSION_REASON = "此文档不允许添加注释";
 const DEFAULT_MARKUP_COLOR = "#ffd400";
 const DEFAULT_MARKUP_OPACITY = 50;
+const DEFAULT_NOTE_COLOR = "#f9a825";
+const DEFAULT_NOTE_SIZE = 28;
+const MIN_NOTE_SIZE = 12;
+const DEFAULT_INK_COLOR = "#c62828";
+const DEFAULT_INK_OPACITY = 80;
+const DEFAULT_INK_LINE_WIDTH = 3;
 
 export interface PageTextLayerProps {
   documentId: string;
@@ -113,37 +131,64 @@ export interface PageTextLayerProps {
   readOnly?: boolean;
   /** The PDF security handler allows adding and modifying annotations. */
   canAnnotate?: boolean;
+  /** Annotations on this page, used for note overlays and the selection outline. */
+  annotations?: AnnotationView[];
   /** Annotation selected in the document-wide list, outlined on its page. */
   selectedAnnotation?: AnnotationView | null;
+  /** Selects an annotation in the document-wide list's model. */
+  onSelectAnnotation?: (annotation: AnnotationView | null) => void;
   /** Page render scale, used to size the inline editor text. */
   scale?: number;
 }
 
 function TextEditToolbar({
   canEdit,
+  canAnnotate,
   editMode,
   boxMode,
+  noteMode,
+  inkMode,
+  inkColor,
+  inkOpacity,
+  inkLineWidth,
   readOnly,
   busy,
   history,
   notice,
   onToggleEdit,
   onToggleBoxMode,
+  onToggleNoteMode,
+  onToggleInkMode,
+  onInkColor,
+  onInkOpacity,
+  onInkLineWidth,
   onUndo,
   onRedo,
 }: {
   canEdit: boolean;
+  canAnnotate: boolean;
   editMode: boolean;
   boxMode: boolean;
+  noteMode: boolean;
+  inkMode: boolean;
+  inkColor: string;
+  inkOpacity: number;
+  inkLineWidth: number;
   readOnly: boolean;
   busy: boolean;
   history: EditHistoryView | null;
   notice: Notice | null;
   onToggleEdit: () => void;
   onToggleBoxMode: () => void;
+  onToggleNoteMode: () => void;
+  onToggleInkMode: () => void;
+  onInkColor: (color: string) => void;
+  onInkOpacity: (opacity: number) => void;
+  onInkLineWidth: (width: number) => void;
   onUndo: () => void;
   onRedo: () => void;
 }) {
+  const annotationDisabled = !canAnnotate || readOnly || busy;
   return (
     <div
       className="text-edit-toolbar"
@@ -185,6 +230,89 @@ function TextEditToolbar({
       >
         添加文本框
       </button>
+      <span className="toolbar-divider" aria-hidden="true" />
+      <button
+        type="button"
+        className="annotation-note-toggle"
+        aria-pressed={noteMode}
+        disabled={annotationDisabled}
+        title={
+          readOnly
+            ? READ_ONLY_REASON
+            : !canAnnotate
+              ? ANNOTATION_PERMISSION_REASON
+              : noteMode
+                ? "退出便签放置"
+                : "在页面上点击以放置便签"
+        }
+        onClick={onToggleNoteMode}
+      >
+        便签
+      </button>
+      <button
+        type="button"
+        className="annotation-ink-toggle"
+        aria-pressed={inkMode}
+        disabled={annotationDisabled}
+        title={
+          readOnly
+            ? READ_ONLY_REASON
+            : !canAnnotate
+              ? ANNOTATION_PERMISSION_REASON
+              : inkMode
+                ? "退出手绘"
+                : "在页面上按住并拖动以手绘"
+        }
+        onClick={onToggleInkMode}
+      >
+        手绘
+      </button>
+      {inkMode && (
+        <span className="annotation-ink-controls">
+          <label className="text-markup-control">
+            颜色
+            <input
+              type="color"
+              aria-label="画笔颜色"
+              value={inkColor}
+              disabled={busy}
+              onChange={(event) => onInkColor(event.target.value)}
+            />
+          </label>
+          <label className="text-markup-control">
+            透明度
+            <input
+              type="range"
+              aria-label="画笔透明度"
+              min={0}
+              max={100}
+              step={1}
+              value={inkOpacity}
+              disabled={busy}
+              onChange={(event) =>
+                onInkOpacity(Number.parseInt(event.target.value, 10))
+              }
+            />
+            <span>{inkOpacity}%</span>
+          </label>
+          <label className="text-markup-control">
+            线宽
+            <input
+              type="range"
+              aria-label="画笔线宽"
+              min={0.5}
+              max={32}
+              step={0.5}
+              value={inkLineWidth}
+              disabled={busy}
+              onChange={(event) =>
+                onInkLineWidth(Number.parseFloat(event.target.value))
+              }
+            />
+            <span>{inkLineWidth} pt</span>
+          </label>
+        </span>
+      )}
       <span className="toolbar-divider" aria-hidden="true" />
       <button
         type="button"
@@ -235,7 +363,9 @@ export function PageTextLayer({
   pageIndex,
   readOnly = false,
   canAnnotate = false,
+  annotations = [],
   selectedAnnotation = null,
+  onSelectAnnotation,
   scale = 1,
 }: PageTextLayerProps) {
   const [state, setState] = useState<LayerState>({ status: "loading" });
@@ -244,6 +374,17 @@ export function PageTextLayer({
   const [markupColor, setMarkupColor] = useState(DEFAULT_MARKUP_COLOR);
   const [markupOpacity, setMarkupOpacity] = useState(DEFAULT_MARKUP_OPACITY);
   const [markupBusy, setMarkupBusy] = useState(false);
+  const [noteMode, setNoteMode] = useState(false);
+  const [inkMode, setInkMode] = useState(false);
+  const [inkColor, setInkColor] = useState(DEFAULT_INK_COLOR);
+  const [inkOpacity, setInkOpacity] = useState(DEFAULT_INK_OPACITY);
+  const [inkLineWidth, setInkLineWidth] = useState(DEFAULT_INK_LINE_WIDTH);
+  const [inkDraft, setInkDraft] = useState<InkPoint[] | null>(null);
+  const [inkBusy, setInkBusy] = useState(false);
+  const [noteInteraction, setNoteInteraction] = useState<NoteInteraction | null>(
+    null,
+  );
+  const [noteBusy, setNoteBusy] = useState(false);
   const [editMode, setEditMode] = useState(false);
   const [boxMode, setBoxMode] = useState(false);
   const [boxes, setBoxes] = useState<TextBoxTargetView[]>([]);
@@ -257,6 +398,11 @@ export function PageTextLayer({
   const [history, setHistory] = useState<EditHistoryView | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
+  // External overlays (shapes, the annotation list) change the same document
+  // and share this undo stack, so their events re-fetch the history. This
+  // layer's own commands already return the new history, and re-fetching it
+  // here could overwrite that with a slower, stale response.
+  const [historyRefreshKey, setHistoryRefreshKey] = useState(0);
   const surfaceRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const dragAnchor = useRef<number | null>(null);
@@ -279,6 +425,10 @@ export function PageTextLayer({
       setEditor(null);
       setEditMode(false);
       setBoxMode(false);
+      setNoteMode(false);
+      setInkMode(false);
+      setInkDraft(null);
+      setNoteInteraction(null);
       setBoxes([]);
       setSelectedBoxId(null);
       setBoxInteraction(null);
@@ -322,7 +472,7 @@ export function PageTextLayer({
     return () => {
       cancelled = true;
     };
-  }, [documentId]);
+  }, [documentId, historyRefreshKey]);
 
   useEffect(() => {
     if (!boxMode) {
@@ -385,14 +535,12 @@ export function PageTextLayer({
         if (detail.pageIndex === pageIndex) {
           setReloadKey((key) => key + 1);
         }
-        // The undo stack is document-wide: a form fill, an image edit or
-        // another tool's change alters the availability of this toolbar's
+        // The undo stack is document-wide: a form fill, an image edit, a shape
+        // or another tool's change alters the availability of this toolbar's
         // undo/redo buttons. This layer's own commands already returned the
         // new history, so their notification is only for the page content.
         if (detail.source !== "text") {
-          editHistory(documentId)
-            .then((next) => setHistory(next))
-            .catch(() => {});
+          setHistoryRefreshKey((key) => key + 1);
         }
       }),
     [documentId, pageIndex],
@@ -436,32 +584,38 @@ export function PageTextLayer({
   }
 
   const editingBusy = editor?.status === "editing" && editor.busy;
-  const operationBusy = Boolean(editingBusy) || boxBusy || markupBusy;
+  const operationBusy =
+    Boolean(editingBusy) || boxBusy || markupBusy || inkBusy || noteBusy;
+  const annotationTools = canAnnotate && !readOnly;
   const toolbarFor = (canEdit: boolean) => (
     <TextEditToolbar
       canEdit={canEdit}
+      canAnnotate={canAnnotate}
       editMode={editMode}
       boxMode={boxMode}
+      noteMode={noteMode}
+      inkMode={inkMode}
+      inkColor={inkColor}
+      inkOpacity={inkOpacity}
+      inkLineWidth={inkLineWidth}
       readOnly={readOnly}
       busy={operationBusy}
       history={history}
       notice={notice}
       onToggleEdit={toggleEditMode}
       onToggleBoxMode={toggleBoxMode}
+      onToggleNoteMode={toggleNoteMode}
+      onToggleInkMode={toggleInkMode}
+      onInkColor={setInkColor}
+      onInkOpacity={setInkOpacity}
+      onInkLineWidth={setInkLineWidth}
       onUndo={() => void runHistory("undo")}
       onRedo={() => void runHistory("redo")}
     />
   );
 
-  if (!layer || !structure || !layer.hasText) {
-    return (
-      <div className="page-text-layer page-text-layer--message">
-        <span className="text-layer-message" role="status">
-          {SCANNED_REASON}
-        </span>
-        <div className="text-edit-toolbar-holder">{toolbarFor(false)}</div>
-      </div>
-    );
+  if (!layer || !structure) {
+    return null;
   }
 
   const textLayer: TextLayerView = layer;
@@ -483,6 +637,9 @@ export function PageTextLayer({
     }
     setEditMode(true);
     setBoxMode(false);
+    setNoteMode(false);
+    setInkMode(false);
+    setInkDraft(null);
     setBoxInteraction(null);
     setSelection(null);
     setCopyStatus("idle");
@@ -502,6 +659,49 @@ export function PageTextLayer({
     }
     setBoxMode(true);
     setEditMode(false);
+    setNoteMode(false);
+    setInkMode(false);
+    setInkDraft(null);
+    setBoxInteraction(null);
+    setSelection(null);
+    setCopyStatus("idle");
+    setNotice(null);
+  }
+
+  function toggleNoteMode() {
+    if (!annotationTools) {
+      return;
+    }
+    if (noteMode) {
+      setNoteMode(false);
+      return;
+    }
+    setNoteMode(true);
+    setInkMode(false);
+    setInkDraft(null);
+    setEditMode(false);
+    cancelEditor();
+    setBoxMode(false);
+    setBoxInteraction(null);
+    setSelection(null);
+    setCopyStatus("idle");
+    setNotice(null);
+  }
+
+  function toggleInkMode() {
+    if (!annotationTools) {
+      return;
+    }
+    if (inkMode) {
+      setInkMode(false);
+      setInkDraft(null);
+      return;
+    }
+    setInkMode(true);
+    setNoteMode(false);
+    setEditMode(false);
+    cancelEditor();
+    setBoxMode(false);
     setBoxInteraction(null);
     setSelection(null);
     setCopyStatus("idle");
@@ -757,6 +957,8 @@ export function PageTextLayer({
       setSelection(null);
       setSelectedBoxId(null);
       setBoxInteraction(null);
+      setInkDraft(null);
+      setNoteInteraction(null);
       setNotice(null);
       notifyDocumentChanged({
         documentId,
@@ -787,6 +989,208 @@ export function PageTextLayer({
       y: Math.min(Math.max(y, 0), textLayer.pageHeight),
     };
   };
+
+  function clampInPage(value: number, maximum: number): number {
+    return Math.min(Math.max(value, 0), Math.max(0, maximum));
+  }
+
+  function noteRectFrom(
+    interaction: NoteInteraction,
+    current: InkPoint,
+  ): TextMarkupRect {
+    const base = interaction.annotation.rects[0] ?? {
+      x: 0,
+      y: 0,
+      width: DEFAULT_NOTE_SIZE,
+      height: DEFAULT_NOTE_SIZE,
+    };
+    const dx = current.x - interaction.start.x;
+    const dy = current.y - interaction.start.y;
+    if (interaction.kind === "move") {
+      return {
+        x: clampInPage(base.x + dx, textLayer.pageWidth - base.width),
+        y: clampInPage(base.y + dy, textLayer.pageHeight - base.height),
+        width: base.width,
+        height: base.height,
+      };
+    }
+    const maxWidth = textLayer.pageWidth - base.x;
+    const maxHeight = textLayer.pageHeight - base.y;
+    return {
+      x: base.x,
+      y: base.y,
+      width: Math.max(
+        Math.min(MIN_NOTE_SIZE, maxWidth),
+        Math.min(base.width + dx, maxWidth),
+      ),
+      height: Math.max(
+        Math.min(MIN_NOTE_SIZE, maxHeight),
+        Math.min(base.height + dy, maxHeight),
+      ),
+    };
+  }
+
+  function noteRectFor(annotation: AnnotationView): TextMarkupRect {
+    if (
+      noteInteraction !== null &&
+      noteInteraction.annotation.name === annotation.name
+    ) {
+      return noteRectFrom(noteInteraction, noteInteraction.current);
+    }
+    return (
+      annotation.rects[0] ?? {
+        x: 0,
+        y: 0,
+        width: DEFAULT_NOTE_SIZE,
+        height: DEFAULT_NOTE_SIZE,
+      }
+    );
+  }
+
+  async function createNoteAt(point: TextPoint) {
+    if (!annotationTools || noteBusy) {
+      return;
+    }
+    const width = Math.max(
+      1,
+      Math.min(DEFAULT_NOTE_SIZE, textLayer.pageWidth),
+    );
+    const height = Math.max(
+      1,
+      Math.min(DEFAULT_NOTE_SIZE, textLayer.pageHeight),
+    );
+    const rect: TextMarkupRect = {
+      x: clampInPage(point.x - width / 2, textLayer.pageWidth - width),
+      y: clampInPage(point.y - height / 2, textLayer.pageHeight - height),
+      width,
+      height,
+    };
+    setNoteBusy(true);
+    setNotice(null);
+    try {
+      const result = await createNoteAnnotation(documentId, {
+        pageIndex,
+        color: DEFAULT_NOTE_COLOR,
+        opacity: 100,
+        text: "",
+        rect,
+      });
+      setHistory(result.history);
+      setNoteMode(false);
+      onSelectAnnotation?.(result.annotation);
+      notifyDocumentChanged({ documentId, pageIndex });
+    } catch (error) {
+      setNotice({ kind: "error", text: toCommandError(error).message });
+    } finally {
+      setNoteBusy(false);
+    }
+  }
+
+  async function createInk(stroke: InkPoint[]) {
+    if (!annotationTools || inkBusy || stroke.length === 0) {
+      return;
+    }
+    setInkBusy(true);
+    setNotice(null);
+    try {
+      const result = await createInkAnnotation(documentId, {
+        pageIndex,
+        color: inkColor,
+        opacity: inkOpacity,
+        lineWidth: inkLineWidth,
+        strokes: [stroke],
+      });
+      setHistory(result.history);
+      onSelectAnnotation?.(result.annotation);
+      notifyDocumentChanged({ documentId, pageIndex });
+    } catch (error) {
+      setNotice({ kind: "error", text: toCommandError(error).message });
+    } finally {
+      setInkBusy(false);
+    }
+  }
+
+  async function commitNoteRect(
+    annotation: AnnotationView,
+    rect: TextMarkupRect,
+  ) {
+    setNoteBusy(true);
+    setNotice(null);
+    try {
+      const result = await transformNoteAnnotation(
+        documentId,
+        annotation.name,
+        rect,
+      );
+      setHistory(result.history);
+      onSelectAnnotation?.(result.annotation);
+      notifyDocumentChanged({ documentId, pageIndex });
+    } catch (error) {
+      setNotice({ kind: "error", text: toCommandError(error).message });
+    } finally {
+      setNoteBusy(false);
+    }
+  }
+
+  function startNoteInteraction(
+    event: ReactPointerEvent<HTMLElement>,
+    annotation: AnnotationView,
+    kind: "move" | "resize",
+  ) {
+    event.stopPropagation();
+    event.preventDefault();
+    if (!annotationTools || noteBusy) {
+      return;
+    }
+    onSelectAnnotation?.(annotation);
+    const point = pointFromEvent(event);
+    if (!point) {
+      return;
+    }
+    setNoteInteraction({ kind, annotation, start: point, current: point });
+    try {
+      event.currentTarget.setPointerCapture?.(event.pointerId);
+    } catch {
+      // Pointer capture is unavailable in some embedded webviews.
+    }
+  }
+
+  function handleNotePointerMove(event: ReactPointerEvent<HTMLElement>) {
+    if (!noteInteraction) {
+      return;
+    }
+    event.stopPropagation();
+    const point = pointFromEvent(event);
+    if (point) {
+      setNoteInteraction({ ...noteInteraction, current: point });
+    }
+  }
+
+  function finishNoteInteraction(event: ReactPointerEvent<HTMLElement>) {
+    if (!noteInteraction) {
+      return;
+    }
+    event.stopPropagation();
+    const interaction = noteInteraction;
+    setNoteInteraction(null);
+    try {
+      event.currentTarget.releasePointerCapture?.(event.pointerId);
+    } catch {
+      // Pointer capture may never have been acquired.
+    }
+    const point = pointFromEvent(event) ?? interaction.current;
+    const rect = noteRectFrom(interaction, point);
+    const original = interaction.annotation.rects[0];
+    const changed =
+      !original ||
+      Math.abs(rect.x - original.x) > 0.01 ||
+      Math.abs(rect.y - original.y) > 0.01 ||
+      Math.abs(rect.width - original.width) > 0.01 ||
+      Math.abs(rect.height - original.height) > 0.01;
+    if (changed) {
+      void commitNoteRect(interaction.annotation, rect);
+    }
+  }
 
   const selectAt = (
     point: TextPoint,
@@ -890,6 +1294,32 @@ export function PageTextLayer({
       return;
     }
 
+    if (noteMode) {
+      if (!annotationTools || noteBusy) {
+        return;
+      }
+      event.preventDefault();
+      surfaceRef.current?.focus({ preventScroll: true });
+      void createNoteAt(point);
+      return;
+    }
+
+    if (inkMode) {
+      if (!annotationTools || inkBusy) {
+        return;
+      }
+      event.preventDefault();
+      surfaceRef.current?.focus({ preventScroll: true });
+      setNotice(null);
+      setInkDraft([point]);
+      try {
+        event.currentTarget.setPointerCapture?.(event.pointerId);
+      } catch {
+        // Pointer capture is unavailable in some embedded webviews.
+      }
+      return;
+    }
+
     if (boxMode) {
       if (editor || boxBusy) {
         return;
@@ -946,6 +1376,16 @@ export function PageTextLayer({
   };
 
   const handlePointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (inkDraft) {
+      const point = pointFromEvent(event);
+      if (point) {
+        const last = inkDraft[inkDraft.length - 1];
+        if (Math.hypot(point.x - last.x, point.y - last.y) >= 0.75) {
+          setInkDraft([...inkDraft, point]);
+        }
+      }
+      return;
+    }
     if (boxInteraction?.kind === "create") {
       const point = pointFromEvent(event);
       if (point) {
@@ -988,6 +1428,24 @@ export function PageTextLayer({
   };
 
   const endDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (inkDraft) {
+      const stroke = [...inkDraft];
+      const point = pointFromEvent(event);
+      if (point) {
+        const last = stroke[stroke.length - 1];
+        if (Math.hypot(point.x - last.x, point.y - last.y) >= 0.5) {
+          stroke.push(point);
+        }
+      }
+      setInkDraft(null);
+      try {
+        event.currentTarget.releasePointerCapture?.(event.pointerId);
+      } catch {
+        // Pointer capture may never have been acquired.
+      }
+      void createInk(stroke);
+      return;
+    }
     if (boxInteraction?.kind === "rotate") {
       const interaction = boxInteraction;
       setBoxInteraction(null);
@@ -1084,6 +1542,8 @@ export function PageTextLayer({
 
   const cancelBoxInteraction = (event: ReactPointerEvent<HTMLDivElement>) => {
     setBoxInteraction(null);
+    setInkDraft(null);
+    setNoteInteraction(null);
     dragAnchor.current = null;
     try {
       event.currentTarget.releasePointerCapture?.(event.pointerId);
@@ -1093,7 +1553,7 @@ export function PageTextLayer({
   };
 
   const handleDoubleClick = (event: ReactMouseEvent<HTMLDivElement>) => {
-    if (editMode || boxMode) {
+    if (editMode || boxMode || noteMode || inkMode) {
       return;
     }
     const point = pointFromEvent(event);
@@ -1105,7 +1565,7 @@ export function PageTextLayer({
   };
 
   const handleClick = (event: ReactMouseEvent<HTMLDivElement>) => {
-    if (editMode || boxMode || event.detail !== 3) {
+    if (editMode || boxMode || noteMode || inkMode || event.detail !== 3) {
       return;
     }
     const point = pointFromEvent(event);
@@ -1175,6 +1635,9 @@ export function PageTextLayer({
         cancelEditor();
         return;
       }
+      if (inkDraft) {
+        setInkDraft(null);
+      }
       setSelection(null);
       setCopyStatus("idle");
       return;
@@ -1201,6 +1664,10 @@ export function PageTextLayer({
   };
 
   const highlights = selection ? selectionRects(textStructure, selection) : [];
+  const pageNotes = annotations.filter(
+    (annotation) =>
+      annotation.pageIndex === pageIndex && annotation.kind === "note",
+  );
   const selectedCharacterCount = selection
     ? [...selectionText(textLayer, selection)].length
     : 0;
@@ -1264,9 +1731,15 @@ export function PageTextLayer({
       ref={surfaceRef}
       className={`page-text-layer${editMode ? " page-text-layer--editing" : ""}${
         boxMode ? " page-text-layer--box-mode" : ""
+      }${noteMode ? " page-text-layer--note-mode" : ""}${
+        inkMode ? " page-text-layer--ink-mode" : ""
+      }${!textLayer.hasText ? " page-text-layer--message" : ""}${
+        !textLayer.hasText && annotationTools
+          ? " page-text-layer--annotation-tools"
+          : ""
       }`}
-      role="region"
-      aria-label="文本层"
+      role={textLayer.hasText || annotationTools ? "region" : undefined}
+      aria-label={textLayer.hasText || annotationTools ? "文本层" : undefined}
       tabIndex={0}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
@@ -1276,7 +1749,13 @@ export function PageTextLayer({
       onClick={handleClick}
       onKeyDown={handleKeyDown}
     >
-      {toolbarFor(true)}
+      {toolbarFor(textLayer.hasText)}
+
+      {!textLayer.hasText && (
+        <span className="text-layer-message" role="status">
+          {SCANNED_REASON}
+        </span>
+      )}
 
       {highlights.map((rect, index) => (
         <div
@@ -1294,6 +1773,7 @@ export function PageTextLayer({
       ))}
 
       {selectedAnnotation?.pageIndex === pageIndex &&
+        selectedAnnotation.kind !== "note" &&
         selectedAnnotation.kind !== "stamp" &&
         selectedAnnotation.rects.map((rect, index) => (
           <div
@@ -1310,6 +1790,100 @@ export function PageTextLayer({
             }}
           />
         ))}
+
+      {pageNotes.map((annotation) => {
+        const rect = noteRectFor(annotation);
+        const selected = selectedAnnotation?.name === annotation.name;
+        return (
+          <div
+            key={`note:${annotation.name}`}
+            className={`annotation-note${selected ? " annotation-note--selected" : ""}`}
+            role="button"
+            tabIndex={0}
+            aria-label={`便签：${annotation.text?.trim() || "空白"}`}
+            aria-pressed={selected}
+            data-testid="note-annotation"
+            title={annotation.text?.trim() || "空白便签"}
+            style={{
+              left: `${(rect.x / textLayer.pageWidth) * 100}%`,
+              top: `${(rect.y / textLayer.pageHeight) * 100}%`,
+              width: `${(rect.width / textLayer.pageWidth) * 100}%`,
+              height: `${(rect.height / textLayer.pageHeight) * 100}%`,
+              borderColor: selected ? annotation.color : "transparent",
+            }}
+            onPointerDown={(event) =>
+              startNoteInteraction(event, annotation, "move")
+            }
+            onPointerMove={handleNotePointerMove}
+            onPointerUp={finishNoteInteraction}
+            onPointerCancel={finishNoteInteraction}
+            onClick={(event) => {
+              event.stopPropagation();
+              onSelectAnnotation?.(annotation);
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                onSelectAnnotation?.(annotation);
+              }
+            }}
+          >
+            <span
+              className="annotation-note-mark"
+              aria-hidden="true"
+              style={{
+                backgroundColor: annotation.color,
+                opacity: annotation.opacity / 100,
+              }}
+            />
+            {selected && (
+              <button
+                type="button"
+                className="annotation-note-handle"
+                aria-label="调整便签大小"
+                data-testid="note-resize-handle"
+                onPointerDown={(event) =>
+                  startNoteInteraction(event, annotation, "resize")
+                }
+                onPointerMove={handleNotePointerMove}
+                onPointerUp={finishNoteInteraction}
+                onPointerCancel={finishNoteInteraction}
+              />
+            )}
+          </div>
+        );
+      })}
+
+      {inkDraft && inkDraft.length > 0 && (
+        <svg
+          className="annotation-ink-draft"
+          data-testid="ink-draft"
+          aria-hidden="true"
+          viewBox={`0 0 ${textLayer.pageWidth} ${textLayer.pageHeight}`}
+          preserveAspectRatio="none"
+        >
+          {inkDraft.length === 1 ? (
+            <circle
+              cx={inkDraft[0].x}
+              cy={inkDraft[0].y}
+              r={inkLineWidth / 2}
+              fill={inkColor}
+              fillOpacity={inkOpacity / 100}
+            />
+          ) : (
+            <polyline
+              points={inkDraft.map((point) => `${point.x},${point.y}`).join(" ")}
+              fill="none"
+              stroke={inkColor}
+              strokeOpacity={inkOpacity / 100}
+              strokeWidth={inkLineWidth}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              vectorEffect="non-scaling-stroke"
+            />
+          )}
+        </svg>
+      )}
 
       {boxMode && (
         <div className="text-box-overlay">

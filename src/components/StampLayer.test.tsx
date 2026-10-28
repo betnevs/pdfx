@@ -42,7 +42,11 @@ const approved: AnnotationView = {
   createdAt: "D:20261028123456Z",
   color: "#15803d",
   opacity: 100,
+  lineWidth: null,
+  text: null,
+  strokes: [],
   rects: [{ x: 216, y: 366, width: 180, height: 60 }],
+  shape: null,
   stamp: {
     kind: "approved",
     frame: { x: 216, y: 366, width: 180, height: 60, rotation: 0 },

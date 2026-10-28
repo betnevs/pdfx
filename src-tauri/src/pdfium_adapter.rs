@@ -88,6 +88,13 @@ pub enum TextMarkupAnnotationKind {
     Strikeout,
 }
 
+/// The geometric annotations PDFX creates through PDFium.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShapeAnnotationKind {
+    Square,
+    Circle,
+}
+
 /// How [PdfiumAdapter::save()] should write the document.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SaveMode {
@@ -266,8 +273,87 @@ pub fn create_stamp_annotation(
     let mut page = pages.get(page_index)?;
     let annotations = page.annotations_mut();
     let mut annotation = annotations.create_stamp_annotation()?;
-    annotation.set_bounds(rect.to_pdf_rect())?;
+    let result = annotation.set_bounds(rect.to_pdf_rect());
     annotation.close();
+    result?;
+    Ok(AnnotationRef::new(page_index, annotations.len() - 1))
+}
+
+/// Creates a sticky-note annotation (`/Subtype /Text`) with `text` contents and
+/// `rect` bounds.
+///
+/// Pdfium does not generate an icon appearance for the annotation in this
+/// build, so callers install one with [`set_annotation_appearance`] before
+/// saving.
+pub fn create_text_annotation(
+    document: &PdfDocument<'_>,
+    page_index: i32,
+    text: &str,
+    rect: AnnotationRect,
+) -> Result<AnnotationRef, AdapterError> {
+    let pages = document.pages();
+    let mut page = pages.get(page_index)?;
+    let annotations = page.annotations_mut();
+    let mut annotation = annotations.create_text_annotation(text)?;
+    let result = annotation.set_bounds(rect.to_pdf_rect());
+    annotation.close();
+    result?;
+    Ok(AnnotationRef::new(page_index, annotations.len() - 1))
+}
+
+/// Creates an ink annotation (`/Subtype /Ink`) with `rect` bounds.
+///
+/// Add strokes with [`append_ink_strokes`]; Pdfium does not generate an
+/// appearance, so callers install one with [`set_annotation_appearance`].
+pub fn create_ink_annotation(
+    document: &PdfDocument<'_>,
+    page_index: i32,
+    rect: AnnotationRect,
+) -> Result<AnnotationRef, AdapterError> {
+    let pages = document.pages();
+    let mut page = pages.get(page_index)?;
+    let annotations = page.annotations_mut();
+    let mut annotation = annotations.create_ink_annotation()?;
+    let result = annotation.set_bounds(rect.to_pdf_rect());
+    annotation.close();
+    result?;
+    Ok(AnnotationRef::new(page_index, annotations.len() - 1))
+}
+
+/// Creates a square or circle annotation with `rect` bounds.
+///
+/// Pdfium does not generate an appearance for the annotation; callers install
+/// one with [`set_annotation_appearance`] before saving. Set the border and
+/// colours first: Pdfium drops a custom appearance when the border is set and
+/// refuses colour changes once an appearance exists.
+pub fn create_shape_annotation(
+    document: &PdfDocument<'_>,
+    page_index: i32,
+    kind: ShapeAnnotationKind,
+    rect: AnnotationRect,
+) -> Result<AnnotationRef, AdapterError> {
+    let pages = document.pages();
+    let mut page = pages.get(page_index)?;
+    let annotations = page.annotations_mut();
+
+    // Set the bounds Pdfium uses for the appearance Form XObject /BBox, then
+    // close the creation handle. The concrete types differ, so the shared work
+    // is repeated per arm as in `create_text_markup_annotation`.
+    match kind {
+        ShapeAnnotationKind::Square => {
+            let mut annotation = annotations.create_square_annotation()?;
+            let result = annotation.set_bounds(rect.to_pdf_rect());
+            annotation.close();
+            result?;
+        }
+        ShapeAnnotationKind::Circle => {
+            let mut annotation = annotations.create_circle_annotation()?;
+            let result = annotation.set_bounds(rect.to_pdf_rect());
+            annotation.close();
+            result?;
+        }
+    }
+
     Ok(AnnotationRef::new(page_index, annotations.len() - 1))
 }
 
@@ -315,6 +401,28 @@ pub fn set_annotation_author(
 ) -> Result<(), AdapterError> {
     with_annotation_on(document, target, |annotation| {
         annotation.set_creator(author)
+    })
+}
+
+/// Returns the annotation contents (`/Contents`), if any.
+///
+/// Sticky notes keep their text here; the value is also a human-readable
+/// description for every other annotation type.
+pub fn annotation_contents(
+    document: &PdfDocument<'_>,
+    target: AnnotationRef,
+) -> Result<Option<String>, AdapterError> {
+    with_annotation_on(document, target, |annotation| Ok(annotation.contents()))
+}
+
+/// Sets the annotation contents (`/Contents`).
+pub fn set_annotation_contents(
+    document: &PdfDocument<'_>,
+    target: AnnotationRef,
+    contents: &str,
+) -> Result<(), AdapterError> {
+    with_annotation_on(document, target, |annotation| {
+        annotation.set_contents(contents)
     })
 }
 
@@ -379,7 +487,7 @@ pub fn annotation_bounds(
     })
 }
 
-/// Returns the annotation color as RGBA bytes.
+/// Returns the annotation stroke colour as RGBA bytes.
 pub fn annotation_color(
     document: &PdfDocument<'_>,
     target: AnnotationRef,
@@ -391,7 +499,19 @@ pub fn annotation_color(
     })
 }
 
-/// Sets the annotation color and its constant opacity.
+/// Returns the annotation fill (interior) colour as RGBA bytes.
+pub fn annotation_fill_color(
+    document: &PdfDocument<'_>,
+    target: AnnotationRef,
+) -> Result<(u8, u8, u8, u8), AdapterError> {
+    with_annotation_on(document, target, |annotation| {
+        annotation
+            .fill_color()
+            .map(|color| (color.red(), color.green(), color.blue(), color.alpha()))
+    })
+}
+
+/// Sets the annotation stroke colour and its constant opacity.
 pub fn set_annotation_color(
     document: &PdfDocument<'_>,
     target: AnnotationRef,
@@ -405,6 +525,64 @@ pub fn set_annotation_color(
     })
 }
 
+/// Sets the annotation fill (interior) colour and its constant opacity.
+pub fn set_annotation_fill_color(
+    document: &PdfDocument<'_>,
+    target: AnnotationRef,
+    red: u8,
+    green: u8,
+    blue: u8,
+    alpha: u8,
+) -> Result<(), AdapterError> {
+    with_annotation_on(document, target, |annotation| {
+        annotation.set_fill_color(PdfColor::new(red, green, blue, alpha))
+    })
+}
+
+/// Returns the annotation border width in default user space units.
+pub fn annotation_border_width(
+    document: &PdfDocument<'_>,
+    target: AnnotationRef,
+) -> Result<f32, AdapterError> {
+    with_annotation_on(document, target, |annotation| annotation.border_width())
+}
+
+/// Sets the annotation border width (`/BS /W`).
+///
+/// Pdfium drops any existing appearance stream when the border is set, so this
+/// must run before [`set_annotation_appearance`].
+pub fn set_annotation_border_width(
+    document: &PdfDocument<'_>,
+    target: AnnotationRef,
+    width: f32,
+) -> Result<(), AdapterError> {
+    with_annotation_on(document, target, |annotation| {
+        annotation.set_border_width(width)
+    })
+}
+
+/// Returns every `/InkList` stroke of an ink annotation as page-space points.
+pub fn annotation_ink_strokes(
+    document: &PdfDocument<'_>,
+    target: AnnotationRef,
+) -> Result<Vec<Vec<(f32, f32)>>, AdapterError> {
+    with_annotation_on(document, target, |annotation| annotation.ink_strokes())
+}
+
+/// Appends ink strokes to an ink annotation.
+pub fn append_ink_strokes(
+    document: &PdfDocument<'_>,
+    target: AnnotationRef,
+    strokes: &[Vec<(f32, f32)>],
+) -> Result<(), AdapterError> {
+    with_annotation_on(document, target, |annotation| {
+        for stroke in strokes {
+            annotation.add_ink_stroke(stroke)?;
+        }
+        Ok(())
+    })
+}
+
 /// Returns the annotation's attachment points (`/QuadPoints`) in PDF user
 /// space, each as `[x1, y1, x2, y2, x3, y3, x4, y4]`.
 pub fn annotation_quads(
@@ -412,24 +590,22 @@ pub fn annotation_quads(
     target: AnnotationRef,
 ) -> Result<Vec<[f32; 8]>, AdapterError> {
     with_annotation_on(document, target, |annotation| {
-        with_text_markup!(annotation, annotation => {
-            Ok(annotation
-                .attachment_points()
-                .iter()
-                .map(|quad| {
-                    [
-                        quad.x1().value,
-                        quad.y1().value,
-                        quad.x2().value,
-                        quad.y2().value,
-                        quad.x3().value,
-                        quad.y3().value,
-                        quad.x4().value,
-                        quad.y4().value,
-                    ]
-                })
-                .collect())
-        })
+        Ok(annotation
+            .attachment_points()
+            .iter()
+            .map(|quad| {
+                [
+                    quad.x1().value,
+                    quad.y1().value,
+                    quad.x2().value,
+                    quad.y2().value,
+                    quad.x3().value,
+                    quad.y3().value,
+                    quad.x4().value,
+                    quad.y4().value,
+                ]
+            })
+            .collect())
     })
 }
 
@@ -560,13 +736,29 @@ impl<'a> PdfiumAdapter<'a> {
         page_index: i32,
         rect: AnnotationRect,
     ) -> Result<AnnotationRef, AdapterError> {
-        let pages = self.document.pages();
-        let mut page = pages.get(page_index)?;
-        let annotations = page.annotations_mut();
-        let mut annotation = annotations.create_circle_annotation()?;
-        annotation.set_bounds(rect.to_pdf_rect())?;
-        annotation.close();
-        Ok(AnnotationRef::new(page_index, annotations.len() - 1))
+        create_shape_annotation(
+            &self.document,
+            page_index,
+            ShapeAnnotationKind::Circle,
+            rect,
+        )
+    }
+
+    /// Creates a square annotation covering `rect` on page `page_index`.
+    ///
+    /// Pdfium does not generate an appearance for the annotation, so set a
+    /// border and/or a custom appearance stream before saving.
+    pub fn create_square_annotation(
+        &self,
+        page_index: i32,
+        rect: AnnotationRect,
+    ) -> Result<AnnotationRef, AdapterError> {
+        create_shape_annotation(
+            &self.document,
+            page_index,
+            ShapeAnnotationKind::Square,
+            rect,
+        )
     }
 
     /// Creates an ink annotation covering `rect` on page `page_index`.
