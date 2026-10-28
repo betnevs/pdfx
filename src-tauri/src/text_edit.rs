@@ -26,6 +26,7 @@ use crate::commands::{
     build_text_layer_with_raw_indices, load_page, with_open_document, CommandError,
     CommandErrorCode, DisplayGeometry, OpenDocument,
 };
+use crate::fonts;
 
 /// Horizontal alignment of the lines inside a Text Box.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -41,8 +42,8 @@ pub enum TextAlignment {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TextBoxStyleView {
-    /// One of the three base-14 families currently offered: Helvetica, Times
-    /// or Courier. Ticket 11 can widen this list through [`text_box_fonts`].
+    /// A family advertised by [`text_box_fonts`]: one of the base-14 families
+    /// (Helvetica, Times, Courier) or the bundled Noto Sans SC.
     pub font_family: String,
     pub font_size: f32,
     pub bold: bool,
@@ -55,11 +56,10 @@ pub struct TextBoxStyleView {
 
 /// One font the Text Box editor may use.
 ///
-/// The metadata is deliberately explicit so a later font pipeline (ticket 11)
-/// can add embedded TrueType families without changing the command shape:
-/// `source` distinguishes PDF base-14 fonts from embedded font programs,
-/// `embedded` says whether a program must be written into the PDF, and
-/// `coverage` states which characters the font can render.
+/// The metadata is deliberately explicit so the style panel can describe each
+/// family honestly: `source` distinguishes PDF base-14 fonts from embedded
+/// font programs, `embedded` says whether a program must be written into the
+/// PDF, and `coverage` states which characters the font can render.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TextBoxFontView {
@@ -68,13 +68,14 @@ pub struct TextBoxFontView {
     pub bold: bool,
     pub italic: bool,
     pub postscript_name: String,
-    /// `base14` for the built-in fonts. Ticket 11 adds `embedded`.
+    /// `base14` for the built-in fonts, `embedded` for the bundled Noto Sans
+    /// SC program that is subset into the saved PDF.
     pub source: String,
     /// True when the font program is embedded in the saved PDF.
     pub embedded: bool,
     /// True when the project may freely embed the font.
     pub embeddable: bool,
-    /// `win_ansi` for base-14. Ticket 11 adds `cjk`/`full`.
+    /// `win_ansi` for base-14, `cjk` for the bundled family.
     pub coverage: String,
 }
 
@@ -87,10 +88,10 @@ struct Base14Font {
     builtin: PdfFontBuiltin,
 }
 
-/// The only fonts offered for new Text Boxes until the subset-embedding
-/// pipeline lands: the PDF base-14 Latin families and their four variants.
-/// They need no font program in the document, so using them is always within
-/// the project's embedding policy (ADR-0006).
+/// The PDF base-14 Latin families and their four variants. They need no font
+/// program in the document, so using them is always within the project's
+/// embedding policy (ADR-0006). The bundled Noto Sans SC entry is added
+/// separately by [`text_box_fonts`].
 const BASE14_FONTS: [Base14Font; 12] = [
     Base14Font {
         family: "Helvetica",
@@ -192,13 +193,13 @@ const BASE14_FONTS: [Base14Font; 12] = [
 
 /// The `text_box_fonts` command: every font the Text Box editor may use.
 ///
-/// These are base-14 fonts: the PDF viewer supplies the program, so nothing is
-/// embedded and only WinAnsi text is safe. The registry is flat (one entry per
-/// family/variant) so ticket 11 can append embedded families with their own
-/// coverage without redesigning the UI contract.
+/// The base-14 fonts need no program in the document and cover WinAnsi. Noto
+/// Sans SC is bundled with the app (SIL OFL 1.1) and embedded as a per-Text
+/// Box subset, which is what makes Chinese and mixed Chinese/Latin text
+/// editable; `coverage` tells the panel what it can render.
 #[tauri::command]
 pub fn text_box_fonts() -> Vec<TextBoxFontView> {
-    BASE14_FONTS
+    let mut fonts: Vec<TextBoxFontView> = BASE14_FONTS
         .iter()
         .map(|font| TextBoxFontView {
             family: font.family.to_owned(),
@@ -211,7 +212,22 @@ pub fn text_box_fonts() -> Vec<TextBoxFontView> {
             embeddable: true,
             coverage: "win_ansi".to_owned(),
         })
-        .collect()
+        .collect();
+    let bundled = crate::fonts::noto_sans_sc();
+    fonts.push(TextBoxFontView {
+        family: bundled.family.to_owned(),
+        label: bundled.label.to_owned(),
+        // The bundled font is a variable TrueType instance: bold is a real
+        // weight, italic has no face and is refused by `TextBoxStyle`.
+        bold: false,
+        italic: false,
+        postscript_name: bundled.postscript_name.to_owned(),
+        source: "embedded".to_owned(),
+        embedded: true,
+        embeddable: true,
+        coverage: "cjk".to_owned(),
+    });
+    fonts
 }
 
 fn base14_font(family: &str, bold: bool, italic: bool) -> Option<&'static Base14Font> {
@@ -265,12 +281,26 @@ impl TextBoxStyle {
 
     fn from_view(view: &TextBoxStyleView) -> Result<Self, CommandError> {
         let family = view.font_family.trim();
-        if builtin_for_style(family, view.bold, view.italic).is_none() {
-            let available: Vec<&str> = BASE14_FONTS.iter().map(|font| font.label).collect();
+        let bundled = fonts::is_bundled_family(family);
+        if bundled {
+            // Noto Sans SC is a variable font with a weight axis but no italic
+            // face. Refusing italic is clearer than silently dropping it.
+            if view.italic {
+                return Err(CommandError::new(
+                    CommandErrorCode::UnsupportedFont,
+                    format!(
+                        "font {} has no italic variant; clear italic or choose a base-14 italic font",
+                        fonts::NOTO_SANS_SC_FAMILY
+                    ),
+                ));
+            }
+        } else if builtin_for_style(family, view.bold, view.italic).is_none() {
+            let mut available: Vec<&str> = BASE14_FONTS.iter().map(|font| font.label).collect();
+            available.push(fonts::noto_sans_sc().label);
             return Err(CommandError::new(
                 CommandErrorCode::UnsupportedFont,
                 format!(
-                    "font {:?} is not available; use one of the built-in base-14 fonts: {}",
+                    "font {:?} is not available; use one of the built-in fonts: {}",
                     view.font_family,
                     available.join(", ")
                 ),
@@ -283,7 +313,11 @@ impl TextBoxStyle {
             ));
         }
         Ok(Self {
-            font_family: family.to_owned(),
+            font_family: if bundled {
+                fonts::NOTO_SANS_SC_FAMILY.to_owned()
+            } else {
+                family.to_owned()
+            },
             font_size: view.font_size,
             bold: view.bold,
             italic: view.italic,
@@ -291,6 +325,10 @@ impl TextBoxStyle {
             color: parse_color(&view.color)?,
             alignment: view.alignment,
         })
+    }
+
+    fn is_bundled(&self) -> bool {
+        fonts::is_bundled_family(&self.font_family)
     }
 
     fn builtin(&self) -> PdfFontBuiltin {
@@ -507,9 +545,53 @@ impl BoxEditAction {
     }
 }
 
+/// One committed image change (insertion, transform or deletion).
+///
+/// The page-object snapshots work exactly like [`BoxEditAction`]: the detached
+/// "before" objects live in the action while it is on the undo stack, and the
+/// two snapshots are swapped when the action moves to the other stack.
+pub(crate) struct ImageEditAction {
+    pub(crate) page_index: u32,
+    pub(crate) image_id: u64,
+    pub(crate) start: usize,
+    pub(crate) before_state: u64,
+    pub(crate) after_state: u64,
+    pub(crate) before_record: Option<crate::image_edit::ImageSnapshot>,
+    pub(crate) before_objects: Option<Vec<PdfPageObject<'static>>>,
+    pub(crate) after_record: Option<crate::image_edit::ImageSnapshot>,
+    pub(crate) after_objects: Option<Vec<PdfPageObject<'static>>>,
+}
+
 pub(crate) enum EditAction {
     Box(BoxEditAction),
+    Image(ImageEditAction),
+    Field(FieldEditAction),
     Annotation(AnnotationEditAction),
+}
+
+/// The value a field edit restores during undo or redo.
+///
+/// Field edits do not snapshot page objects; PDFium stores a widget's value in
+/// the annotation dictionary, so restoring the recorded value is enough.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum FieldValueSnapshot {
+    Text(String),
+    Checked(bool),
+    Choice(String),
+    /// The radio group's selected on-state name, or `None` when unselected.
+    Radio(Option<String>),
+}
+
+pub(crate) struct FieldEditAction {
+    pub(crate) field_id: String,
+    pub(crate) field_name: String,
+    /// Set for radio widgets: the group whose value the action changes.
+    pub(crate) radio_group: Option<String>,
+    pub(crate) page_index: u32,
+    pub(crate) before_state: u64,
+    pub(crate) after_state: u64,
+    pub(crate) before: FieldValueSnapshot,
+    pub(crate) after: FieldValueSnapshot,
 }
 
 /// One committed annotation change.
@@ -615,6 +697,9 @@ impl TextBoxRecord {
 pub struct EditSession {
     pub(crate) records: HashMap<u32, Vec<TextBoxRecord>>,
     pub(crate) next_box_id: u64,
+    /// Images inserted by this session, per page.
+    pub(crate) images: HashMap<u32, Vec<crate::image_edit::ImageRecord>>,
+    pub(crate) next_image_id: u64,
     pub(crate) undo_stack: Vec<EditAction>,
     pub(crate) redo_stack: Vec<EditAction>,
     /// Id of the document state currently on the page.
@@ -623,6 +708,10 @@ pub struct EditSession {
     pub(crate) next_state: u64,
     /// State id last written to disk by the save pipeline.
     pub(crate) saved_state: u64,
+    /// Bundled-font subsets loaded into this Document, keyed by weight and
+    /// character set. Reusing a token prevents a repeated edit from embedding
+    /// the same subset twice.
+    pub(crate) bundled_fonts: fonts::BundledFontCache,
 }
 
 impl EditSession {
@@ -651,7 +740,7 @@ fn no_editable_text(page_index: u32) -> CommandError {
     )
 }
 
-fn ensure_content_editable(document: &PdfDocument<'_>) -> Result<(), CommandError> {
+pub(crate) fn ensure_content_editable(document: &PdfDocument<'_>) -> Result<(), CommandError> {
     // A missing permission read is treated as denied, matching `open_document`.
     let allowed = document
         .permissions()
@@ -817,7 +906,7 @@ fn first_text_metadata(
             "the Text Box does not start with a text object",
         )
     })?;
-    let font_family = text_object.font().name();
+    let font_family = fonts::normalize_family(&text_object.font().name());
     let font_size = text_object.unscaled_font_size().value;
     let color = color_hex(text_object);
     Ok((font_family, font_size, color))
@@ -908,8 +997,9 @@ fn target_from_record(
         )?;
 
     let font = text_object.font();
-    let font_family = font.name();
-    let (bold, italic) = style_flags_from_font_name(&font_family);
+    let font_name = font.name();
+    let font_family = fonts::normalize_family(&font_name);
+    let (bold, italic) = style_flags_from_font_name(&font_name);
     let font_size = text_object.unscaled_font_size().value;
     let color = color_hex(text_object);
     let rotation = text_object
@@ -1065,6 +1155,9 @@ struct StyleSnapshot {
     render_mode: PdfPageTextRenderMode,
     matrix: [f32; 6],
     font_is_embedded: bool,
+    /// Whether the embedded program is a bold instance. PDFX only needs this
+    /// to rebuild a Noto Sans SC subset at the same weight.
+    font_is_bold: bool,
     font_data: Option<Vec<u8>>,
 }
 
@@ -1083,7 +1176,9 @@ fn read_style(objects: &PdfPageObjects<'_>, start: usize) -> Result<StyleSnapsho
     })?;
 
     let font = text_object.font();
-    let font_family = font.name();
+    let font_name = font.name();
+    let font_family = fonts::normalize_family(&font_name);
+    let font_is_bold = base_font_name(&font_name).contains("Bold");
     let font_is_embedded = font.is_embedded().unwrap_or(false);
     let font_data = if font_is_embedded {
         font.data().ok()
@@ -1118,6 +1213,7 @@ fn read_style(objects: &PdfPageObjects<'_>, start: usize) -> Result<StyleSnapsho
             matrix.f(),
         ],
         font_is_embedded,
+        font_is_bold,
         font_data,
     })
 }
@@ -1190,9 +1286,19 @@ fn is_win_ansi_char(character: char) -> bool {
     )
 }
 
+fn text_is_win_ansi(text: &str) -> bool {
+    text.chars()
+        .filter(|character| !matches!(character, '\n' | '\r'))
+        .all(is_win_ansi_char)
+}
+
 enum FontChoice {
     Original,
     BuiltIn(PdfFontBuiltin),
+    /// Embed a fresh subset of the bundled font at this weight.
+    Bundled {
+        bold: bool,
+    },
 }
 
 struct FontDecision {
@@ -1200,23 +1306,35 @@ struct FontDecision {
     fallback: Option<FontUsageView>,
 }
 
-fn unsupported_font(family: &str, text: &str) -> CommandError {
-    let missing: String = text
-        .chars()
-        .filter(|character| !is_win_ansi_char(*character))
-        .take(8)
-        .collect();
-    CommandError::new(
-        CommandErrorCode::UnsupportedFont,
-        format!(
-            "font {family} cannot represent the replacement text without missing glyphs \
-             (unsupported characters: {missing:?}); CJK text editing is not supported yet"
-        ),
-    )
+/// Uses the bundled font as the fallback for characters the original font
+/// cannot render. `reason` must explain why the original font was replaced;
+/// the family name is appended so every notice names both fonts.
+fn bundled_fallback(
+    original: &str,
+    text: &str,
+    reason: &str,
+    bold: bool,
+) -> Result<FontDecision, CommandError> {
+    let bundled = fonts::noto_sans_sc();
+    if !bundled.covers(text) {
+        return Err(fonts::missing_glyph_error(bundled.family, text));
+    }
+    Ok(FontDecision {
+        choice: FontChoice::Bundled { bold },
+        fallback: Some(FontUsageView {
+            original_family: original.to_owned(),
+            family: bundled.family.to_owned(),
+            fallback: true,
+            reason: Some(format!(
+                "{reason}; {} was used instead",
+                fonts::NOTO_SANS_SC_FAMILY
+            )),
+        }),
+    })
 }
 
 /// Chooses the font for a replacement, preserving the original when provably
-/// safe and otherwise falling back to a base-14 Latin font.
+/// safe and otherwise using a base-14 Latin font or the bundled CJK font.
 fn decide_font(style: &StyleSnapshot, text: &str) -> Result<FontDecision, CommandError> {
     let characters: Vec<char> = text
         .chars()
@@ -1246,8 +1364,25 @@ fn decide_font(style: &StyleSnapshot, text: &str) -> Result<FontDecision, Comman
             });
         }
 
+        // The original program is one of our own subsets. Its cmap proves
+        // which characters it covers; a new character simply needs a larger
+        // subset of the same family, which is not a user-visible fallback.
+        if fonts::is_bundled_family(&original) {
+            return Ok(FontDecision {
+                choice: FontChoice::Bundled {
+                    bold: style.font_is_bold,
+                },
+                fallback: None,
+            });
+        }
+
         if !all_win_ansi {
-            return Err(unsupported_font(&original, text));
+            return bundled_fallback(
+                &original,
+                text,
+                &format!("the embedded font {original} is missing glyphs for the new text"),
+                false,
+            );
         }
         let reason = if style.font_data.is_some() {
             format!(
@@ -1272,7 +1407,12 @@ fn decide_font(style: &StyleSnapshot, text: &str) -> Result<FontDecision, Comman
 
     if let Some(built_in) = built_in_for(&original) {
         if !all_win_ansi {
-            return Err(unsupported_font(&original, text));
+            return bundled_fallback(
+                &original,
+                text,
+                &format!("the font {original} cannot represent the replacement text"),
+                false,
+            );
         }
         return Ok(FontDecision {
             choice: FontChoice::BuiltIn(built_in),
@@ -1281,7 +1421,12 @@ fn decide_font(style: &StyleSnapshot, text: &str) -> Result<FontDecision, Comman
     }
 
     if !all_win_ansi {
-        return Err(unsupported_font(&original, text));
+        return bundled_fallback(
+            &original,
+            text,
+            &format!("the original font {original} is not embedded"),
+            false,
+        );
     }
     let reason =
         format!("the original font {original} is not embedded; Helvetica was used instead");
@@ -1294,6 +1439,18 @@ fn decide_font(style: &StyleSnapshot, text: &str) -> Result<FontDecision, Comman
             reason: Some(reason),
         }),
     })
+}
+
+/// Loads (or reuses) the session's subset token for `text`.
+fn bundled_token(
+    entry: &mut OpenDocument,
+    text: &str,
+    bold: bool,
+) -> Result<PdfFontToken, CommandError> {
+    entry
+        .edit
+        .bundled_fonts
+        .token(&mut entry.document, text, fonts::weight_for(bold))
 }
 
 fn measure_with_token(
@@ -1702,29 +1859,56 @@ fn find_record(session: &EditSession, page_index: u32, box_id: u64) -> Result<us
         })
 }
 
-/// Updates the stored box ranges after a box at `start` changed its object
-/// count. Boxes after it move by the difference; the edited box itself keeps
-/// its start.
+/// Which tracked record the caller is editing. That record keeps its start;
+/// every other tracked page-object range is shifted.
+pub(crate) enum ObjectRef {
+    TextBox(u64),
+    Image(u64),
+}
+
+/// Updates every tracked page-object range after objects at `start` changed
+/// count. Text Boxes and images share one page-object list, so a change in
+/// either must keep the other's indices correct.
 ///
-/// When objects are inserted (`delta > 0`), a later box may already sit at
+/// When objects are inserted (`delta > 0`), a later record may already sit at
 /// exactly `start` (this happens when undoing a deletion, where the deleted
-/// box had count 0 before the undo), so an insertion shifts boxes at or after
-/// `start`. A removal (`delta < 0`) only moves boxes strictly after it.
-fn shift_later_boxes(records: &mut [TextBoxRecord], box_id: u64, start: usize, delta: isize) {
+/// record had count 0 before the undo), so an insertion shifts records at or
+/// after `start`. A removal (`delta < 0`) only moves records strictly after it.
+pub(crate) fn shift_object_indexes(
+    session: &mut EditSession,
+    page_index: u32,
+    start: usize,
+    delta: isize,
+    keep: ObjectRef,
+) {
     if delta == 0 {
         return;
     }
-    for record in records.iter_mut() {
-        if record.box_id == box_id {
-            continue;
-        }
-        let moves = if delta > 0 {
-            record.start >= start
+    let moves = |index: usize| {
+        if delta > 0 {
+            index >= start
         } else {
-            record.start > start
-        };
-        if moves {
-            record.start = (record.start as isize + delta).max(0) as usize;
+            index > start
+        }
+    };
+    if let Some(records) = session.records.get_mut(&page_index) {
+        for record in records.iter_mut() {
+            if matches!(keep, ObjectRef::TextBox(id) if record.box_id == id) {
+                continue;
+            }
+            if moves(record.start) {
+                record.start = (record.start as isize + delta).max(0) as usize;
+            }
+        }
+    }
+    if let Some(images) = session.images.get_mut(&page_index) {
+        for image in images.iter_mut() {
+            if matches!(keep, ObjectRef::Image(id) if image.image_id == id) {
+                continue;
+            }
+            if moves(image.start) {
+                image.start = (image.start as isize + delta).max(0) as usize;
+            }
         }
     }
 }
@@ -1735,7 +1919,7 @@ fn shift_later_boxes(records: &mut [TextBoxRecord], box_id: u64, start: usize, d
 /// Undo/redo use this both to take the current objects off the page and to put
 /// snapshot objects back at the same index, which preserves object order and
 /// therefore text extraction order.
-fn detach_and_insert(
+pub(crate) fn detach_and_insert(
     document: &PdfDocument<'static>,
     page_index: u32,
     start: usize,
@@ -1874,12 +2058,30 @@ fn redo_annotation(
     })
 }
 
+fn redo_field(
+    entry: &mut OpenDocument,
+    action: FieldEditAction,
+) -> Result<EditStepView, CommandError> {
+    crate::form::apply_field_snapshot(&entry.document, &action.field_id, &action.after)?;
+    let page_index = action.page_index;
+    entry.edit.current_state = action.after_state;
+    entry.edit.undo_stack.push(EditAction::Field(action));
+    Ok(EditStepView {
+        page_index,
+        history: entry.edit.history_view(),
+    })
+}
+
 fn undo_for(entry: &mut OpenDocument) -> Result<EditStepView, CommandError> {
     // Check the permission of the action that is about to be applied without
-    // popping it: a Box action needs content permission, an annotation action
-    // needs annotation permission.
+    // popping it: a Box or Image action needs content permission, a Field
+    // action needs form-filling permission, an annotation action needs
+    // annotation permission.
     match entry.edit.undo_stack.last() {
-        Some(EditAction::Box(_)) => ensure_content_editable(&entry.document)?,
+        Some(EditAction::Box(_)) | Some(EditAction::Image(_)) => {
+            ensure_content_editable(&entry.document)?
+        }
+        Some(EditAction::Field(_)) => crate::form::ensure_forms_editable(&entry.document)?,
         Some(EditAction::Annotation(_)) => ensure_annotation_editable(&entry.document)?,
         None => {
             return Err(CommandError::new(
@@ -1893,8 +2095,24 @@ fn undo_for(entry: &mut OpenDocument) -> Result<EditStepView, CommandError> {
     };
     match action {
         EditAction::Box(action) => undo_box(entry, action),
+        EditAction::Image(action) => crate::image_edit::undo_image(entry, action),
+        EditAction::Field(action) => undo_field(entry, action),
         EditAction::Annotation(action) => undo_annotation(entry, action),
     }
+}
+
+fn undo_field(
+    entry: &mut OpenDocument,
+    action: FieldEditAction,
+) -> Result<EditStepView, CommandError> {
+    crate::form::apply_field_snapshot(&entry.document, &action.field_id, &action.before)?;
+    let page_index = action.page_index;
+    entry.edit.current_state = action.before_state;
+    entry.edit.redo_stack.push(EditAction::Field(action));
+    Ok(EditStepView {
+        page_index,
+        history: entry.edit.history_view(),
+    })
 }
 
 fn undo_box(
@@ -1941,13 +2159,14 @@ fn undo_box(
                 records.retain(|record| record.box_id != action.box_id);
             }
         }
-        shift_later_boxes(
-            records,
-            action.box_id,
-            action.start,
-            before_count as isize - after_count as isize,
-        );
     }
+    shift_object_indexes(
+        &mut entry.edit,
+        page_index,
+        action.start,
+        before_count as isize - after_count as isize,
+        ObjectRef::TextBox(action.box_id),
+    );
 
     entry.edit.current_state = action.before_state;
     entry.edit.redo_stack.push(EditAction::Box(action));
@@ -1958,8 +2177,15 @@ fn undo_box(
 }
 
 fn redo_for(entry: &mut OpenDocument) -> Result<EditStepView, CommandError> {
+    // Check the permission of the action that is about to be applied without
+    // popping it: a Box or Image action needs content permission, a Field
+    // action needs form-filling permission, an annotation action needs
+    // annotation permission.
     match entry.edit.redo_stack.last() {
-        Some(EditAction::Box(_)) => ensure_content_editable(&entry.document)?,
+        Some(EditAction::Box(_)) | Some(EditAction::Image(_)) => {
+            ensure_content_editable(&entry.document)?
+        }
+        Some(EditAction::Field(_)) => crate::form::ensure_forms_editable(&entry.document)?,
         Some(EditAction::Annotation(_)) => ensure_annotation_editable(&entry.document)?,
         None => {
             return Err(CommandError::new(
@@ -1973,6 +2199,8 @@ fn redo_for(entry: &mut OpenDocument) -> Result<EditStepView, CommandError> {
     };
     match action {
         EditAction::Box(action) => redo_box(entry, action),
+        EditAction::Image(action) => crate::image_edit::redo_image(entry, action),
+        EditAction::Field(action) => redo_field(entry, action),
         EditAction::Annotation(action) => redo_annotation(entry, action),
     }
 }
@@ -2018,13 +2246,14 @@ fn redo_box(
                 records.retain(|record| record.box_id != action.box_id);
             }
         }
-        shift_later_boxes(
-            records,
-            action.box_id,
-            action.start,
-            after_count as isize - before_count as isize,
-        );
     }
+    shift_object_indexes(
+        &mut entry.edit,
+        page_index,
+        action.start,
+        after_count as isize - before_count as isize,
+        ObjectRef::TextBox(action.box_id),
+    );
 
     entry.edit.current_state = action.after_state;
     entry.edit.undo_stack.push(EditAction::Box(action));
@@ -2084,13 +2313,14 @@ fn apply_for(
         (record.start, record.count, record.width, style, decision)
     };
 
-    let built_in_token = match decision.choice {
+    let chosen_token = match decision.choice {
         FontChoice::BuiltIn(built_in) => Some(entry.document.fonts_mut().new_built_in(built_in)),
+        FontChoice::Bundled { bold } => Some(bundled_token(entry, &normalized, bold)?),
         FontChoice::Original => None,
     };
 
     let mut page = load_page(&entry.document, page_index)?;
-    let token = match built_in_token {
+    let token = match chosen_token {
         Some(token) => token,
         None => {
             let objects = page.objects();
@@ -2203,13 +2433,14 @@ fn apply_for(
             record.count = new_count;
             record.text = normalized.clone();
         }
-        shift_later_boxes(
-            records,
-            box_id,
-            start,
-            new_count as isize - old_count as isize,
-        );
     }
+    shift_object_indexes(
+        &mut entry.edit,
+        page_index,
+        start,
+        new_count as isize - old_count as isize,
+        ObjectRef::TextBox(box_id),
+    );
     let after_snapshot = entry.edit.records[&page_index][record_index].snapshot(record_index);
     push_action(
         entry,
@@ -2280,8 +2511,14 @@ fn delete_for(
             record.text.clear();
             record.deleted = true;
         }
-        shift_later_boxes(records, box_id, start, -(count as isize));
     }
+    shift_object_indexes(
+        &mut entry.edit,
+        page_index,
+        start,
+        -(count as isize),
+        ObjectRef::TextBox(box_id),
+    );
     let after_snapshot = entry.edit.records[&page_index][record_index].snapshot(record_index);
     push_action(
         entry,
@@ -2332,6 +2569,78 @@ fn read_target(
     )
 }
 
+/// The concrete font a styled box is rendered with.
+struct ResolvedBoxFont {
+    token: PdfFontToken,
+    /// The style actually used. On a fallback this differs from the requested
+    /// style, and callers persist it so later edits and transforms agree.
+    style: TextBoxStyle,
+    fallback: Option<FontUsageView>,
+}
+
+/// Resolves a styled box's family and text to a renderable font.
+///
+/// A base-14 style keeps working for WinAnsi text. Once the text needs glyphs
+/// a base-14 font cannot encode, the bundled CJK font takes over and the
+/// returned fallback tells the property panel why the family changed.
+fn resolve_box_font(
+    entry: &mut OpenDocument,
+    style: &TextBoxStyle,
+    text: &str,
+) -> Result<ResolvedBoxFont, CommandError> {
+    if style.is_bundled() {
+        let token = bundled_token(entry, text, style.bold)?;
+        return Ok(ResolvedBoxFont {
+            token,
+            style: style.clone(),
+            fallback: None,
+        });
+    }
+
+    if text_is_win_ansi(text) {
+        let token = entry.document.fonts_mut().new_built_in(style.builtin());
+        return Ok(ResolvedBoxFont {
+            token,
+            style: style.clone(),
+            fallback: None,
+        });
+    }
+
+    if style.italic {
+        return Err(CommandError::new(
+            CommandErrorCode::UnsupportedFont,
+            format!(
+                "the bundled font {} has no italic variant; clear italic for text the \
+                 {} font cannot represent",
+                fonts::NOTO_SANS_SC_FAMILY,
+                style.font_family
+            ),
+        ));
+    }
+
+    let bundled = fonts::noto_sans_sc();
+    if !bundled.covers(text) {
+        return Err(fonts::missing_glyph_error(bundled.family, text));
+    }
+    let token = bundled_token(entry, text, style.bold)?;
+    let mut effective = style.clone();
+    effective.font_family = fonts::NOTO_SANS_SC_FAMILY.to_owned();
+    Ok(ResolvedBoxFont {
+        token,
+        style: effective,
+        fallback: Some(FontUsageView {
+            original_family: style.font_family.clone(),
+            family: fonts::NOTO_SANS_SC_FAMILY.to_owned(),
+            fallback: true,
+            reason: Some(format!(
+                "the font {} cannot represent the replacement text; {} was used instead",
+                style.font_family,
+                fonts::NOTO_SANS_SC_FAMILY
+            )),
+        }),
+    })
+}
+
 /// Applies text to a box with a canonical layout and a chosen built-in style.
 fn apply_to_styled_box(
     entry: &mut OpenDocument,
@@ -2354,12 +2663,6 @@ fn apply_to_styled_box(
         )
     };
 
-    for character in normalized.chars() {
-        if !is_win_ansi_char(character) {
-            return Err(unsupported_font(&style.font_family, &normalized));
-        }
-    }
-
     let page = load_page(&entry.document, page_index)?;
     {
         let objects = page.objects();
@@ -2377,23 +2680,31 @@ fn apply_to_styled_box(
     let geometry = DisplayGeometry::new(&page, rotation)?;
     drop(page);
 
-    let token = entry.document.fonts_mut().new_built_in(style.builtin());
+    let resolved = resolve_box_font(entry, &style, &normalized)?;
     let render = BoxRenderStyle {
-        token,
-        font_size: style.font_size,
-        color: style.pdf_color(),
+        token: resolved.token,
+        font_size: resolved.style.font_size,
+        color: resolved.style.pdf_color(),
         render_mode: PdfPageTextRenderMode::FilledUnstroked,
-        underline: style.underline,
-        alignment: style.alignment,
+        underline: resolved.style.underline,
+        alignment: resolved.style.alignment,
     };
     let lines = if normalized.is_empty() {
         Vec::new()
     } else {
         wrap_text(&normalized, layout.width, &|candidate| {
-            measure_with_token(&entry.document, token, style.font_size, candidate)
+            measure_with_token(
+                &entry.document,
+                resolved.token,
+                resolved.style.font_size,
+                candidate,
+            )
         })
     };
-    let height = effective_height(&layout, content_height(lines.len(), style.font_size));
+    let height = effective_height(
+        &layout,
+        content_height(lines.len(), resolved.style.font_size),
+    );
     let replacements = build_box_objects(
         &mut entry.document,
         &geometry,
@@ -2416,24 +2727,19 @@ fn apply_to_styled_box(
         record.text = normalized.clone();
         record.count = new_count;
         record.width = layout.width;
+        record.style = Some(resolved.style.clone());
         if layout.auto_height {
             record.layout = Some(BoxLayout { height, ..layout });
         }
     }
     let after_snapshot = entry.edit.records[&page_index][record_index].snapshot(record_index);
-    {
-        let records = entry
-            .edit
-            .records
-            .get_mut(&page_index)
-            .expect("Text Box page disappeared");
-        shift_later_boxes(
-            records,
-            box_id,
-            start,
-            new_count as isize - old_count as isize,
-        );
-    }
+    shift_object_indexes(
+        &mut entry.edit,
+        page_index,
+        start,
+        new_count as isize - old_count as isize,
+        ObjectRef::TextBox(box_id),
+    );
     push_action(
         entry,
         page_index,
@@ -2448,7 +2754,7 @@ fn apply_to_styled_box(
         page_index,
         box_id,
         text: normalized,
-        font: None,
+        font: resolved.fallback,
         history: entry.edit.history_view(),
     })
 }
@@ -2577,12 +2883,6 @@ fn style_for(
             "this Text Box has been deleted",
         ));
     }
-    for character in text.chars() {
-        if !is_win_ansi_char(character) {
-            return Err(unsupported_font(&new_style.font_family, &text));
-        }
-    }
-
     let layout = style_change_layout(entry, page_index, record_index, new_style.font_size)?;
     check_layout(&layout)?;
 
@@ -2603,23 +2903,31 @@ fn style_for(
     let geometry = DisplayGeometry::new(&page, rotation)?;
     drop(page);
 
-    let token = entry.document.fonts_mut().new_built_in(new_style.builtin());
+    let resolved = resolve_box_font(entry, &new_style, &text)?;
     let render = BoxRenderStyle {
-        token,
-        font_size: new_style.font_size,
-        color: new_style.pdf_color(),
+        token: resolved.token,
+        font_size: resolved.style.font_size,
+        color: resolved.style.pdf_color(),
         render_mode: PdfPageTextRenderMode::FilledUnstroked,
-        underline: new_style.underline,
-        alignment: new_style.alignment,
+        underline: resolved.style.underline,
+        alignment: resolved.style.alignment,
     };
     let lines = if text.is_empty() {
         Vec::new()
     } else {
         wrap_text(&text, layout.width, &|candidate| {
-            measure_with_token(&entry.document, token, new_style.font_size, candidate)
+            measure_with_token(
+                &entry.document,
+                resolved.token,
+                resolved.style.font_size,
+                candidate,
+            )
         })
     };
-    let height = effective_height(&layout, content_height(lines.len(), new_style.font_size));
+    let height = effective_height(
+        &layout,
+        content_height(lines.len(), resolved.style.font_size),
+    );
     let replacements = build_box_objects(
         &mut entry.document,
         &geometry,
@@ -2639,25 +2947,19 @@ fn style_for(
             .get_mut(&page_index)
             .expect("Text Box page disappeared");
         let record = &mut records[record_index];
-        record.style = Some(new_style);
+        record.style = Some(resolved.style.clone());
         record.layout = Some(BoxLayout { height, ..layout });
         record.width = layout.width;
         record.count = new_count;
     }
     let after_snapshot = entry.edit.records[&page_index][record_index].snapshot(record_index);
-    {
-        let records = entry
-            .edit
-            .records
-            .get_mut(&page_index)
-            .expect("Text Box page disappeared");
-        shift_later_boxes(
-            records,
-            box_id,
-            start,
-            new_count as isize - old_count as isize,
-        );
-    }
+    shift_object_indexes(
+        &mut entry.edit,
+        page_index,
+        start,
+        new_count as isize - old_count as isize,
+        ObjectRef::TextBox(box_id),
+    );
     push_action(
         entry,
         page_index,
@@ -2672,7 +2974,7 @@ fn style_for(
     Ok(TextBoxEditResultView {
         page_index,
         target,
-        font: None,
+        font: resolved.fallback,
         history: entry.edit.history_view(),
     })
 }
@@ -2734,21 +3036,32 @@ fn transform_for(
     };
     drop(page);
 
-    let render = match &style {
-        Some(style) => BoxRenderStyle {
-            token: entry.document.fonts_mut().new_built_in(style.builtin()),
-            font_size: style.font_size,
-            color: style.pdf_color(),
-            render_mode: PdfPageTextRenderMode::FilledUnstroked,
-            underline: style.underline,
-            alignment: style.alignment,
-        },
-        None => legacy_render.ok_or_else(|| {
-            CommandError::new(
-                CommandErrorCode::Internal,
-                "the Text Box lost its font while being transformed",
+    let (render, effective_style, fallback) = match &style {
+        Some(style) => {
+            let resolved = resolve_box_font(entry, style, &text)?;
+            (
+                BoxRenderStyle {
+                    token: resolved.token,
+                    font_size: resolved.style.font_size,
+                    color: resolved.style.pdf_color(),
+                    render_mode: PdfPageTextRenderMode::FilledUnstroked,
+                    underline: resolved.style.underline,
+                    alignment: resolved.style.alignment,
+                },
+                Some(resolved.style),
+                resolved.fallback,
             )
-        })?,
+        }
+        None => (
+            legacy_render.ok_or_else(|| {
+                CommandError::new(
+                    CommandErrorCode::Internal,
+                    "the Text Box lost its font while being transformed",
+                )
+            })?,
+            None,
+            None,
+        ),
     };
     let lines = if text.is_empty() {
         Vec::new()
@@ -2777,24 +3090,21 @@ fn transform_for(
             .get_mut(&page_index)
             .expect("Text Box page disappeared");
         let record = &mut records[record_index];
+        if let Some(style) = effective_style {
+            record.style = Some(style);
+        }
         record.layout = Some(BoxLayout { height, ..layout });
         record.width = layout.width;
         record.count = new_count;
     }
     let after_snapshot = entry.edit.records[&page_index][record_index].snapshot(record_index);
-    {
-        let records = entry
-            .edit
-            .records
-            .get_mut(&page_index)
-            .expect("Text Box page disappeared");
-        shift_later_boxes(
-            records,
-            box_id,
-            start,
-            new_count as isize - old_count as isize,
-        );
-    }
+    shift_object_indexes(
+        &mut entry.edit,
+        page_index,
+        start,
+        new_count as isize - old_count as isize,
+        ObjectRef::TextBox(box_id),
+    );
     push_action(
         entry,
         page_index,
@@ -2809,7 +3119,7 @@ fn transform_for(
     Ok(TextBoxEditResultView {
         page_index,
         target,
-        font: None,
+        font: fallback,
         history: entry.edit.history_view(),
     })
 }

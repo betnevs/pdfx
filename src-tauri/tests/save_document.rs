@@ -1065,10 +1065,21 @@ fn save_as_preserves_existing_acroform_fields() {
         vec![
             ("full_name".to_owned(), "Ada Lovelace".to_owned()),
             ("subscribe".to_owned(), "Off".to_owned()),
+            ("email".to_owned(), "<missing>".to_owned()),
+            ("gender".to_owned(), "Off".to_owned()),
+            ("country".to_owned(), "Japan".to_owned()),
+            ("department".to_owned(), "<missing>".to_owned()),
+            ("notes".to_owned(), "<missing>".to_owned()),
+            ("agree".to_owned(), "Off".to_owned()),
+            ("js_guard".to_owned(), "<missing>".to_owned()),
+            ("readonly_note".to_owned(), "Read only".to_owned()),
         ],
         "existing form fields, values and types survive an edit + save"
     );
-    assert_eq!(kinds, vec!["Tx".to_owned(), "Btn".to_owned()]);
+    assert_eq!(
+        kinds,
+        vec!["Tx", "Btn", "Tx", "Btn", "Ch", "Ch", "Tx", "Btn", "Tx", "Tx"]
+    );
 
     let reopened = open(&output);
     let text = extract_text(reopened.document_id.clone(), 0)

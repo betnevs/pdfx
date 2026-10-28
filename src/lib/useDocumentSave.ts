@@ -3,12 +3,14 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   chooseSaveFile,
   editHistory,
+  missingRequiredFields,
   onSaveProgress,
   saveDocument,
   toCommandError,
   type CommandError,
   type DocumentView,
   type EditHistoryView,
+  type FormFieldView,
   type SaveDocumentRequest,
   type SaveKind,
   type SaveProgress,
@@ -29,6 +31,15 @@ export interface SaveConfirmation {
   request: SaveDocumentRequest;
 }
 
+/** Callbacks the workspace supplies to the save flow. */
+export interface DocumentSaveOptions {
+  /**
+   * A save was refused because these required fields are still empty. Called
+   * once per blocked attempt, in tab order.
+   */
+  onMissingRequired?: (fields: FormFieldView[]) => void;
+}
+
 /** Everything the save UI needs for the open document. */
 export interface DocumentSave {
   /** The document differs from the last written revision. */
@@ -39,6 +50,8 @@ export interface DocumentSave {
   progress: SaveProgress | null;
   error: SaveFailure | null;
   confirmation: SaveConfirmation | null;
+  /** Required fields that blocked the latest save attempt, in tab order. */
+  requiredFields: FormFieldView[] | null;
   /** Where the document was last written in this session. */
   lastSavedPath: string | null;
   /** Saves to the Output Document, falling back to Save As on the first save. */
@@ -50,6 +63,7 @@ export interface DocumentSave {
   cancelConfirmation: () => void;
   retry: () => void;
   dismissError: () => void;
+  dismissRequired: () => void;
 }
 
 /**
@@ -60,17 +74,27 @@ export interface DocumentSave {
  * state from the backend's edit history, so saving leaves undo/redo intact and
  * undoing past the saved revision marks the document dirty again.
  */
-export function useDocumentSave(document: DocumentView | null): DocumentSave {
+export function useDocumentSave(
+  document: DocumentView | null,
+  options: DocumentSaveOptions = {},
+): DocumentSave {
   const documentId = document?.documentId ?? null;
   const [history, setHistory] = useState<EditHistoryView | null>(null);
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState<SaveProgress | null>(null);
   const [error, setError] = useState<SaveFailure | null>(null);
   const [confirmation, setConfirmation] = useState<SaveConfirmation | null>(null);
+  const [requiredFields, setRequiredFields] = useState<FormFieldView[] | null>(
+    null,
+  );
   const [lastSavedPath, setLastSavedPath] = useState<string | null>(null);
 
   const documentRef = useRef(document);
   documentRef.current = document;
+  const optionsRef = useRef(options);
+  optionsRef.current = options;
+  const requiredRef = useRef(requiredFields);
+  requiredRef.current = requiredFields;
   const busyRef = useRef(false);
   // The backend remembers the Output Document; this mirrors whether a Save As
   // has happened in this window so Save Changes can fall back to Save As.
@@ -83,6 +107,7 @@ export function useDocumentSave(document: DocumentView | null): DocumentSave {
     setProgress(null);
     setError(null);
     setConfirmation(null);
+    setRequiredFields(null);
     setLastSavedPath(null);
     hasOutputRef.current = false;
     busyRef.current = false;
@@ -123,6 +148,17 @@ export function useDocumentSave(document: DocumentView | null): DocumentSave {
           }
         })
         .catch(() => {});
+      // While a required-field warning is visible, keep it in step with the
+      // fields the user is filling.
+      if (requiredRef.current) {
+        missingRequiredFields(documentId)
+          .then((missing) => {
+            if (!cancelled) {
+              setRequiredFields(missing.length > 0 ? missing : null);
+            }
+          })
+          .catch(() => {});
+      }
     });
   }, [documentId]);
 
@@ -171,6 +207,7 @@ export function useDocumentSave(document: DocumentView | null): DocumentSave {
         hasOutputRef.current = true;
         setHistory(result.history);
         setLastSavedPath(result.outputPath);
+        setRequiredFields(null);
       } catch (saveError) {
         setError({ error: toCommandError(saveError), kind, request });
       } finally {
@@ -180,6 +217,32 @@ export function useDocumentSave(document: DocumentView | null): DocumentSave {
     },
     [],
   );
+
+  /**
+   * Required-field check run before every save attempt (ticket 30).
+   *
+   * The backend is the source of truth for which fields are mandatory and
+   * which are still empty. A failure to read them must not block saving, so
+   * only a successful, non-empty answer refuses the attempt.
+   */
+  const checkRequired = useCallback(async (): Promise<boolean> => {
+    const current = documentRef.current;
+    if (!current) {
+      return false;
+    }
+    try {
+      const missing = await missingRequiredFields(current.documentId);
+      if (missing.length > 0) {
+        setRequiredFields(missing);
+        optionsRef.current.onMissingRequired?.(missing);
+        return false;
+      }
+    } catch {
+      // Validation is best-effort; saving is still possible without it.
+    }
+    setRequiredFields(null);
+    return true;
+  }, []);
 
   const startSave = useCallback(
     (kind: SaveKind, request: SaveDocumentRequest) => {
@@ -204,6 +267,11 @@ export function useDocumentSave(document: DocumentView | null): DocumentSave {
       return;
     }
     void (async () => {
+      // Refuse before choosing a target so an incomplete form never produces
+      // a pointless file dialog.
+      if (!(await checkRequired())) {
+        return;
+      }
       let path: string | null;
       try {
         path = await chooseSaveFile(current.name);
@@ -219,23 +287,28 @@ export function useDocumentSave(document: DocumentView | null): DocumentSave {
         confirmUnencryptedOutput: false,
       });
     })();
-  }, [startSave]);
+  }, [checkRequired, startSave]);
 
   const saveChanges = useCallback(() => {
     const current = documentRef.current;
     if (!current || busyRef.current || current.readOnly) {
       return;
     }
-    if (!hasOutputRef.current) {
-      // The first save is always Save As (the backend has no Output Document).
-      saveAs();
-      return;
-    }
-    startSave("save_changes", {
-      saveAsPath: null,
-      confirmUnencryptedOutput: false,
-    });
-  }, [saveAs, startSave]);
+    void (async () => {
+      if (!(await checkRequired())) {
+        return;
+      }
+      if (!hasOutputRef.current) {
+        // The first save is always Save As (the backend has no Output Document).
+        saveAs();
+        return;
+      }
+      startSave("save_changes", {
+        saveAsPath: null,
+        confirmUnencryptedOutput: false,
+      });
+    })();
+  }, [checkRequired, saveAs, startSave]);
 
   const confirmUnencrypted = useCallback(() => {
     if (!confirmation) {
@@ -274,6 +347,10 @@ export function useDocumentSave(document: DocumentView | null): DocumentSave {
     setError(null);
   }, []);
 
+  const dismissRequired = useCallback(() => {
+    setRequiredFields(null);
+  }, []);
+
   return {
     dirty: history?.dirty ?? false,
     canSaveChanges: !(document?.readOnly ?? false),
@@ -281,6 +358,7 @@ export function useDocumentSave(document: DocumentView | null): DocumentSave {
     progress,
     error,
     confirmation,
+    requiredFields,
     lastSavedPath,
     saveChanges,
     saveAs,
@@ -288,5 +366,6 @@ export function useDocumentSave(document: DocumentView | null): DocumentSave {
     cancelConfirmation,
     retry,
     dismissError,
+    dismissRequired,
   };
 }

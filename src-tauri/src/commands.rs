@@ -68,6 +68,12 @@ pub enum CommandErrorCode {
     /// The clicked Text Object uses a font that cannot represent the
     /// replacement text without emitting missing glyphs.
     UnsupportedFont,
+    /// The chosen file is not a PNG or JPEG image.
+    UnsupportedImageFormat,
+    /// The image file is corrupt or its pixels cannot be decoded.
+    ImageDecodeFailed,
+    /// The image exceeds the file-size or pixel-count limit.
+    ImageTooLarge,
     RenderFailed,
     /// The exported page image could not be written to disk.
     FileWriteFailed,
@@ -86,6 +92,14 @@ pub enum CommandErrorCode {
     UnencryptedOutputConfirmationRequired,
     /// Permission Restrictions forbid saving changes to this document.
     ReadOnlyDocument,
+    /// The requested form widget no longer exists in the open document.
+    FormFieldNotFound,
+    /// The form widget carries the ReadOnly field flag.
+    FormFieldReadOnly,
+    /// Permission Restrictions forbid filling existing form fields.
+    FormFillNotPermitted,
+    /// The value does not match the widget type or one of its options.
+    FormValueInvalid,
     UpdateNotConfigured,
     UpdateCheckFailed,
     UpdateManifestInvalid,
@@ -961,6 +975,12 @@ impl DisplayGeometry {
             display_height,
             rotation,
         })
+    }
+
+    /// The page size in display-space points, after CropBox and intrinsic
+    /// rotation. Overlay content is laid out in this coordinate system.
+    pub(crate) fn display_size(&self) -> (f32, f32) {
+        (self.display_width, self.display_height)
     }
 
     /// Maps a point from PDF user space to display-space points with a
