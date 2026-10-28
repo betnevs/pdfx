@@ -74,12 +74,16 @@ interface FieldPanelDraft {
 }
 
 /** A radio group is one panel entry even though it has one widget per option. */
+function baseWidgetId(fieldId: string): string {
+  const separator = fieldId.lastIndexOf(":");
+  return separator > 0 ? fieldId.slice(0, separator) : fieldId;
+}
+
 function baseCreatedId(field: FormFieldView): string {
   if (field.kind !== "radio" || !field.created) {
     return field.fieldId;
   }
-  const separator = field.fieldId.lastIndexOf(":");
-  return separator > 0 ? field.fieldId.slice(0, separator) : field.fieldId;
+  return baseWidgetId(field.fieldId);
 }
 
 function draftFor(field: FormFieldView): FieldPanelDraft {
@@ -378,6 +382,35 @@ export function FormLayer({
         setFields(result.fields);
         setLoaded(true);
         clearDraft(field.fieldId);
+        // A created checkbox or radio stores its value in the same record the
+        // property panel edits. Refresh those fields after a canvas fill so a
+        // later panel commit cannot send a stale state back.
+        if (field.created) {
+          const base = baseCreatedId(field);
+          setPanelDraft((current) => {
+            if (!current) {
+              return current;
+            }
+            const draftBase =
+              current.kind === "radio"
+                ? baseWidgetId(current.fieldId)
+                : current.fieldId;
+            if (draftBase !== base) {
+              return current;
+            }
+            const updated = result.fields.find(
+              (candidate) =>
+                candidate.created && baseCreatedId(candidate) === base,
+            );
+            if (updated?.kind === "checkbox") {
+              return { ...current, checked: updated.checked };
+            }
+            if (updated?.kind === "radio") {
+              return { ...current, selectedIndex: updated.selectedIndex };
+            }
+            return current;
+          });
+        }
         notifyDocumentChanged({
           documentId,
           pageIndex: field.pageIndex,

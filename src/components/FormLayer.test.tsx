@@ -559,6 +559,62 @@ describe("FormLayer", () => {
     );
   });
 
+  it("keeps the property panel in sync when a created widget is filled on the canvas", async () => {
+    let stored: FormFieldView[] = [
+      field({
+        fieldId: "new:1",
+        name: "checkbox_1",
+        kind: "checkbox",
+        order: 0,
+        rect: { x: 72, y: 100, width: 16, height: 16 },
+        created: true,
+      }),
+    ];
+    const updates: unknown[] = [];
+    invokeMock.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "form_fields") {
+        return stored;
+      }
+      if (command === "edit_history") {
+        return emptyHistory;
+      }
+      if (command === "fill_form_field") {
+        stored = [{ ...stored[0], checked: true }];
+        return { fieldId: "new:1", fields: stored, history: dirtyHistory };
+      }
+      if (command === "update_form_field") {
+        updates.push(args);
+        const payload = args as {
+          request: { name: string; checked: boolean };
+        };
+        stored = [
+          {
+            ...stored[0],
+            name: payload.request.name,
+            checked: payload.request.checked,
+          },
+        ];
+        return { fields: stored, history: dirtyHistory };
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+    renderLayer({ canModifyContent: true });
+
+    fireEvent.click(await screen.findByRole("button", { name: "字段属性" }));
+    fireEvent.click(await screen.findByLabelText("checkbox_1"));
+    await waitFor(() =>
+      expect(screen.getByLabelText("默认选中")).toBeChecked(),
+    );
+
+    const name = screen.getByLabelText("字段名称");
+    fireEvent.change(name, { target: { value: "agree_terms" } });
+    fireEvent.blur(name);
+    await waitFor(() => expect(updates).toHaveLength(1));
+    expect(
+      (updates[0] as { request: { checked: boolean } }).request.checked,
+    ).toBe(true);
+  });
+
   it("places a radio group and edits its options and default", async () => {
     const radioViews = (request: {
       name: string;

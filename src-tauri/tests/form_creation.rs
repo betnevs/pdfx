@@ -263,7 +263,6 @@ fn creates_radio_groups_with_kid_widgets_and_a_consistent_value() {
         .filter(|field| field.name == "contact")
         .collect();
     assert_eq!(group.len(), 3, "one widget per option");
-    eprintln!("reopened group: {group:#?}");
     assert!(group.iter().all(|field| field.kind == FormFieldKind::Radio
         && field.created
         && field.required
@@ -381,6 +380,115 @@ fn creates_radio_groups_with_kid_widgets_and_a_consistent_value() {
         "undo restores the whole group"
     );
 
+    close_document(document_id).expect("close document");
+}
+
+#[test]
+fn radio_options_never_use_the_reserved_off_state() {
+    let pdf = synthetic::single_line_pdf();
+    let dir = support::temp::TempDir::new("create-radio-off-state");
+    let output = dir.path().join("output.pdf");
+    let document_id = open_synthetic(&pdf);
+
+    create_form_field(
+        document_id.clone(),
+        0,
+        CreateFormFieldRequest::Radio {
+            rect: FormFieldRect {
+                x: 72.0,
+                y: 100.0,
+                width: 16.0,
+                height: 16.0,
+            },
+            name: Some("state".to_owned()),
+            tooltip: None,
+            required: true,
+            options: vec!["Off".to_owned(), "On".to_owned()],
+            selected_index: Some(0),
+        },
+    )
+    .expect("create a radio group with an Off label");
+
+    let group = |fields: &[pdfx_lib::form::FormFieldView]| -> Vec<_> {
+        fields
+            .iter()
+            .filter(|field| field.name == "state")
+            .cloned()
+            .collect()
+    };
+    let fields = form_fields(document_id.clone()).expect("fields");
+    let widgets = group(&fields);
+    assert_eq!(
+        widgets
+            .iter()
+            .map(|field| field.export_value.clone().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["Choice1", "On"],
+        "an option label that sanitizes to Off gets a ChoiceN on-state"
+    );
+    assert_eq!(
+        widgets
+            .iter()
+            .map(|field| field.checked)
+            .collect::<Vec<_>>(),
+        vec![true, false],
+        "the default option stays selected"
+    );
+
+    save_as(&document_id, &output);
+
+    let parsed = lopdf::Document::load(&output).expect("parse output");
+    let parent = field_named(&parsed, "state");
+    assert_eq!(
+        name_text(parent.get(b"V").expect("/V")),
+        "Choice1",
+        "the parent value is the option's on-state, never /Off"
+    );
+    let kids = parent
+        .get(b"Kids")
+        .expect("/Kids")
+        .as_array()
+        .expect("kids");
+    assert_eq!(kids.len(), 2);
+    let first = lopdf_dict(&parsed, &kids[0]);
+    assert_eq!(name_text(first.get(b"AS").expect("/AS")), "Choice1");
+    let normal = lopdf_dict(
+        &parsed,
+        lopdf_dict(&parsed, first.get(b"AP").expect("/AP"))
+            .get(b"N")
+            .expect("/AP /N"),
+    );
+    assert!(
+        normal.get(b"Off").is_ok(),
+        "the off state is the off appearance"
+    );
+    assert!(
+        normal.get(b"Choice1").is_ok(),
+        "the on state does not overwrite /Off"
+    );
+    assert_ne!(
+        stream_content(&parsed, normal.get(b"Off").unwrap()),
+        stream_content(&parsed, normal.get(b"Choice1").unwrap()),
+        "the selected option paints a different appearance"
+    );
+
+    let reopened = open_document(output.to_string_lossy().into_owned(), None)
+        .expect("reopen")
+        .document_id;
+    let widgets = group(&form_fields(reopened.clone()).expect("reopened fields"));
+    assert_eq!(
+        widgets
+            .iter()
+            .map(|field| field.checked)
+            .collect::<Vec<_>>(),
+        vec![true, false],
+        "the default survives a save and reopen"
+    );
+    assert_eq!(widgets[0].value.as_deref(), Some("Choice1"));
+    assert!(missing_required_fields(reopened.clone())
+        .expect("required fields")
+        .is_empty());
+    close_document(reopened).expect("close reopened");
     close_document(document_id).expect("close document");
 }
 
