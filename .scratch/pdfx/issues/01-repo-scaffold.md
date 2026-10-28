@@ -4,9 +4,9 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `cargo check`、前端类型检查与测试命令在干净环境可运行。
-- [ ] 应用启动后显示 PDFX 空工作区，原生标题栏与菜单可见。
-- [ ] fixture 目录与加载器可用，至少包含文本型、Scanned、加密、表单、结构、大文件、旋转与损坏 PDF 的最小样例或生成脚本。
-- [ ] 测试只通过 Tauri 命令边界或前端公开接口驱动，不直接依赖 PDFium/lopdf 内部类型。
+- [x] `cargo check`、前端类型检查与测试命令在干净环境可运行。
+- [x] 应用启动后显示 PDFX 空工作区，原生标题栏与菜单可见。
+- [x] fixture 目录与加载器可用，至少包含文本型、Scanned、加密、表单、结构、大文件、旋转与损坏 PDF 的最小样例或生成脚本。
+- [x] 测试只通过 Tauri 命令边界或前端公开接口驱动，不直接依赖 PDFium/lopdf 内部类型。
