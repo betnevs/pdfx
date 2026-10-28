@@ -82,6 +82,17 @@ impl<'a> PdfFormRadioButtonField<'a> {
         }
     }
 
+    /// Returns the export value of this radio widget: the non-Off state name
+    /// from its normal appearance dictionary.
+    ///
+    /// PDFX patch: the group value records the export value of the selected
+    /// widget, so the UI can tell which widget a stored group value belongs to
+    /// even before pdfium updates an appearance stream.
+    #[inline]
+    pub fn export_value(&self) -> Option<String> {
+        self.export_value_impl()
+    }
+
     /// Selects the radio button of this [PdfFormRadioButtonField] object.
     #[inline]
     pub fn set_checked(&mut self) -> Result<(), PdfiumError> {

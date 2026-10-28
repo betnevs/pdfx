@@ -175,6 +175,8 @@ function installDocumentBackend(overrides: Record<string, CommandHandler> = {}) 
       return { ...region, pngBase64: "iVBORw0KGgo=" };
     },
     extract_text_layer: () => textLayerView,
+    form_fields: () => [],
+    missing_required_fields: () => [],
     page_images: () => [],
     edit_history: () => idleHistory,
     list_annotations: () => [],
@@ -634,6 +636,148 @@ describe("PDFX workspace", () => {
     expect(screen.queryByText(READ_ONLY_REASON)).not.toBeInTheDocument();
     expect(screen.getByText(UNENCRYPTED_OUTPUT_WARNING)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "保存更改" })).toBeEnabled();
+  });
+
+  it("shows existing form fields on the page and fills them through the backend", async () => {
+    const formField = {
+      fieldId: "0:1",
+      name: "full_name",
+      kind: "text",
+      pageIndex: 0,
+      order: 0,
+      rect: { x: 72, y: 72, width: 180, height: 18 },
+      value: null,
+      checked: false,
+      options: [],
+      selectedIndex: null,
+      required: false,
+      readOnly: false,
+      multiline: false,
+      radioGroup: null,
+      exportValue: null,
+    };
+    installDocumentBackend({
+      form_fields: () => [formField],
+      fill_form_field: (args) => {
+        expect(args).toEqual({
+          documentId: "doc-1",
+          fieldId: "0:1",
+          value: { kind: "text", text: "Ada Lovelace" },
+        });
+        return {
+          fieldId: "0:1",
+          fields: [{ ...formField, value: "Ada Lovelace" }],
+          history: {
+            canUndo: true,
+            canRedo: false,
+            revision: 1,
+            savedRevision: 0,
+            dirty: true,
+          },
+        };
+      },
+    });
+    openDialogMock.mockResolvedValueOnce("/tmp/form.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+
+    const input = await screen.findByLabelText("full_name");
+    fireEvent.change(input, { target: { value: "Ada Lovelace" } });
+    fireEvent.blur(input);
+
+    await waitFor(() => expect(input).toHaveValue("Ada Lovelace"));
+    expect(commandCalls("fill_form_field")).toHaveLength(1);
+  });
+
+  it("disables form fields when the document forbids filling them", async () => {
+    installDocumentBackend({
+      open_document: () => ({
+        ...documentView,
+        permissions: { ...allGrantedPermissions, canFillForms: false },
+      }),
+      form_fields: () => [
+        {
+          fieldId: "0:1",
+          name: "full_name",
+          kind: "text",
+          pageIndex: 0,
+          order: 0,
+          rect: { x: 72, y: 72, width: 180, height: 18 },
+          value: "Read only",
+          checked: false,
+          options: [],
+          selectedIndex: null,
+          required: false,
+          readOnly: false,
+          multiline: false,
+          radioGroup: null,
+          exportValue: null,
+        },
+      ],
+    });
+    openDialogMock.mockResolvedValueOnce("/tmp/form.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+
+    expect(await screen.findByLabelText("full_name")).toBeDisabled();
+    expect(screen.getByText("此文档不允许填写表单")).toBeInTheDocument();
+  });
+
+  it("blocks saving while required fields are empty and locates the first one", async () => {
+    const notes = {
+      fieldId: "1:1",
+      name: "notes",
+      kind: "text",
+      pageIndex: 1,
+      order: 0,
+      rect: { x: 72, y: 72, width: 300, height: 60 },
+      value: null,
+      checked: false,
+      options: [],
+      selectedIndex: null,
+      required: true,
+      readOnly: false,
+      multiline: true,
+      radioGroup: null,
+      exportValue: null,
+    };
+    installDocumentBackend({
+      form_fields: () => [notes],
+      missing_required_fields: () => [notes],
+    });
+    openDialogMock.mockResolvedValueOnce("/tmp/form.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("report.pdf");
+
+    await user.click(screen.getByRole("button", { name: "保存更改" }));
+
+    expect(
+      await screen.findByText(/有 1 个必填字段尚未填写，无法保存/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/第 2 页「notes」/)).toBeInTheDocument();
+    expect(commandCalls("save_document")).toHaveLength(0);
+    expect(saveDialogMock).not.toHaveBeenCalled();
+
+    // The viewer navigated to the missing field's page and focused it.
+    expect(await screen.findByText("第 2 / 3 页 · 100%")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByLabelText("notes")).toHaveFocus(),
+    );
+
+    // Save As is blocked before it ever opens the target dialog.
+    await user.click(screen.getByRole("button", { name: "另存为…" }));
+    await waitFor(() =>
+      expect(commandCalls("missing_required_fields")).toHaveLength(2),
+    );
+    expect(saveDialogMock).not.toHaveBeenCalled();
+    expect(commandCalls("save_document")).toHaveLength(0);
   });
 
   it("navigates pages with the toolbar, the page input and Home/End", async () => {

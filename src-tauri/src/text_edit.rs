@@ -565,7 +565,33 @@ pub(crate) struct ImageEditAction {
 pub(crate) enum EditAction {
     Box(BoxEditAction),
     Image(ImageEditAction),
+    Field(FieldEditAction),
     Annotation(AnnotationEditAction),
+}
+
+/// The value a field edit restores during undo or redo.
+///
+/// Field edits do not snapshot page objects; PDFium stores a widget's value in
+/// the annotation dictionary, so restoring the recorded value is enough.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum FieldValueSnapshot {
+    Text(String),
+    Checked(bool),
+    Choice(String),
+    /// The radio group's selected on-state name, or `None` when unselected.
+    Radio(Option<String>),
+}
+
+pub(crate) struct FieldEditAction {
+    pub(crate) field_id: String,
+    pub(crate) field_name: String,
+    /// Set for radio widgets: the group whose value the action changes.
+    pub(crate) radio_group: Option<String>,
+    pub(crate) page_index: u32,
+    pub(crate) before_state: u64,
+    pub(crate) after_state: u64,
+    pub(crate) before: FieldValueSnapshot,
+    pub(crate) after: FieldValueSnapshot,
 }
 
 /// One committed annotation change.
@@ -2032,14 +2058,30 @@ fn redo_annotation(
     })
 }
 
+fn redo_field(
+    entry: &mut OpenDocument,
+    action: FieldEditAction,
+) -> Result<EditStepView, CommandError> {
+    crate::form::apply_field_snapshot(&entry.document, &action.field_id, &action.after)?;
+    let page_index = action.page_index;
+    entry.edit.current_state = action.after_state;
+    entry.edit.undo_stack.push(EditAction::Field(action));
+    Ok(EditStepView {
+        page_index,
+        history: entry.edit.history_view(),
+    })
+}
+
 fn undo_for(entry: &mut OpenDocument) -> Result<EditStepView, CommandError> {
     // Check the permission of the action that is about to be applied without
-    // popping it: Box and Image actions need content permission, an annotation
-    // action needs annotation permission.
+    // popping it: a Box or Image action needs content permission, a Field
+    // action needs form-filling permission, an annotation action needs
+    // annotation permission.
     match entry.edit.undo_stack.last() {
         Some(EditAction::Box(_)) | Some(EditAction::Image(_)) => {
             ensure_content_editable(&entry.document)?
         }
+        Some(EditAction::Field(_)) => crate::form::ensure_forms_editable(&entry.document)?,
         Some(EditAction::Annotation(_)) => ensure_annotation_editable(&entry.document)?,
         None => {
             return Err(CommandError::new(
@@ -2054,9 +2096,25 @@ fn undo_for(entry: &mut OpenDocument) -> Result<EditStepView, CommandError> {
     match action {
         EditAction::Box(action) => undo_box(entry, action),
         EditAction::Image(action) => crate::image_edit::undo_image(entry, action),
+        EditAction::Field(action) => undo_field(entry, action),
         EditAction::Annotation(action) => undo_annotation(entry, action),
     }
 }
+
+fn undo_field(
+    entry: &mut OpenDocument,
+    action: FieldEditAction,
+) -> Result<EditStepView, CommandError> {
+    crate::form::apply_field_snapshot(&entry.document, &action.field_id, &action.before)?;
+    let page_index = action.page_index;
+    entry.edit.current_state = action.before_state;
+    entry.edit.redo_stack.push(EditAction::Field(action));
+    Ok(EditStepView {
+        page_index,
+        history: entry.edit.history_view(),
+    })
+}
+
 fn undo_box(
     entry: &mut OpenDocument,
     mut action: BoxEditAction,
@@ -2119,10 +2177,15 @@ fn undo_box(
 }
 
 fn redo_for(entry: &mut OpenDocument) -> Result<EditStepView, CommandError> {
+    // Check the permission of the action that is about to be applied without
+    // popping it: a Box or Image action needs content permission, a Field
+    // action needs form-filling permission, an annotation action needs
+    // annotation permission.
     match entry.edit.redo_stack.last() {
         Some(EditAction::Box(_)) | Some(EditAction::Image(_)) => {
             ensure_content_editable(&entry.document)?
         }
+        Some(EditAction::Field(_)) => crate::form::ensure_forms_editable(&entry.document)?,
         Some(EditAction::Annotation(_)) => ensure_annotation_editable(&entry.document)?,
         None => {
             return Err(CommandError::new(
@@ -2137,6 +2200,7 @@ fn redo_for(entry: &mut OpenDocument) -> Result<EditStepView, CommandError> {
     match action {
         EditAction::Box(action) => redo_box(entry, action),
         EditAction::Image(action) => crate::image_edit::redo_image(entry, action),
+        EditAction::Field(action) => redo_field(entry, action),
         EditAction::Annotation(action) => redo_annotation(entry, action),
     }
 }
