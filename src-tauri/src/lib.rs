@@ -14,6 +14,7 @@ pub mod save;
 pub mod settings;
 mod stamp_glyphs;
 pub mod stamps;
+mod target_path;
 pub mod text_edit;
 pub mod updater;
 

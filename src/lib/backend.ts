@@ -32,6 +32,8 @@ export type CommandErrorCode =
   | "image_too_large"
   | "render_failed"
   | "file_write_failed"
+  | "export_target_is_source"
+  | "export_target_is_output"
   | "print_failed"
   | "window_failed"
   | "save_failed"
@@ -681,6 +683,8 @@ const COMMAND_ERROR_CODES: ReadonlySet<string> = new Set<CommandErrorCode>([
   "image_too_large",
   "render_failed",
   "file_write_failed",
+  "export_target_is_source",
+  "export_target_is_output",
   "print_failed",
   "window_failed",
   "save_failed",

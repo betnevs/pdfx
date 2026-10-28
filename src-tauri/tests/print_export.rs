@@ -7,15 +7,17 @@
 mod support;
 
 use std::fs;
+use std::path::Path;
 
 use base64::Engine as _;
 use support::fixtures;
 use support::temp::TempDir;
 
 use pdfx_lib::commands::{
-    close_document, extract_text_layer, open_document, render_page, CommandErrorCode,
+    close_document, extract_text_layer, open_document, render_page, CommandErrorCode, DocumentView,
 };
 use pdfx_lib::print_export::{ensure_print_allowed, export_page, PageImageFormat};
+use pdfx_lib::save::{save_document_with_progress, SaveDocumentRequest};
 use pdfx_lib::text_edit::{apply_text_edit, edit_history, text_edit_target};
 
 fn open_text_document() -> (pdfx_lib::commands::DocumentView, String) {
@@ -319,11 +321,195 @@ fn exporting_over_the_source_document_is_refused_and_leaves_the_source_untouched
     )
     .expect_err("exporting over the Source Document must be refused");
 
-    assert_eq!(error.code, CommandErrorCode::InvalidArgument);
+    assert_eq!(error.code, CommandErrorCode::ExportTargetIsSource);
     assert_eq!(
         fs::read(&source).expect("re-read the Source Document"),
         source_before,
         "a refused export must not touch the Source Document"
+    );
+
+    close_document(view.document_id).expect("document should close");
+}
+
+/// Opens a private copy of the text fixture so the test can choose an Output
+/// Document without touching the repository corpus.
+fn open_private_source(temp: &TempDir) -> (DocumentView, std::path::PathBuf) {
+    let manifest = fixtures::load_manifest();
+    let fixture = fixtures::fixture(&manifest, "text").expect("text fixture");
+    let source = temp.path().join("source.pdf");
+    fs::copy(fixtures::fixture_path(fixture), &source).expect("copy the fixture");
+    let view = open_document(source.to_string_lossy().into_owned(), None)
+        .expect("the copied fixture should open");
+    (view, source)
+}
+
+/// Creates the Output Document through the same Save As seam the app uses.
+fn save_as(document_id: &str, target: &Path) {
+    save_document_with_progress(
+        document_id,
+        SaveDocumentRequest {
+            save_as_path: Some(target.to_string_lossy().into_owned()),
+            confirm_unencrypted_output: false,
+        },
+        &mut |_| {},
+    )
+    .expect("Save As should write the Output Document");
+}
+
+fn export_to(path: &Path, document_id: &str) -> pdfx_lib::commands::CommandError {
+    export_page(
+        document_id.to_owned(),
+        0,
+        PageImageFormat::Png,
+        72,
+        path.to_string_lossy().into_owned(),
+    )
+    .expect_err("the protected target must be refused")
+}
+
+#[test]
+fn exporting_over_the_output_document_is_refused_and_leaves_it_intact() {
+    let temp = TempDir::new("export-output-guard");
+    let (view, _source) = open_private_source(&temp);
+    let output = temp.path().join("output.pdf");
+    save_as(&view.document_id, &output);
+    let output_before = fs::read(&output).expect("read the Output Document");
+
+    let error = export_to(&output, &view.document_id);
+
+    assert_eq!(error.code, CommandErrorCode::ExportTargetIsOutput);
+    assert!(
+        error.message.contains("Output Document"),
+        "the error explains which document is protected: {}",
+        error.message
+    );
+    assert_eq!(
+        fs::read(&output).expect("re-read the Output Document"),
+        output_before,
+        "a refused export must not replace the Output Document with image bytes"
+    );
+
+    close_document(view.document_id).expect("document should close");
+}
+
+#[cfg(unix)]
+#[test]
+fn exporting_to_a_symlink_alias_of_either_document_is_refused() {
+    use std::os::unix::fs::symlink;
+
+    let temp = TempDir::new("export-symlink-guard");
+    let (view, source) = open_private_source(&temp);
+    let output = temp.path().join("output.pdf");
+    save_as(&view.document_id, &output);
+    let source_before = fs::read(&source).expect("read the Source Document");
+    let output_before = fs::read(&output).expect("read the Output Document");
+
+    let source_link = temp.path().join("source-alias.pdf");
+    symlink(&source, &source_link).expect("create the Source Document symlink");
+    let error = export_to(&source_link, &view.document_id);
+    assert_eq!(error.code, CommandErrorCode::ExportTargetIsSource);
+
+    let output_link = temp.path().join("output-alias.pdf");
+    symlink(&output, &output_link).expect("create the Output Document symlink");
+    let error = export_to(&output_link, &view.document_id);
+    assert_eq!(error.code, CommandErrorCode::ExportTargetIsOutput);
+
+    assert_eq!(fs::read(&source).expect("re-read source"), source_before);
+    assert_eq!(fs::read(&output).expect("re-read output"), output_before);
+    close_document(view.document_id).expect("document should close");
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[test]
+fn exporting_to_a_case_variant_of_either_document_is_refused() {
+    let temp = TempDir::new("export-case-guard");
+    let (view, source) = open_private_source(&temp);
+    let output = temp.path().join("output.pdf");
+    save_as(&view.document_id, &output);
+    let source_before = fs::read(&source).expect("read the Source Document");
+    let output_before = fs::read(&output).expect("read the Output Document");
+
+    let source_variant = temp.path().join("SOURCE.PDF");
+    assert_eq!(
+        export_to(&source_variant, &view.document_id).code,
+        CommandErrorCode::ExportTargetIsSource,
+        "the Source Document is protected regardless of path casing"
+    );
+
+    let output_variant = temp.path().join("OUTPUT.PDF");
+    assert_eq!(
+        export_to(&output_variant, &view.document_id).code,
+        CommandErrorCode::ExportTargetIsOutput,
+        "the Output Document is protected regardless of path casing"
+    );
+
+    assert_eq!(fs::read(&source).expect("re-read source"), source_before);
+    assert_eq!(fs::read(&output).expect("re-read output"), output_before);
+    close_document(view.document_id).expect("document should close");
+}
+
+/// A write that cannot even create the same-directory temporary file must
+/// leave an existing target byte-identical and no temporary file behind.
+#[cfg(unix)]
+#[test]
+fn export_write_failure_leaves_the_previous_target_and_no_temp_file() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (view, _source_path) = open_text_document();
+    let temp = TempDir::new("export-write-failure");
+    let destination = temp.path().join("page.png");
+    let previous = b"an older image the user would hate to lose";
+    fs::write(&destination, previous).expect("write the previous image");
+
+    let original_permissions = fs::metadata(temp.path())
+        .expect("read directory metadata")
+        .permissions();
+    let mut read_only = original_permissions.clone();
+    read_only.set_mode(0o555);
+    fs::set_permissions(temp.path(), read_only).expect("make the directory read-only");
+
+    // A privileged test user ignores directory permissions; the scenario is
+    // not meaningful then, so restore the directory and pass vacuously.
+    if fs::File::create(temp.path().join("probe")).is_ok() {
+        fs::set_permissions(temp.path(), original_permissions).expect("restore permissions");
+        let _ = fs::remove_file(temp.path().join("probe"));
+        close_document(view.document_id).expect("document should close");
+        return;
+    }
+
+    let result = export_page(
+        view.document_id.clone(),
+        0,
+        PageImageFormat::Png,
+        72,
+        destination.to_string_lossy().into_owned(),
+    );
+    fs::set_permissions(temp.path(), original_permissions).expect("restore permissions");
+
+    let error = result.expect_err("the read-only directory must reject the export");
+    assert!(
+        matches!(
+            error.code,
+            CommandErrorCode::PermissionDenied | CommandErrorCode::FileWriteFailed
+        ),
+        "unexpected error code: {:?} ({})",
+        error.code,
+        error.message
+    );
+    assert_eq!(
+        fs::read(&destination).expect("re-read the previous image"),
+        previous,
+        "a failed export must not truncate or partially overwrite the target"
+    );
+    let entries: Vec<_> = fs::read_dir(temp.path())
+        .expect("list the directory")
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        entries,
+        vec!["page.png".to_owned()],
+        "a failed export must remove its temporary file"
     );
 
     close_document(view.document_id).expect("document should close");
