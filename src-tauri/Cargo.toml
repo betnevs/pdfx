@@ -30,3 +30,10 @@ png = "0.18"
 default = []
 # Used by production builds so the frontend is embedded instead of loaded from devUrl.
 custom-protocol = ["tauri/custom-protocol"]
+
+# PDFX vendors pdfium-render 0.9.4 with a minimal patch adding flags-aware saves
+# and the annotation capabilities PDFium supports but the crate does not expose.
+# See src-tauri/vendor/pdfium-render/PDFX-PATCH.md for the patch scope, its
+# verification and the upgrade procedure.
+[patch.crates-io]
+pdfium-render = { path = "vendor/pdfium-render" }
