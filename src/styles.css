@@ -2522,6 +2522,129 @@ button {
   font-size: 12px;
 }
 
+/* Attachment column panel: name, size and type with per-file actions. */
+
+.attachment-panel {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 244px;
+  max-height: 280px;
+  overflow-y: auto;
+  padding: 10px;
+  box-sizing: border-box;
+  border: 1px solid var(--pdfx-border);
+  border-radius: 9px;
+  background: var(--pdfx-surface);
+  font-size: 12px;
+}
+
+.attachment-panel-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.attachment-panel-header h2 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.attachment-count {
+  color: var(--pdfx-muted);
+}
+
+.attachment-columns,
+.attachment-meta {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 6px;
+  align-items: baseline;
+}
+
+.attachment-columns {
+  color: var(--pdfx-muted);
+  font-size: 11px;
+}
+
+.attachment-items {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.attachment-items li {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--pdfx-border);
+}
+
+.attachment-items li:last-child {
+  padding-bottom: 0;
+  border-bottom: none;
+}
+
+.attachment-name {
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-size,
+.attachment-type {
+  color: var(--pdfx-muted);
+  white-space: nowrap;
+}
+
+.attachment-type {
+  max-width: 90px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.attachment-actions {
+  display: flex;
+  gap: 4px;
+}
+
+.attachment-actions button,
+.attachment-add {
+  padding: 3px 7px;
+  font-size: 11px;
+}
+
+.attachment-add {
+  align-self: flex-start;
+}
+
+.attachment-empty,
+.attachment-loading,
+.attachment-notice {
+  margin: 0;
+  color: var(--pdfx-muted);
+  line-height: 1.5;
+}
+
+.attachment-readonly {
+  margin: 0;
+  color: var(--pdfx-status-warning);
+  line-height: 1.5;
+}
+
+.attachment-error {
+  margin: 0;
+  color: var(--pdfx-status-danger);
+  line-height: 1.5;
+}
+
 /* Annotation column: stamp catalogue above the document-wide list. */
 
 .annotation-column {
@@ -2537,6 +2660,10 @@ button {
   flex: 1;
   width: 100%;
   min-height: 0;
+}
+
+.annotation-column .attachment-panel {
+  width: 100%;
 }
 
 .stamp-panel {

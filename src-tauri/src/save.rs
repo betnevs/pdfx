@@ -328,9 +328,16 @@ pub(crate) fn serialize_live_document(
         &entry.document,
     )?);
     // Every lopdf-side change — object edits, deferred annotation dictionary
-    // entries and the page arrangement — is written in one appended revision
-    // after PDFium's incremental one, keeping a single writer per revision.
-    finalize_lopdf_revision(output_bytes, &object_edits, &entry.pages)
+    // entries, the page arrangement and the attachment name tree — is written
+    // in one appended revision after PDFium's incremental one, keeping a
+    // single writer per revision.
+    let attachment_edit = entry.attachments.save_edit();
+    finalize_lopdf_revision(
+        output_bytes,
+        &object_edits,
+        &entry.pages,
+        attachment_edit.as_ref(),
+    )
 }
 
 /// Applies every lopdf-side change to the PDFium output in one incremental
@@ -339,6 +346,7 @@ fn finalize_lopdf_revision(
     base: Vec<u8>,
     edits: &[ObjectEdit],
     pages: &crate::page_ops::PageModel,
+    attachment_edit: Option<&crate::attachments::EmbeddedFilesEdit>,
 ) -> Result<Vec<u8>, CommandError> {
     let previous = lopdf::Document::load_mem(&base).map_err(|error| {
         lopdf_error(
@@ -354,6 +362,7 @@ fn finalize_lopdf_revision(
         && referenced_edits.is_empty()
         && page_tree.is_none()
         && form_fields_prune.is_none()
+        && attachment_edit.is_none()
     {
         return Ok(base);
     }
@@ -399,6 +408,9 @@ fn finalize_lopdf_revision(
     }
     if let Some(page_tree) = &page_tree {
         apply_page_tree_edit(&mut incremental, page_tree)?;
+    }
+    if let Some(attachment_edit) = attachment_edit {
+        crate::attachments::apply_embedded_files_edit(&mut incremental, attachment_edit)?;
     }
 
     let mut output = Vec::new();
@@ -1059,7 +1071,7 @@ fn apply_object_edit(
 /// Decodes a PDF text string: UTF-16BE when it carries the BOM, otherwise the
 /// bytes are compared as-is (PDFDocEncoding is ASCII-compatible for the
 /// characters form option labels use in practice).
-fn decode_pdf_text(bytes: &[u8]) -> String {
+pub(crate) fn decode_pdf_text(bytes: &[u8]) -> String {
     if let Some(utf16) = bytes.strip_prefix(&[0xFE, 0xFF]) {
         let units: Vec<u16> = utf16
             .chunks_exact(2)
@@ -1071,7 +1083,7 @@ fn decode_pdf_text(bytes: &[u8]) -> String {
     }
 }
 
-fn text_string_object(value: &str) -> lopdf::Object {
+pub(crate) fn text_string_object(value: &str) -> lopdf::Object {
     if value.is_ascii() {
         lopdf::Object::string_literal(value.as_bytes().to_vec())
     } else {
@@ -1258,7 +1270,7 @@ fn apply_choice_value(
     Ok(())
 }
 
-fn lopdf_error(context: &str, error: impl std::fmt::Display) -> CommandError {
+pub(crate) fn lopdf_error(context: &str, error: impl std::fmt::Display) -> CommandError {
     CommandError::new(CommandErrorCode::SaveFailed, format!("{context}: {error}"))
 }
 

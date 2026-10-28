@@ -102,6 +102,22 @@ pub enum CommandErrorCode {
     UnencryptedOutputConfirmationRequired,
     /// Permission Restrictions forbid saving changes to this document.
     ReadOnlyDocument,
+    /// The chosen attachment file exceeds the size limit.
+    AttachmentTooLarge,
+    /// The requested attachment no longer exists in the open document.
+    AttachmentNotFound,
+    /// Opening an attachment requires explicit confirmation.
+    AttachmentOpenConfirmationRequired,
+    /// The extracted attachment could not be handed to the OS.
+    AttachmentOpenFailed,
+    /// Saving an attachment targeted the Source Document, which is never
+    /// overwritten.
+    AttachmentTargetIsSource,
+    /// Saving an attachment targeted the current Output Document; replacing it
+    /// would destroy the saved PDF.
+    AttachmentTargetIsOutput,
+    /// Writing the extracted attachment failed; nothing was overwritten.
+    AttachmentSaveFailed,
     /// Writing, reading or removing a Recovery File failed.
     RecoveryFailed,
     /// The requested Recovery File no longer exists.
@@ -333,6 +349,8 @@ pub(crate) struct OpenDocument {
     pub(crate) recovery: Option<crate::recovery::RecoveryState>,
     /// The Source Document's security, preserved by a recovered Document.
     pub(crate) source_security: DocumentSecurity,
+    /// Attachments visible in this session and the baseline to diff at save.
+    pub(crate) attachments: crate::attachments::AttachmentStore,
     pub(crate) document: PdfDocument<'static>,
 }
 
@@ -511,6 +529,7 @@ fn insert_document(
         output_path: options.output_path.map(PathBuf::from),
         ..Default::default()
     };
+    let attachments = crate::attachments::AttachmentStore::from_document(&document);
     registry.documents.insert(
         document_id,
         OpenDocument {
@@ -525,6 +544,7 @@ fn insert_document(
                 read_only,
                 permissions,
             },
+            attachments,
             document,
         },
     );

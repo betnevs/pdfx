@@ -1,5 +1,6 @@
 pub mod annotations;
 mod atomic_write;
+pub mod attachments;
 pub mod commands;
 pub mod engine;
 pub mod file_association;
@@ -63,6 +64,11 @@ pub fn run() {
             commands::extract_text,
             commands::extract_text_layer,
             commands::close_document,
+            attachments::list_attachments,
+            attachments::add_attachment,
+            attachments::save_attachment_as,
+            attachments::delete_attachment,
+            attachments::open_attachment,
             page_ops::rotate_page,
             page_ops::delete_page,
             page_ops::move_page,

@@ -190,6 +190,7 @@ function installDocumentBackend(overrides: Record<string, CommandHandler> = {}) 
     page_line_objects: () => [],
     edit_history: () => idleHistory,
     list_annotations: () => [],
+    list_attachments: () => [],
     list_links: () => [],
     close_document: () => undefined,
     set_menu_state: () => undefined,
@@ -3524,5 +3525,109 @@ describe("recovery and recent files", () => {
     expect(
       screen.getByRole("heading", { level: 2, name: "空工作区" }),
     ).toBeInTheDocument();
+  });
+});
+
+describe("PDFX attachments", () => {
+  const attachment = {
+    id: 1,
+    name: "report.txt",
+    size: 17,
+    mediaType: "text/plain",
+  };
+
+  it("lists the open document's attachments with name, size and type", async () => {
+    installDocumentBackend({ list_attachments: () => [attachment] });
+    openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+
+    expect(await screen.findByText("report.txt")).toBeInTheDocument();
+    expect(screen.getByText("17 B")).toBeInTheDocument();
+    expect(screen.getByText("text/plain")).toBeInTheDocument();
+    expect(screen.getByText("共 1 个")).toBeInTheDocument();
+  });
+
+  it("marks the document dirty after adding and restores the list on undo", async () => {
+    let currentAttachments: Array<typeof attachment> = [];
+    const addedHistory = {
+      canUndo: true,
+      canRedo: false,
+      revision: 1,
+      savedRevision: 0,
+      dirty: true,
+    };
+    const undoneHistory = {
+      canUndo: false,
+      canRedo: true,
+      revision: 0,
+      savedRevision: 0,
+      dirty: false,
+    };
+    let currentHistory = {
+      canUndo: false,
+      canRedo: false,
+      revision: 0,
+      savedRevision: 0,
+      dirty: false,
+    };
+    installDocumentBackend({
+      edit_history: () => currentHistory,
+      list_attachments: () => currentAttachments,
+      add_attachment: () => {
+        currentAttachments = [attachment];
+        currentHistory = addedHistory;
+        return { attachments: currentAttachments, history: addedHistory };
+      },
+      undo_text_edit: () => {
+        currentAttachments = [];
+        currentHistory = undoneHistory;
+        return {
+          pageIndex: 0,
+          pageCount: 3,
+          pageStructureChanged: false,
+          history: undoneHistory,
+        };
+      },
+    });
+    openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("report.pdf");
+    await waitFor(() => expect(lastMenuState().get("edit.undo")).toBe(false));
+
+    openDialogMock.mockResolvedValueOnce("/tmp/report.txt");
+    await user.click(screen.getByRole("button", { name: "添加附件" }));
+
+    await waitFor(() =>
+      expect(commandCalls("add_attachment")).toEqual([
+        ["add_attachment", { documentId: "doc-1", path: "/tmp/report.txt" }],
+      ]),
+    );
+    expect(await screen.findByText("report.txt")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(setTitle).toHaveBeenLastCalledWith("report.pdf（未保存） — PDFX");
+      const state = lastMenuState();
+      expect(state.get("edit.undo")).toBe(true);
+      expect(state.get("edit.redo")).toBe(false);
+    });
+
+    act(() => menuHandler?.({ payload: "edit.undo" }));
+
+    await waitFor(() => expect(commandCalls("undo_text_edit")).toHaveLength(1));
+    await waitFor(() => {
+      expect(screen.queryByText("report.txt")).not.toBeInTheDocument();
+      expect(screen.getByText("还没有附件")).toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(setTitle).toHaveBeenLastCalledWith("report.pdf — PDFX");
+      const state = lastMenuState();
+      expect(state.get("edit.undo")).toBe(false);
+      expect(state.get("edit.redo")).toBe(true);
+    });
   });
 });

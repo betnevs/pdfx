@@ -6,6 +6,9 @@ import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialo
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  addAttachment,
+  chooseAttachmentDestination,
+  chooseAttachmentFile,
   choosePageImageDestination,
   choosePdfFile,
   chooseSaveFile,
@@ -16,6 +19,7 @@ import {
   deleteFormField,
   deleteFormTextField,
   deleteLink,
+  deleteAttachment,
   destroyWindow,
   exportFlattenedCopy,
   exportPage,
@@ -25,6 +29,7 @@ import {
   initialDocumentPath,
   isFullscreen,
   listLinks,
+  listAttachments,
   MENU_EVENT,
   missingRequiredFields,
   onFileDrop,
@@ -32,12 +37,14 @@ import {
   onSaveProgress,
   openDocument,
   openDocumentInNewWindow,
+  openAttachment,
   pageInfo,
   printDocument,
   renderPage,
   renderPageRegion,
   renderThumbnail,
   SAVE_PROGRESS_EVENT,
+  saveAttachmentAs,
   saveDocument,
   setFullscreen,
   setMenuState,
@@ -140,6 +147,109 @@ describe("backend command seam", () => {
     expect(
       toCommandError({ code: "print_failed", message: "no printer" }),
     ).toEqual({ code: "print_failed", message: "no printer" });
+  });
+
+  it("maps attachment commands to their Tauri command names", async () => {
+    const history = {
+      canUndo: true,
+      canRedo: false,
+      revision: 1,
+      savedRevision: 0,
+      dirty: true,
+    };
+    const attachments = [
+      { id: 1, name: "a.txt", size: 17, mediaType: "text/plain" },
+    ];
+    invokeMock.mockResolvedValue(attachments);
+
+    await expect(listAttachments("doc-1")).resolves.toEqual(attachments);
+    expect(invokeMock).toHaveBeenLastCalledWith("list_attachments", {
+      documentId: "doc-1",
+    });
+
+    invokeMock.mockResolvedValue({ attachments, history });
+    await expect(addAttachment("doc-1", "/tmp/a.txt")).resolves.toEqual({
+      attachments,
+      history,
+    });
+    expect(invokeMock).toHaveBeenLastCalledWith("add_attachment", {
+      documentId: "doc-1",
+      path: "/tmp/a.txt",
+    });
+
+    invokeMock.mockResolvedValue({ attachments: [], history });
+    await expect(deleteAttachment("doc-1", 1)).resolves.toEqual({
+      attachments: [],
+      history,
+    });
+    expect(invokeMock).toHaveBeenLastCalledWith("delete_attachment", {
+      documentId: "doc-1",
+      attachmentId: 1,
+    });
+
+    invokeMock.mockResolvedValue(undefined);
+    await expect(openAttachment("doc-1", 1, true)).resolves.toBeUndefined();
+    expect(invokeMock).toHaveBeenLastCalledWith("open_attachment", {
+      documentId: "doc-1",
+      attachmentId: 1,
+      confirm: true,
+    });
+
+    invokeMock.mockResolvedValue({
+      path: "/tmp/extracted.txt",
+      bytesWritten: 17,
+    });
+    await expect(
+      saveAttachmentAs("doc-1", 1, "/tmp/extracted.txt"),
+    ).resolves.toEqual({ path: "/tmp/extracted.txt", bytesWritten: 17 });
+    expect(invokeMock).toHaveBeenLastCalledWith("save_attachment_as", {
+      documentId: "doc-1",
+      attachmentId: 1,
+      destination: "/tmp/extracted.txt",
+    });
+  });
+
+  it("asks the attachment dialogs for any file and a save destination", async () => {
+    vi.mocked(openDialog).mockResolvedValue("/tmp/a.txt");
+
+    await expect(chooseAttachmentFile()).resolves.toBe("/tmp/a.txt");
+    expect(openDialog).toHaveBeenCalledWith({
+      multiple: false,
+      directory: false,
+      title: "添加附件",
+    });
+
+    vi.mocked(openDialog).mockResolvedValue(null);
+    await expect(chooseAttachmentFile()).resolves.toBeNull();
+
+    vi.mocked(saveDialog).mockResolvedValue("/tmp/a.txt");
+    await expect(chooseAttachmentDestination("a.txt")).resolves.toBe(
+      "/tmp/a.txt",
+    );
+    expect(saveDialog).toHaveBeenCalledWith({
+      defaultPath: "a.txt",
+      title: "另存附件",
+    });
+
+    vi.mocked(saveDialog).mockResolvedValue(null);
+    await expect(chooseAttachmentDestination("a.txt")).resolves.toBeNull();
+  });
+
+  it("recognizes the attachment error codes", () => {
+    for (const code of [
+      "attachment_too_large",
+      "attachment_not_found",
+      "attachment_open_confirmation_required",
+      "attachment_open_failed",
+      "attachment_target_is_source",
+      "attachment_target_is_output",
+      "attachment_save_failed",
+    ] as const) {
+      expect(toCommandError({ code, message: "detail" })).toEqual({
+        code,
+        message: "detail",
+      });
+    }
   });
 
   it("maps document commands to their Tauri command names and camelCase arguments", async () => {
