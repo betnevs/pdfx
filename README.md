@@ -2,14 +2,14 @@
 
 本地运行、跨 macOS 与 Windows 的 PDF 编辑器。界面参照 iLovePDF 编辑页的信息架构与交互密度，但文件始终留在本机，无账户、无云端处理、无遥测。
 
-当前仓库处于 **票 01：仓库脚手架** 阶段：可启动的 Tauri 2 桌面壳、React + TypeScript 空工作区、原生标题栏与菜单、唯一的 Tauri 命令 seam，以及固定 fixture 语料。完整编辑器界面由后续票实现；PDF 引擎（PDFium/lopdf）尚未接入。
+当前仓库已包含 **票 01：仓库脚手架**（可启动的 Tauri 2 桌面壳、原生标题栏与菜单、唯一的 Tauri 命令 seam、固定 fixture 语料）与 **票 02：M0 浏览器原型**（React + TypeScript 的 PDFX 工作区布局，独立于生产壳运行）。生产桌面壳仍是空白工作区；原型不接入 PDF 引擎，页面内容为占位 React 标记。PDF 引擎（PDFium/lopdf）尚未接入。
 
 ## 技术栈
 
 - **桌面壳**：Tauri 2（ADR-0001），原生标题栏与系统菜单
 - **前端**：React 19 + TypeScript + Vite
 - **后端**：Rust，负责文件系统、PDF 处理与命令编排
-- **测试**：Rust 集成测试（命令层）+ Vitest / Testing Library（mock Tauri IPC 边界）
+- **测试**：Rust 集成测试（命令层）+ Vitest / Testing Library（mock Tauri IPC 边界与原型交互）+ Playwright（原型布局冒烟）
 - **语料**：`fixtures/`，纯 Python 生成，macOS PDFKit 独立验证
 
 目标平台：macOS 12+、Windows 10 1809+ / 11 x64。
@@ -25,7 +25,10 @@
 ```bash
 npm install
 npm run tauri dev      # 启动 Vite 与 Tauri 开发窗口
+npm run prototype      # 在浏览器中打开 M0 原型（/prototype.html）
 ```
+
+M0 原型只运行在浏览器中：入口为 `prototype.html`，不加载 Tauri IPC，也不调用任何 PDF 引擎。生产壳入口 `src/App.tsx` 保持不变。
 
 生产构建（不打包安装器，便于本机冒烟）：
 
@@ -41,8 +44,10 @@ npx tauri build --no-bundle
 | 命令 | 说明 |
 | --- | --- |
 | `npm run typecheck` | TypeScript 严格模式类型检查 |
-| `npm test` | Vitest 单元/组件测试（mock `@tauri-apps/api/core`） |
+| `npm test` | Vitest 单元/组件测试（mock `@tauri-apps/api/core`；含原型交互与中文文案守卫） |
+| `npm run test:e2e` | Playwright 原型布局冒烟（1440×900 与 1280×720），首次需 `npx playwright install chromium` |
 | `npm run build` | 类型检查 + Vite 生产构建 |
+| `npm run prototype` | 启动开发服务器并在浏览器打开 `/prototype.html` |
 | `cd src-tauri && cargo check` | Rust 编译检查 |
 | `cd src-tauri && cargo test` | 命令层与 fixture 加载器测试 |
 | `python3 fixtures/generate.py --check` | 校验已提交语料与生成器一致 |
@@ -51,15 +56,19 @@ npx tauri build --no-bundle
 ## 目录结构
 
 ```
+prototype.html        M0 原型入口（浏览器，不含 Tauri IPC）
+e2e/                  Playwright 原型布局冒烟
 src/                  React 前端
   lib/backend.ts      Tauri 命令绑定的唯一前端入口
-  App.tsx             空工作区壳
+  App.tsx             生产空工作区壳
+  prototype/          M0 原型（PrototypeApp、文案、占位文档、样式）
 src-tauri/            Tauri / Rust
   src/commands.rs     Tauri 命令边界（当前仅 app_info）
   src/menu.rs         原生菜单（文件/编辑/视图/帮助）
   tests/              命令层与 fixture 加载器集成测试
 fixtures/             固定 PDF 语料与生成/验证脚本
 docs/adr/             架构决策记录
+playwright.config.ts  原型 e2e 配置（两个桌面视口）
 ```
 
 ## 测试 seam
@@ -71,6 +80,11 @@ docs/adr/             架构决策记录
 - 测试不接触 PDFium/lopdf 内部类型；后续引擎测试同样通过命令边界驱动。
 
 新增命令时：在 `src-tauri/src/commands.rs` 注册，在 `src/lib/backend.ts` 增加对应调用，测试分别驱动命令函数与 mock 后的 IPC。
+
+M0 原型还有两个独立 seam：
+
+- **渲染后的界面**：`src/prototype/PrototypeApp.test.tsx` 通过可访问角色驱动模式切换、页签、工具、翻页、缩放与属性选择；不触碰组件内部状态。
+- **真实浏览器布局**：`e2e/prototype-layout.spec.ts` 在 1440×900 与 1280×720 下断言无溢出、各区域位于视口内且控件同步。也可手动在这两个视口打开 `/prototype.html` 复核。
 
 ## Fixture 语料
 
@@ -85,7 +99,8 @@ docs/adr/             架构决策记录
 ## 当前限制
 
 - PDF 引擎（PDFium + lopdf，ADR-0010）尚未接入；由票 03 负责。
-- 界面仅为空工作区壳；M0 编辑器布局由票 02 负责。
+- M0 原型（票 02）只验证布局、交互与文案；不打开真实 PDF，页面内容为 React 占位标记，`插入`、`表单` 等后续能力显示为占位状态。
+- 生产桌面壳仍是空工作区；原型入口与生产入口相互独立。
 - fixture 中的“大文件”是 500 页的提交版本；可用 `--large-pages 2000` 生成完整压力样例。
 - 中文/Embedded Font/Font Subset fixture 待字体管线票补充（见 `fixtures/README.md`）。
 - 生产构建目前未打包、未签名；GUI 启动冒烟需在图形会话中执行。
