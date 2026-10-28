@@ -475,7 +475,8 @@ pub fn copy_page(document_id: String, page_index: u32) -> Result<PageOperationVi
         let before = entry.pages.clone();
         let physical_page = before.physical(page_index)?;
         let new_physical = entry.document.pages().len() as u32;
-        let inherited = inherited_form_values(entry, physical_page)?;
+        let mut used_names = std::collections::HashSet::new();
+        let inherited = inherited_form_values(entry, physical_page, &mut used_names)?;
         // Pdfium's importer drops page link destinations; capture them while
         // the copy still points at the live source page.
         let source_links =
@@ -507,6 +508,24 @@ pub fn copy_page(document_id: String, page_index: u32) -> Result<PageOperationVi
         // Pdfium shares field objects (radio parents and nested fields) across
         // the import; keep the snapshot so those pointers stay valid.
         entry.copy_snapshots.push(source);
+        // Pdfium copies `/NM` verbatim, which would leave two annotations in
+        // the document answering to the same name. Give the imported
+        // annotations fresh identities before any name-addressed command can
+        // reach them. A failure does not invalidate the copied page.
+        if let Err(error) =
+            crate::annotations::refresh_copied_annotation_names(&entry.document, new_physical)
+        {
+            eprintln!("[pdfx] could not refresh copied annotation names: {error:?}");
+        }
+        // Created fields exist only in the session store, so the importer
+        // cannot bring them across; duplicate the records and let the normal
+        // discovery/save paths materialize them for the copy.
+        crate::form_create::copy_created_fields_for_page(
+            &mut entry.edit.created_fields,
+            physical_page,
+            new_physical,
+            &used_names,
+        );
         // The copy must be usable in the viewer before it is saved: give its
         // dropped page destinations back through PDFX's private page key. A
         // failure here does not invalidate the copied page, and the save
@@ -547,10 +566,13 @@ pub fn copy_page(document_id: String, page_index: u32) -> Result<PageOperationVi
 fn inherited_form_values(
     entry: &OpenDocument,
     source_physical: u32,
+    used_names: &mut std::collections::HashSet<String>,
 ) -> Result<crate::form::FormOverlay, CommandError> {
     use crate::form::{FormFieldKind, FormOverlay};
     let mut inherited = FormOverlay::default();
     for field in crate::form::discover_all(entry)? {
+        used_names.insert(field.name.clone());
+        used_names.insert(field.raw_name.clone());
         if field.created || field.page_index != source_physical {
             continue;
         }

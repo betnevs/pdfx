@@ -727,6 +727,47 @@ pub(crate) fn merge_views(
         .collect()
 }
 
+/// Duplicates the session-created fields of a page when that page is copied.
+///
+/// Created fields live only in this session until the next save, so Pdfium's
+/// page importer cannot carry them onto the copy. Each clone keeps the source
+/// field's geometry, properties and current value, but gets a fresh uid (so
+/// form edits address exactly one of the two records) and a copy-namespaced
+/// name (so the saved AcroForm has two distinct fields). The records are
+/// visible through discovery immediately and are written by the normal
+/// created-field save step; undoing the page copy hides them with the page.
+pub(crate) fn copy_created_fields_for_page(
+    store: &mut CreatedFieldStore,
+    source_page: u32,
+    target_page: u32,
+    used_names: &HashSet<String>,
+) {
+    let sources: Vec<CreatedField> = store
+        .fields
+        .iter()
+        .filter(|field| field.page_index == source_page)
+        .cloned()
+        .collect();
+    let mut used = used_names.clone();
+    for mut field in sources {
+        store.next_uid += 1;
+        let uid = store.next_uid;
+        let base = crate::page_ops::copied_field_name(&field.name, target_page);
+        let mut name = base.clone();
+        let mut suffix = 2;
+        while used.contains(&name) {
+            name = format!("{base}_{suffix}");
+            suffix += 1;
+        }
+        used.insert(name.clone());
+        field.uid = uid;
+        field.field_id = format!("{CREATED_ID_PREFIX}{uid}");
+        field.page_index = target_page;
+        field.name = name;
+        store.restore(field);
+    }
+}
+
 /// Parses a created-field id back to its session uid. Radio option suffixes
 /// are ignored here; [`created_option_index`] reads them.
 pub(crate) fn created_uid(field_id: &str) -> Option<u64> {

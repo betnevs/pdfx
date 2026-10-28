@@ -816,7 +816,7 @@ fn apply_copy_fields_fixup(
                 else {
                     continue;
                 };
-                let base = parent
+                let shallow_base = parent
                     .get(b"T")
                     .and_then(lopdf::Object::as_str)
                     .ok()
@@ -830,6 +830,21 @@ fn apply_copy_fields_fixup(
                         })
                     })
                     .unwrap_or_default();
+                // A nested field takes its user-visible name from the whole
+                // `/T` chain (`person.name`). PDFium returns that dotted name,
+                // so the duplicate must be registered under the same full name
+                // or save-time value edits cannot find it.
+                let nested = parent.has(b"Parent");
+                let base = if nested {
+                    let full = full_field_name(incremental, parent_id);
+                    if full.is_empty() {
+                        shallow_base
+                    } else {
+                        full
+                    }
+                } else {
+                    shallow_base
+                };
                 let name = crate::page_ops::copied_field_name(&base, *physical);
                 let new_parent_id = allocate(&mut next_id)?;
                 let mut parent_copy = parent.clone();
@@ -843,7 +858,14 @@ fn apply_copy_fields_fixup(
                             .collect(),
                     ),
                 );
-                let is_root = !parent_copy.has(b"Parent");
+                if nested {
+                    // Flattening keeps the copied field self-contained: a
+                    // clone that still pointed at the source ancestor would be
+                    // discoverable only through the source tree, and a shallow
+                    // `/T` would not match the dotted name discovery reports.
+                    copy_inherited_field_attributes(incremental, parent, &mut parent_copy);
+                    parent_copy.remove(b"Parent");
+                }
                 objects.insert(new_parent_id, parent_copy);
                 for widget_id in &widget_ids {
                     let mut widget = objects.remove(widget_id).unwrap_or_else(|| {
@@ -854,9 +876,7 @@ fn apply_copy_fields_fixup(
                     widget.set(b"Parent".to_vec(), lopdf::Object::Reference(new_parent_id));
                     objects.insert(*widget_id, widget);
                 }
-                if is_root {
-                    new_fields.push(new_parent_id);
-                }
+                new_fields.push(new_parent_id);
             }
         }
     }
@@ -1850,6 +1870,66 @@ fn dictionary_any(
         .get_dictionary(id)
         .ok()
         .or_else(|| incremental.get_prev_documents().get_dictionary(id).ok())
+}
+
+/// Field entries a terminal field inherits from its `/Parent` chain
+/// (PDF 32000-1 Table 220). Flattening a copied nested field copies them down
+/// so the new root field stays usable without the source ancestor objects.
+const INHERITABLE_FIELD_KEYS: [&[u8]; 11] = [
+    b"FT", b"Ff", b"V", b"DV", b"AA", b"DA", b"Q", b"DS", b"RV", b"Opt", b"MaxLen",
+];
+
+/// Copies inheritable field entries from the ancestors of `parent` into the
+/// flattened copy, nearest ancestor first. Existing entries win.
+fn copy_inherited_field_attributes(
+    incremental: &lopdf::IncrementalDocument,
+    parent: &lopdf::Dictionary,
+    copy: &mut lopdf::Dictionary,
+) {
+    let mut next = parent
+        .get(b"Parent")
+        .ok()
+        .and_then(|value| value.as_reference().ok());
+    for _ in 0..64 {
+        let Some(id) = next else { break };
+        let Some(ancestor) = dictionary_any(incremental, id) else {
+            break;
+        };
+        for key in INHERITABLE_FIELD_KEYS {
+            if copy.has(key) {
+                continue;
+            }
+            if let Ok(value) = ancestor.get(key) {
+                copy.set(key.to_vec(), value.clone());
+            }
+        }
+        next = ancestor
+            .get(b"Parent")
+            .ok()
+            .and_then(|value| value.as_reference().ok());
+    }
+}
+
+/// The full dotted field name of `id`, built from `/T` entries up the
+/// `/Parent` chain (`person.name` for nested fields).
+fn full_field_name(incremental: &lopdf::IncrementalDocument, id: lopdf::ObjectId) -> String {
+    let mut parts = Vec::new();
+    let mut next = Some(id);
+    for _ in 0..64 {
+        let Some(id) = next else { break };
+        let Some(dictionary) = dictionary_any(incremental, id) else {
+            break;
+        };
+        if let Ok(title) = dictionary.get(b"T").and_then(lopdf::Object::as_str) {
+            parts.push(decode_pdf_text(title));
+        }
+        next = dictionary
+            .get(b"Parent")
+            .ok()
+            .and_then(|value| value.as_reference().ok());
+    }
+    parts.reverse();
+    parts.join(".")
 }
 
 /// Finds a field by name in the appended revision's `/AcroForm`, where the

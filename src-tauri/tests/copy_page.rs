@@ -11,13 +11,18 @@ mod support;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use pdfx_lib::annotations::{
+    create_shape_with_author, delete_annotation, list_annotations, AnnotationKind,
+    CreateShapeRequest, ShapeGeometry, ShapeKind, ShapeStyle,
+};
 use pdfx_lib::commands::{
     close_document, extract_text, extract_text_layer, open_document, page_info, CommandErrorCode,
     DocumentView,
 };
 use pdfx_lib::form::{
-    fill_form_field, form_fields, FormFieldKind, FormFieldValueInput, FormFieldView,
+    fill_form_field, form_fields, FormFieldKind, FormFieldRect, FormFieldValueInput, FormFieldView,
 };
+use pdfx_lib::form_create::{create_form_field, CreateFormFieldRequest};
 use pdfx_lib::links::{
     list_links, update_link_target, LinkTarget, LinkUnsupportedReason, LinkView,
     UpdateLinkTargetRequest,
@@ -1449,4 +1454,379 @@ fn restricted_documents_refuse_copy_page_without_touching_history() {
     assert_eq!(fs::read(&source).expect("reread source"), source_bytes);
 
     close_document(document_id).expect("close document");
+}
+
+/// Builds a minimal PDF from raw object bodies, so tests can exercise form
+/// structures the shared fixtures do not cover.
+fn build_pdf(objects: Vec<(u32, Vec<u8>)>, root: u32) -> Vec<u8> {
+    let mut objects = objects;
+    objects.sort_by_key(|(number, _)| *number);
+    let last = objects.last().expect("at least one object").0;
+    let mut out = Vec::new();
+    out.extend_from_slice(b"%PDF-1.7\n%\xE2\xE3\xCF\xD3\n");
+    let mut offsets = vec![0usize; (last + 1) as usize];
+    for (number, body) in &objects {
+        offsets[*number as usize] = out.len();
+        out.extend_from_slice(format!("{number} 0 obj\n").as_bytes());
+        out.extend_from_slice(body);
+        out.extend_from_slice(b"\nendobj\n");
+    }
+    let xref_offset = out.len();
+    out.extend_from_slice(format!("xref\n0 {}\n", last + 1).as_bytes());
+    out.extend_from_slice(b"0000000000 65535 f \n");
+    for number in 1..=last {
+        out.extend_from_slice(format!("{:010} 00000 n \n", offsets[number as usize]).as_bytes());
+    }
+    out.extend_from_slice(
+        format!("trailer\n<< /Size {} /Root {root} 0 R >>\n", last + 1).as_bytes(),
+    );
+    out.extend_from_slice(format!("startxref\n{xref_offset}\n%%EOF\n").as_bytes());
+    out
+}
+
+/// One page whose text field is nested below a parent field:
+/// `/AcroForm /Fields [person]`, `person /Kids [name]`, `name` carries `/FT`
+/// and `/V`, and the widget's `/Parent` points at `name`.
+fn nested_acrofom_pdf(dir: &TempDir) -> PathBuf {
+    let objects: Vec<(u32, Vec<u8>)> = vec![
+        (1, b"<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [5 0 R] /DA (/Helv 12 Tf 0 g) /DR << /Font << /Helv 4 0 R >> >> >> >>".to_vec()),
+        (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+        (3, b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 6 0 R /Annots [8 0 R] >>".to_vec()),
+        (4, b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec()),
+        (5, b"<< /T (person) /Kids [7 0 R] >>".to_vec()),
+        (6, b"<< /Length 0 >>\nstream\n\nendstream".to_vec()),
+        (7, b"<< /T (name) /Parent 5 0 R /FT /Tx /V (Ada) /DA (/Helv 12 Tf 0 g) /Kids [8 0 R] >>".to_vec()),
+        (8, b"<< /Type /Annot /Subtype /Widget /Parent 7 0 R /Rect [72 620 320 644] /P 3 0 R /F 4 >>".to_vec()),
+    ];
+    let path = dir.path().join("nested-form.pdf");
+    fs::write(&path, build_pdf(objects, 1)).expect("write nested form");
+    path
+}
+
+#[test]
+fn copied_annotations_get_fresh_names_and_deleting_the_copy_keeps_the_source() {
+    let dir = TempDir::new("copy-page-annotation-identity");
+    let source = synthetic::page_operations_pdf();
+    let document = open(Path::new(&source.path_string()));
+    let document_id = document.document_id.clone();
+
+    let created = create_shape_with_author(
+        document_id.clone(),
+        "Auditor".to_owned(),
+        CreateShapeRequest {
+            page_index: 0,
+            kind: ShapeKind::Square,
+            geometry: ShapeGeometry {
+                x: 100.0,
+                y: 100.0,
+                width: 50.0,
+                height: 40.0,
+                rotation: 0.0,
+            },
+            style: ShapeStyle {
+                fill_color: None,
+                stroke_color: Some("#ff0000".to_owned()),
+                opacity: 100,
+                line_width: 2.0,
+            },
+        },
+    )
+    .expect("create shape");
+    let source_name = created.annotation.expect("created annotation").name;
+
+    let view = pdfx_lib::page_ops::copy_page(document_id.clone(), 0).expect("copy page");
+    assert_eq!((view.page_count, view.page_index), (4, 1));
+
+    let squares: Vec<_> = list_annotations(document_id.clone())
+        .expect("list annotations")
+        .into_iter()
+        .filter(|annotation| annotation.kind == AnnotationKind::Square)
+        .collect();
+    assert_eq!(squares.len(), 2, "the copy carries the shape too");
+    assert_eq!((squares[0].page_index, squares[1].page_index), (0, 1));
+    assert_eq!(squares[0].name, source_name, "the source keeps its name");
+    assert_ne!(
+        squares[0].name, squares[1].name,
+        "the copied annotation must not answer to the source's /NM"
+    );
+    let copy_name = squares[1].name.clone();
+
+    // Both names must survive a save with distinct identities.
+    let output = dir.path().join("fresh-names.pdf");
+    save(&document_id, &output);
+    close_document(document_id).expect("close document");
+
+    let reopened = open(&output);
+    let saved_squares: Vec<_> = list_annotations(reopened.document_id.clone())
+        .expect("list saved annotations")
+        .into_iter()
+        .filter(|annotation| annotation.kind == AnnotationKind::Square)
+        .collect();
+    assert_eq!(saved_squares.len(), 2);
+    assert_eq!(saved_squares[0].name, source_name);
+    assert_eq!(saved_squares[0].page_index, 0);
+    assert_eq!(saved_squares[1].name, copy_name);
+    assert_eq!(saved_squares[1].page_index, 1);
+
+    // Deleting the copy's annotation must delete the copy, never the source.
+    delete_annotation(reopened.document_id.clone(), copy_name).expect("delete copied annotation");
+    let remaining: Vec<_> = list_annotations(reopened.document_id.clone())
+        .expect("list annotations after delete")
+        .into_iter()
+        .filter(|annotation| annotation.kind == AnnotationKind::Square)
+        .collect();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].name, source_name);
+    assert_eq!(remaining[0].page_index, 0);
+
+    let second = dir.path().join("source-kept.pdf");
+    save(&reopened.document_id, &second);
+    close_document(reopened.document_id).expect("close reopened document");
+
+    let final_document = open(&second);
+    let final_squares: Vec<_> = list_annotations(final_document.document_id.clone())
+        .expect("list final annotations")
+        .into_iter()
+        .filter(|annotation| annotation.kind == AnnotationKind::Square)
+        .collect();
+    assert_eq!(final_squares.len(), 1);
+    assert_eq!(final_squares[0].name, source_name);
+    assert_eq!(final_squares[0].page_index, 0);
+    close_document(final_document.document_id).expect("close final document");
+}
+
+#[test]
+fn copying_a_page_with_nested_acrofom_fields_saves_independent_fields() {
+    let dir = TempDir::new("copy-page-nested-form");
+    let source = nested_acrofom_pdf(&dir);
+    let document = open(&source);
+    let document_id = document.document_id.clone();
+
+    let fields = form_fields(document_id.clone()).expect("fields");
+    let source_field = field_view(&fields, "person.name", 0);
+    assert_eq!(source_field.value.as_deref(), Some("Ada"));
+    assert_eq!(source_field.kind, FormFieldKind::Text);
+
+    let view = pdfx_lib::page_ops::copy_page(document_id.clone(), 0).expect("copy page");
+    assert_eq!((view.page_count, view.page_index), (2, 1));
+
+    let fields = form_fields(document_id.clone()).expect("fields after copy");
+    let copied = field_view(&fields, "person.name__copy_p1", 1);
+    assert_eq!(copied.value.as_deref(), Some("Ada"));
+    assert_eq!(copied.kind, FormFieldKind::Text);
+
+    fill_text(&document_id, &copied.field_id, "Copy Ada");
+
+    let output = dir.path().join("nested-copy.pdf");
+    save(&document_id, &output);
+    close_document(document_id).expect("close document");
+
+    let parsed = lopdf::Document::load(&output).expect("parse saved output");
+    let roots = form_field_names(&parsed);
+    assert!(
+        roots.iter().any(|name| name == "person"),
+        "roots: {roots:?}"
+    );
+    assert!(
+        roots.iter().any(|name| name == "person.name__copy_p1"),
+        "the flattened copy is registered in /AcroForm /Fields: {roots:?}"
+    );
+
+    let reopened = open(&output);
+    let fields = form_fields(reopened.document_id.clone()).expect("fields after reopen");
+    assert_eq!(
+        field_view(&fields, "person.name", 0).value.as_deref(),
+        Some("Ada"),
+        "editing the copy must not touch the nested source field"
+    );
+    assert_eq!(
+        field_view(&fields, "person.name__copy_p1", 1)
+            .value
+            .as_deref(),
+        Some("Copy Ada")
+    );
+    close_document(reopened.document_id).expect("close reopened document");
+}
+
+#[test]
+fn copying_a_page_duplicates_session_created_fields_with_independent_values() {
+    let dir = TempDir::new("copy-page-created-field");
+    let source = fixture_copy("form-acroform", &dir, "form.pdf");
+    let document = open(&source);
+    let document_id = document.document_id.clone();
+
+    create_form_field(
+        document_id.clone(),
+        0,
+        CreateFormFieldRequest::Text {
+            rect: FormFieldRect {
+                x: 100.0,
+                y: 100.0,
+                width: 200.0,
+                height: 30.0,
+            },
+            name: Some("session_field".to_owned()),
+            tooltip: None,
+            required: false,
+            multiline: false,
+            font_size: Some(12.0),
+        },
+    )
+    .expect("create field");
+    let fields = form_fields(document_id.clone()).expect("fields");
+    let source_field = field_view(&fields, "session_field", 0);
+    assert!(source_field.created);
+    fill_text(&document_id, &source_field.field_id, "source value");
+
+    let view = pdfx_lib::page_ops::copy_page(document_id.clone(), 0).expect("copy page");
+    assert_eq!((view.page_count, view.page_index), (3, 1));
+
+    let fields = form_fields(document_id.clone()).expect("fields after copy");
+    let copied = field_view(&fields, "session_field__copy_p2", 1);
+    assert!(copied.created, "the duplicate is a session field");
+    assert_eq!(copied.value.as_deref(), Some("source value"));
+
+    // The copy action owns the duplicate: undo hides it with the page and redo
+    // brings it back.
+    undo_text_edit(document_id.clone()).expect("undo copy");
+    let without_copy = form_fields(document_id.clone()).expect("fields after undo");
+    assert!(
+        !without_copy
+            .iter()
+            .any(|field| field.name == "session_field__copy_p2"),
+        "undoing the copy hides its created field too"
+    );
+    redo_text_edit(document_id.clone()).expect("redo copy");
+    let fields = form_fields(document_id.clone()).expect("fields after redo");
+    let copied = field_view(&fields, "session_field__copy_p2", 1).clone();
+
+    fill_text(&document_id, &copied.field_id, "copy value");
+    let source_field = field_view(&fields, "session_field", 0).clone();
+    fill_text(&document_id, &source_field.field_id, "changed source");
+
+    let output = dir.path().join("created-copy.pdf");
+    save(&document_id, &output);
+    close_document(document_id).expect("close document");
+
+    let parsed = lopdf::Document::load(&output).expect("parse saved output");
+    let roots = form_field_names(&parsed);
+    assert!(
+        roots.iter().any(|name| name == "session_field"),
+        "{roots:?}"
+    );
+    assert!(
+        roots.iter().any(|name| name == "session_field__copy_p2"),
+        "the created field is materialized for the copy: {roots:?}"
+    );
+
+    let reopened = open(&output);
+    let fields = form_fields(reopened.document_id.clone()).expect("fields after reopen");
+    assert_eq!(
+        field_view(&fields, "session_field", 0).value.as_deref(),
+        Some("changed source")
+    );
+    assert_eq!(
+        field_view(&fields, "session_field__copy_p2", 1)
+            .value
+            .as_deref(),
+        Some("copy value")
+    );
+    close_document(reopened.document_id).expect("close reopened document");
+}
+
+#[test]
+fn copied_links_follow_pages_moved_after_the_copy() {
+    let dir = TempDir::new("copy-page-link-reorder");
+    let source = synthetic::destination_links_pdf();
+    let document = open(Path::new(&source.path_string()));
+    let document_id = document.document_id.clone();
+    assert_eq!(document.page_count, 2);
+
+    pdfx_lib::page_ops::copy_page(document_id.clone(), 0).expect("copy page");
+    // [source, copy, destination] -> [destination, source, copy]
+    pdfx_lib::page_ops::move_page(document_id.clone(), 2, 0).expect("move destination page");
+
+    let links = list_links(document_id.clone()).expect("list links after move");
+    let page_links = |page_index: u32| -> Vec<_> {
+        links
+            .iter()
+            .filter(|link| link.page_index == page_index)
+            .map(|link| (link.target.clone(), link.unsupported))
+            .collect()
+    };
+    for page_index in [1, 2] {
+        let on_page = page_links(page_index);
+        assert_eq!(on_page.len(), 4, "page {page_index} keeps all links");
+        for (target, unsupported) in &on_page[..3] {
+            assert_eq!(target, &Some(LinkTarget::Page { page_index: 0 }));
+            assert_eq!(*unsupported, None);
+        }
+        assert_eq!(
+            on_page[3].1,
+            Some(LinkUnsupportedReason::Destination),
+            "the unsupported link stays visibly unsupported"
+        );
+    }
+
+    let output = dir.path().join("links-moved.pdf");
+    save(&document_id, &output);
+    close_document(document_id).expect("close document");
+
+    let reopened = open(&output);
+    let saved = list_links(reopened.document_id.clone()).expect("list saved links");
+    for page_index in [1, 2] {
+        let targets: Vec<_> = saved
+            .iter()
+            .filter(|link| link.page_index == page_index)
+            .map(|link| link.target.clone())
+            .collect();
+        assert_eq!(targets.len(), 4);
+        for target in &targets[..3] {
+            assert_eq!(target, &Some(LinkTarget::Page { page_index: 0 }));
+        }
+    }
+    close_document(reopened.document_id).expect("close reopened document");
+}
+
+#[test]
+fn copied_links_to_a_deleted_page_stay_visibly_unsupported() {
+    let dir = TempDir::new("copy-page-link-delete");
+    let source = synthetic::destination_links_pdf();
+    let document = open(Path::new(&source.path_string()));
+    let document_id = document.document_id.clone();
+
+    pdfx_lib::page_ops::copy_page(document_id.clone(), 0).expect("copy page");
+    pdfx_lib::page_ops::delete_page(document_id.clone(), 2).expect("delete destination page");
+
+    let links = list_links(document_id.clone()).expect("list links after delete");
+    for page_index in [0, 1] {
+        let page_links: Vec<_> = links
+            .iter()
+            .filter(|link| link.page_index == page_index)
+            .collect();
+        assert_eq!(page_links.len(), 4, "page {page_index} keeps its links");
+        for link in &page_links[..3] {
+            assert_eq!(
+                link.unsupported,
+                Some(LinkUnsupportedReason::Destination),
+                "a link to the deleted page must not point somewhere else"
+            );
+        }
+    }
+
+    let output = dir.path().join("links-deleted.pdf");
+    save(&document_id, &output);
+    close_document(document_id).expect("close document");
+
+    let reopened = open(&output);
+    let saved = list_links(reopened.document_id.clone()).expect("list saved links");
+    for page_index in [0, 1] {
+        let unsupported = saved
+            .iter()
+            .filter(|link| link.page_index == page_index)
+            .filter(|link| link.unsupported == Some(LinkUnsupportedReason::Destination))
+            .count();
+        assert_eq!(unsupported, 4, "the saved link stays unresolved");
+    }
+    close_document(reopened.document_id).expect("close reopened document");
 }

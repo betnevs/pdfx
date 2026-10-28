@@ -342,6 +342,10 @@ pub(crate) struct OpenDocument {
     /// source document's field objects. Dropping the snapshot while the copy
     /// is open would leave a dangling field pointer, so snapshots live for the
     /// whole session and are declared after `document` to be dropped after it.
+    /// Each snapshot holds a full PDFium serialization of the document at copy
+    /// time, so memory grows by roughly one document copy per copied page;
+    /// this is the price of keeping copied widgets usable before the next save
+    /// and is released when the document closes.
     pub(crate) copy_snapshots: Vec<PdfDocument<'static>>,
 }
 
