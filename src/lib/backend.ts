@@ -50,6 +50,7 @@ export type CommandErrorCode =
   | "form_value_invalid"
   | "form_field_name_invalid"
   | "form_field_name_duplicate"
+  | "unsupported_link"
   | "update_not_configured"
   | "update_check_failed"
   | "update_manifest_invalid"
@@ -860,6 +861,60 @@ export interface AnnotationMutationView {
   history: EditHistoryView;
 }
 
+/** A native link's target: an external URL or another page in this document. */
+export type LinkTarget =
+  | { kind: "url"; url: string }
+  | {
+      kind: "page";
+      /** Zero-based page index in the same document. */
+      pageIndex: number;
+    };
+
+/** Why an existing link's target cannot be edited without corrupting it. */
+export type LinkUnsupportedReason = "action" | "destination" | "malformed";
+
+/**
+ * One native `/Link` annotation as the canvas overlay and link dialog see it.
+ *
+ * `id` is the link's position on its page (`"page:index"`). Every mutation
+ * reloads the list because creating or editing a link appends a new native
+ * annotation. `target` is present exactly when the link is editable;
+ * `unsupported` is present exactly when PDFX refuses to touch it.
+ */
+export interface LinkView {
+  id: string;
+  /** Stable `/NM` identity; absent on links written by other tools. */
+  name: string | null;
+  pageIndex: number;
+  target: LinkTarget | null;
+  unsupported: LinkUnsupportedReason | null;
+  /** Display-space boxes: one per `/QuadPoints` entry, or `/Rect`. */
+  rects: TextMarkupRect[];
+}
+
+/** Adds one link over a text selection's quads or an image's bounds. */
+export interface CreateLinkRequest {
+  pageIndex: number;
+  /** Display-space boxes; one per selected text line, or one per image. */
+  rects: TextMarkupRect[];
+  target: LinkTarget;
+}
+
+/** Replaces one existing link's target as a single undoable action. */
+export interface UpdateLinkTargetRequest {
+  /** The positional id from {@link LinkView}. */
+  linkId: string;
+  target: LinkTarget;
+}
+
+/** The outcome of creating, editing or deleting one link. */
+export interface LinkMutationView {
+  /** Null after a deletion. */
+  link: LinkView | null;
+  pageIndex: number;
+  history: EditHistoryView;
+}
+
 /** The two save entry points. */
 export type SaveKind = "save_as" | "save_changes";
 
@@ -982,6 +1037,7 @@ const COMMAND_ERROR_CODES: ReadonlySet<string> = new Set<CommandErrorCode>([
   "form_value_invalid",
   "form_field_name_invalid",
   "form_field_name_duplicate",
+  "unsupported_link",
   "internal",
 ]);
 
@@ -1644,6 +1700,39 @@ export async function listAnnotations(
   documentId: string,
 ): Promise<AnnotationView[]> {
   return invoke<AnnotationView[]>("list_annotations", { documentId });
+}
+
+/** Lists every native link in the document, in page order. */
+export async function listLinks(documentId: string): Promise<LinkView[]> {
+  return invoke<LinkView[]>("list_links", { documentId });
+}
+
+/**
+ * Adds one native link over a text selection's quads or an image's bounds.
+ * A URL target is written as a URI action; a page target is materialized as
+ * an in-document GoTo destination by the save pipeline.
+ */
+export async function createLink(
+  documentId: string,
+  request: CreateLinkRequest,
+): Promise<LinkMutationView> {
+  return invoke<LinkMutationView>("create_link", { documentId, request });
+}
+
+/** Replaces one existing link's target as a single undoable action. */
+export async function updateLinkTarget(
+  documentId: string,
+  request: UpdateLinkTargetRequest,
+): Promise<LinkMutationView> {
+  return invoke<LinkMutationView>("update_link_target", { documentId, request });
+}
+
+/** Removes one link from the in-memory document; undo can bring it back. */
+export async function deleteLink(
+  documentId: string,
+  linkId: string,
+): Promise<LinkMutationView> {
+  return invoke<LinkMutationView>("delete_link", { documentId, linkId });
 }
 
 /**

@@ -7,11 +7,13 @@ import {
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
+import { createPortal } from "react-dom";
 
 import {
   applyTextBoxStyle,
   applyTextEdit,
   createInkAnnotation,
+  createLink,
   createNoteAnnotation,
   createTextBox,
   createTextMarkupAnnotation,
@@ -30,6 +32,7 @@ import {
   type CommandError,
   type EditHistoryView,
   type InkPoint,
+  type LinkTarget,
   type TextBoxFontView,
   type TextBoxStyleView,
   type TextBoxTargetView,
@@ -38,6 +41,7 @@ import {
   type TextMarkupRect,
 } from "../lib/backend";
 import { notifyDocumentChanged, onDocumentChanged } from "../lib/documentEvents";
+import { linkErrorText } from "../lib/linkTarget";
 import {
   dragRect,
   estimatedContentHeight,
@@ -49,6 +53,7 @@ import {
   type Point as BoxPoint,
 } from "../lib/textBoxGeometry";
 import { TextBoxStylePanel } from "./TextBoxStylePanel";
+import { LinkTargetDialog } from "./LinkTargetDialog";
 import {
   buildTextLayer,
   findCharAt,
@@ -139,6 +144,8 @@ export interface PageTextLayerProps {
   onSelectAnnotation?: (annotation: AnnotationView | null) => void;
   /** Page render scale, used to size the inline editor text. */
   scale?: number;
+  /** Number of pages an internal link may address. */
+  pageCount?: number;
 }
 
 function TextEditToolbar({
@@ -367,6 +374,7 @@ export function PageTextLayer({
   selectedAnnotation = null,
   onSelectAnnotation,
   scale = 1,
+  pageCount = 0,
 }: PageTextLayerProps) {
   const [state, setState] = useState<LayerState>({ status: "loading" });
   const [selection, setSelection] = useState<TextRange | null>(null);
@@ -374,6 +382,11 @@ export function PageTextLayer({
   const [markupColor, setMarkupColor] = useState(DEFAULT_MARKUP_COLOR);
   const [markupOpacity, setMarkupOpacity] = useState(DEFAULT_MARKUP_OPACITY);
   const [markupBusy, setMarkupBusy] = useState(false);
+  const [linkDraft, setLinkDraft] = useState<{
+    rects: TextMarkupRect[];
+  } | null>(null);
+  const [linkBusy, setLinkBusy] = useState(false);
+  const [linkError, setLinkError] = useState<string | null>(null);
   const [noteMode, setNoteMode] = useState(false);
   const [inkMode, setInkMode] = useState(false);
   const [inkColor, setInkColor] = useState(DEFAULT_INK_COLOR);
@@ -1628,6 +1641,46 @@ export function PageTextLayer({
     }
   };
 
+  const openLinkDialog = (): void => {
+    if (!selection || markupBusy || linkBusy || readOnly || !canAnnotate) {
+      return;
+    }
+    const rects = selectionRects(textStructure, selection);
+    if (rects.length === 0) {
+      return;
+    }
+    setLinkError(null);
+    setLinkDraft({ rects });
+  };
+
+  const createLinkFromSelection = async (
+    target: LinkTarget,
+  ): Promise<void> => {
+    if (!linkDraft || linkBusy) {
+      return;
+    }
+    setLinkBusy(true);
+    setLinkError(null);
+    try {
+      const result = await createLink(documentId, {
+        pageIndex,
+        rects: linkDraft.rects,
+        target,
+      });
+      setHistory(result.history);
+      setLinkDraft(null);
+      // The link now covers the selection; clear it so the action bar cannot
+      // start a second link over the same text by accident.
+      setSelection(null);
+      setCopyStatus("idle");
+      notifyDocumentChanged({ documentId, pageIndex, source: "link" });
+    } catch (error) {
+      setLinkError(linkErrorText(error));
+    } finally {
+      setLinkBusy(false);
+    }
+  };
+
   const handleKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
     if (event.key === "Escape") {
       if (editor) {
@@ -2103,6 +2156,15 @@ export function PageTextLayer({
               >
                 波浪线
               </button>
+              <span className="toolbar-divider" aria-hidden="true" />
+              <button
+                type="button"
+                disabled={markupBusy || linkBusy}
+                title="为此段文字添加超链接"
+                onClick={openLinkDialog}
+              >
+                链接
+              </button>
             </span>
           ) : (
             <span className="text-annotation-reason">
@@ -2111,6 +2173,25 @@ export function PageTextLayer({
           )}
         </div>
       )}
+
+      {linkDraft &&
+        createPortal(
+          <LinkTargetDialog
+            mode="create"
+            pageCount={pageCount}
+            initialTarget={null}
+            busy={linkBusy}
+            error={linkError}
+            onCancel={() => {
+              if (!linkBusy) {
+                setLinkDraft(null);
+                setLinkError(null);
+              }
+            }}
+            onSubmit={(target) => void createLinkFromSelection(target)}
+          />,
+          document.body,
+        )}
     </div>
   );
 }

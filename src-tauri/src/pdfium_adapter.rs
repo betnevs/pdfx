@@ -23,8 +23,9 @@
 use std::fmt;
 
 use pdfium_render::prelude::{
-    PdfColor, PdfDocument, PdfPageAnnotation, PdfPageAnnotationCommon, PdfPageAnnotationType,
-    PdfPoints, PdfQuadPoints, PdfRect, PdfSecurityHandlerRevision, PdfiumError, FPDF_DWORD,
+    PdfActionType, PdfColor, PdfDocument, PdfPageAnnotation, PdfPageAnnotationCommon,
+    PdfPageAnnotationType, PdfPoints, PdfQuadPoints, PdfRect, PdfSecurityHandlerRevision,
+    PdfiumError, FPDF_DWORD,
 };
 
 /// A rectangle in default user space units (points), with PDF's origin at the
@@ -266,6 +267,151 @@ pub fn create_text_markup_annotation(
     }
 
     Ok(AnnotationRef::new(page_index, annotations.len() - 1))
+}
+
+/// Creates a link annotation (`/Subtype /Link`) with a URI action and `rect`
+/// bounds.
+///
+/// Pdfium writes `/A << /S /URI /URI (...uri...) >>`. In-document page targets
+/// are written by the save pipeline as a `/GoTo` action because Pdfium has no
+/// setter for destinations; callers mark them with a private key on the
+/// annotation dictionary and the save pass rewrites the action.
+pub fn create_link_annotation(
+    document: &PdfDocument<'_>,
+    page_index: i32,
+    uri: &str,
+    rect: AnnotationRect,
+) -> Result<AnnotationRef, AdapterError> {
+    let pages = document.pages();
+    let mut page = pages.get(page_index)?;
+    let annotations = page.annotations_mut();
+    let mut annotation = annotations.create_link_annotation(uri)?;
+    // The vendored patch adds `close()` only to the annotation types PDFX
+    // creates directly; the upstream link type exposes no close method, so the
+    // creation handle is dropped like every other upstream annotation handle.
+    let result = annotation.set_bounds(rect.to_pdf_rect());
+    result?;
+    Ok(AnnotationRef::new(page_index, annotations.len() - 1))
+}
+
+/// The standard link target forms PDFX can read from a link annotation.
+///
+/// `/A` actions and a direct `/Dest` are both represented; the caller decides
+/// which ones it can edit. Anything else (`/S /JavaScript`, `/S /Launch`, a
+/// named destination Pdfium cannot resolve) is reported rather than guessed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LinkAttributes {
+    /// Target of a `/S /URI` action.
+    pub uri: Option<String>,
+    /// Page index of a `/S /GoTo` action or a direct `/Dest`.
+    pub destination_page: Option<u32>,
+    /// The link has an action PDFX does not support.
+    pub action_unsupported: bool,
+    /// A destination exists but Pdfium could not resolve its page.
+    pub destination_unresolved: bool,
+    /// The annotation has no readable action and no destination, or Pdfium
+    /// could not expose its `/Link` handle.
+    pub malformed: bool,
+}
+
+/// Reads the target of a link annotation.
+///
+/// Returns `Ok(None)` when the annotation is not a `/Link` annotation.
+pub fn link_attributes(
+    document: &PdfDocument<'_>,
+    target: AnnotationRef,
+) -> Result<Option<LinkAttributes>, AdapterError> {
+    with_annotation_on(document, target, |annotation| {
+        let Some(link_annotation) = annotation.as_link_annotation() else {
+            return Ok(None);
+        };
+        let mut attributes = LinkAttributes::default();
+        let Ok(link) = link_annotation.link() else {
+            attributes.malformed = true;
+            return Ok(Some(attributes));
+        };
+
+        if let Some(action) = link.action() {
+            match action.action_type() {
+                PdfActionType::Uri => {
+                    match action
+                        .as_uri_action()
+                        .and_then(|action| action.uri().ok())
+                        .filter(|uri| !uri.trim().is_empty())
+                    {
+                        Some(uri) => attributes.uri = Some(uri),
+                        None => attributes.malformed = true,
+                    }
+                }
+                PdfActionType::GoToDestinationInSameDocument => {
+                    let page = action
+                        .as_local_destination_action()
+                        .and_then(|action| action.destination().ok())
+                        .and_then(|destination| destination.page_index().ok());
+                    match page {
+                        Some(page) => attributes.destination_page = Some(page as u32),
+                        None => attributes.destination_unresolved = true,
+                    }
+                }
+                _ => attributes.action_unsupported = true,
+            }
+        }
+
+        // A direct `/Dest` array (or a named destination Pdfium can resolve)
+        // is used only when there is no action at all.
+        if attributes.uri.is_none()
+            && attributes.destination_page.is_none()
+            && !attributes.action_unsupported
+            && !attributes.destination_unresolved
+            && !attributes.malformed
+        {
+            match link.destination() {
+                Some(destination) => match destination.page_index() {
+                    Ok(page) => attributes.destination_page = Some(page as u32),
+                    Err(_) => attributes.destination_unresolved = true,
+                },
+                // Pdfium reports `None` both for a malformed link and for a
+                // named destination it could not resolve. A string `/Dest`
+                // entry identifies the latter, which gets a clearer reason.
+                None => {
+                    if annotation
+                        .string_value("Dest")
+                        .is_some_and(|value| !value.trim().is_empty())
+                    {
+                        attributes.destination_unresolved = true;
+                    } else {
+                        attributes.malformed = true;
+                    }
+                }
+            }
+        }
+
+        Ok(Some(attributes))
+    })
+}
+
+/// Appends attachment points (`/QuadPoints`) to a link annotation.
+///
+/// Link annotations use the same quadrilateral list as text markup; readers
+/// use `/Rect` for the clickable region and `/QuadPoints` for the precise
+/// glyph-shaped area.
+pub fn append_link_quads(
+    document: &PdfDocument<'_>,
+    target: AnnotationRef,
+    quads: &[[f32; 8]],
+) -> Result<(), AdapterError> {
+    with_annotation_on(document, target, |annotation| {
+        let link = annotation
+            .as_link_annotation_mut()
+            .ok_or(PdfiumError::UnknownPdfAnnotationType)?;
+        let points = link.attachment_points_mut();
+        for quad in quads {
+            points.create_attachment_point_at_end(PdfQuadPoints::new_from_values(
+                quad[0], quad[1], quad[2], quad[3], quad[4], quad[5], quad[6], quad[7],
+            ))?;
+        }
+        Ok(())
+    })
 }
 
 /// Creates a stamp annotation with `rect` bounds.

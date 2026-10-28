@@ -2924,3 +2924,203 @@ button {
   font-size: 12px;
   cursor: pointer;
 }
+
+/* Link annotations are invisible in the page bitmap. The overlay stays out of
+   the way until the 链接 tool arms, then reveals one hit area per quad. */
+.link-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 7;
+  pointer-events: none;
+}
+
+.link-toolbar {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 8;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  max-width: calc(100% - 16px);
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--pdfx-pill-bg);
+  color: var(--pdfx-pill-text);
+  font-size: 12px;
+  line-height: 1.4;
+  user-select: none;
+  pointer-events: auto;
+}
+
+.link-toolbar button {
+  padding: 2px 8px;
+  border: 1px solid var(--pdfx-pill-border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--pdfx-pill-text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.link-toolbar button:hover:enabled {
+  background: var(--pdfx-pill-hover);
+}
+
+.link-toolbar button[aria-pressed="true"] {
+  background: var(--pdfx-pill-active);
+}
+
+.link-toolbar button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.link-reason {
+  color: var(--pdfx-status-warning);
+}
+
+.link-target {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--pdfx-text-secondary);
+}
+
+.link-unsupported {
+  max-width: 260px;
+  color: var(--pdfx-status-warning);
+}
+
+.link-notice--error {
+  color: var(--pdfx-status-danger);
+}
+
+.link-notice--info {
+  color: var(--pdfx-status-success);
+}
+
+.link-region {
+  position: absolute;
+  padding: 0;
+  margin: 0;
+  border: 1px dashed transparent;
+  background: transparent;
+  cursor: pointer;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.link-layer--active .link-region {
+  border-color: var(--pdfx-blue);
+  background: color-mix(in srgb, var(--pdfx-blue) 10%, transparent);
+}
+
+.link-selection {
+  position: absolute;
+  z-index: 1;
+  border: 2px solid var(--pdfx-blue);
+  background: color-mix(in srgb, var(--pdfx-blue) 22%, transparent);
+  box-shadow: 0 0 0 1px var(--pdfx-page) inset;
+  pointer-events: none;
+}
+
+.link-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: var(--pdfx-overlay);
+  pointer-events: auto;
+}
+
+.link-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(360px, 100%);
+  padding: 16px;
+  border-radius: 8px;
+  background: var(--pdfx-surface);
+  color: var(--pdfx-text);
+  box-shadow: var(--pdfx-page-shadow);
+}
+
+.link-dialog h2 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.link-dialog-kinds {
+  display: flex;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  border: none;
+}
+
+.link-dialog-kinds legend {
+  float: left;
+  margin-right: 8px;
+  padding: 0;
+  color: var(--pdfx-text-secondary);
+  font-size: 12px;
+}
+
+.link-dialog-kinds label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+}
+
+.link-dialog-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+}
+
+.link-dialog-field input {
+  padding: 4px 6px;
+  border: 1px solid var(--pdfx-pill-border);
+  border-radius: 4px;
+  background: var(--pdfx-surface);
+  color: var(--pdfx-text);
+  font: inherit;
+}
+
+.link-dialog-hint {
+  color: var(--pdfx-text-secondary);
+  font-size: 12px;
+}
+
+.link-dialog-error {
+  margin: 0;
+  color: var(--pdfx-status-danger);
+  font-size: 12px;
+}
+
+.link-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.link-dialog-actions button {
+  padding: 4px 12px;
+  border: 1px solid var(--pdfx-pill-border);
+  border-radius: 4px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.link-dialog-actions button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}

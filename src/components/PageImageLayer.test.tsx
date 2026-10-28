@@ -6,7 +6,7 @@ import type {
   ImageEditResultView,
   ImageObjectView,
 } from "../lib/backend";
-import { chooseImageFile, deleteImage, insertImage, pageImages, transformImage } from "../lib/backend";
+import { chooseImageFile, createLink, deleteImage, insertImage, pageImages, transformImage } from "../lib/backend";
 import { DOCUMENT_CHANGED_EVENT } from "../lib/documentEvents";
 import { PageImageLayer } from "./PageImageLayer";
 
@@ -15,6 +15,7 @@ vi.mock("../lib/backend", async (importOriginal) => {
   return {
     ...actual,
     chooseImageFile: vi.fn(),
+    createLink: vi.fn(),
     insertImage: vi.fn(),
     pageImages: vi.fn(),
     transformImage: vi.fn(),
@@ -23,6 +24,7 @@ vi.mock("../lib/backend", async (importOriginal) => {
 });
 
 const chooseImageFileMock = vi.mocked(chooseImageFile);
+const createLinkMock = vi.mocked(createLink);
 const insertImageMock = vi.mocked(insertImage);
 const pageImagesMock = vi.mocked(pageImages);
 const transformImageMock = vi.mocked(transformImage);
@@ -64,6 +66,7 @@ const originalGetBoundingClientRect = Element.prototype.getBoundingClientRect;
 beforeEach(() => {
   for (const mock of [
     chooseImageFileMock,
+    createLinkMock,
     insertImageMock,
     pageImagesMock,
     transformImageMock,
@@ -90,7 +93,10 @@ afterEach(() => {
   Element.prototype.getBoundingClientRect = originalGetBoundingClientRect;
 });
 
-function renderLayer(readOnly = false) {
+function renderLayer(
+  readOnly = false,
+  props: Partial<Parameters<typeof PageImageLayer>[0]> = {},
+) {
   return render(
     <PageImageLayer
       documentId="doc-1"
@@ -98,6 +104,8 @@ function renderLayer(readOnly = false) {
       pageWidth={612}
       pageHeight={792}
       readOnly={readOnly}
+      pageCount={10}
+      {...props}
     />,
   );
 }
@@ -281,5 +289,100 @@ describe("PageImageLayer", () => {
     expect(
       await screen.findByText("图片超出页面，超出部分将被裁切。"),
     ).toBeInTheDocument();
+  });
+
+  it("creates a link over the selected image's bounds", async () => {
+    pageImagesMock.mockResolvedValue([image]);
+    createLinkMock.mockResolvedValue({
+      link: {
+        id: "0:0",
+        name: "pdfx-link-1",
+        pageIndex: 0,
+        target: { kind: "url", url: "https://example.com/photo" },
+        unsupported: null,
+        rects: [{ x: 200, y: 300, width: 200, height: 100 }],
+      },
+      pageIndex: 0,
+      history: idleHistory,
+    });
+
+    renderLayer(false, { canAnnotate: true });
+    const outline = await screen.findByTestId("image-outline-1");
+    fireEvent.pointerDown(outline, { clientX: 300, clientY: 350, pointerId: 1 });
+    fireEvent.pointerUp(outline, { clientX: 300, clientY: 350, pointerId: 1 });
+
+    fireEvent.click(screen.getByRole("button", { name: "添加链接" }));
+    expect(screen.getByRole("dialog", { name: "添加链接" })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("链接网址"), {
+      target: { value: "https://example.com/photo" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "添加" }));
+
+    await waitFor(() => {
+      expect(createLinkMock).toHaveBeenCalledWith("doc-1", {
+        pageIndex: 0,
+        rects: [{ x: 200, y: 300, width: 200, height: 100 }],
+        target: { kind: "url", url: "https://example.com/photo" },
+      });
+    });
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+    expect(screen.getByRole("status")).toHaveTextContent("链接已添加");
+  });
+
+  it("uses the axis-aligned bounds of a rotated image for the link", async () => {
+    pageImagesMock.mockResolvedValue([{ ...image, rotation: 90 }]);
+    createLinkMock.mockResolvedValue({
+      link: null,
+      pageIndex: 0,
+      history: idleHistory,
+    });
+
+    renderLayer(false, { canAnnotate: true });
+    const outline = await screen.findByTestId("image-outline-1");
+    fireEvent.pointerDown(outline, { clientX: 300, clientY: 350, pointerId: 1 });
+    fireEvent.pointerUp(outline, { clientX: 300, clientY: 350, pointerId: 1 });
+
+    fireEvent.click(screen.getByRole("button", { name: "添加链接" }));
+    fireEvent.click(screen.getByRole("radio", { name: "页面" }));
+    fireEvent.change(screen.getByLabelText("目标页码"), {
+      target: { value: "4" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "添加" }));
+
+    await waitFor(() => {
+      expect(createLinkMock).toHaveBeenCalledWith("doc-1", {
+        pageIndex: 0,
+        rects: [{ x: 250, y: 250, width: 100, height: 200 }],
+        target: { kind: "page", pageIndex: 3 },
+      });
+    });
+  });
+
+  it("explains why an image cannot get a link without annotation permission", async () => {
+    pageImagesMock.mockResolvedValue([image]);
+
+    renderLayer(false, { canAnnotate: false });
+    const outline = await screen.findByTestId("image-outline-1");
+    fireEvent.pointerDown(outline, { clientX: 300, clientY: 350, pointerId: 1 });
+    fireEvent.pointerUp(outline, { clientX: 300, clientY: 350, pointerId: 1 });
+
+    const button = screen.getByRole("button", { name: "添加链接" });
+    expect(button).toBeDisabled();
+    expect(button).toHaveAttribute("title", "此文档不允许添加注释");
+    expect(screen.getByText("此文档不允许添加注释")).toBeInTheDocument();
+  });
+
+  it("disables the image link action until an image is selected", async () => {
+    pageImagesMock.mockResolvedValue([image]);
+
+    renderLayer(false, { canAnnotate: true });
+
+    expect(screen.getByRole("button", { name: "添加链接" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "添加链接" })).toHaveAttribute(
+      "title",
+      "先选择一张图片",
+    );
   });
 });

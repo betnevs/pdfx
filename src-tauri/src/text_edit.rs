@@ -588,6 +588,7 @@ pub(crate) enum EditAction {
     Field(FieldEditAction),
     FormStructure(FormStructureEditAction),
     Annotation(Box<AnnotationEditAction>),
+    Link(Box<LinkEditAction>),
 }
 
 /// The value a field edit restores during undo or redo.
@@ -645,6 +646,22 @@ pub(crate) struct AnnotationEditAction {
     pub(crate) before: Option<AnnotationSnapshot>,
     /// State after the change; `None` when the change deleted the annotation.
     pub(crate) after: Option<AnnotationSnapshot>,
+}
+
+/// One committed link change (creation, target edit or deletion).
+///
+/// Links use the same remove-and-recreate model as annotations: PDFium cannot
+/// change a link action in place, so both snapshots stay on the action and
+/// applying one always replaces the link with the recorded state.
+pub(crate) struct LinkEditAction {
+    pub(crate) page_index: u32,
+    pub(crate) name: String,
+    pub(crate) before_state: u64,
+    pub(crate) after_state: u64,
+    /// State before the change; `None` when the change created the link.
+    pub(crate) before: Option<crate::links::LinkSnapshot>,
+    /// State after the change; `None` when the change deleted the link.
+    pub(crate) after: Option<crate::links::LinkSnapshot>,
 }
 
 /// One editable Text Box on a page.
@@ -2191,6 +2208,61 @@ fn redo_annotation(
     })
 }
 
+/// Appends a committed link change to the unified undo stack.
+pub(crate) fn push_link_action(
+    entry: &mut OpenDocument,
+    page_index: u32,
+    name: String,
+    before: Option<crate::links::LinkSnapshot>,
+    after: Option<crate::links::LinkSnapshot>,
+) -> EditHistoryView {
+    let before_state = entry.edit.current_state;
+    let after_state = entry.edit.next_state + 1;
+    entry.edit.next_state = after_state;
+    entry
+        .edit
+        .undo_stack
+        .push(EditAction::Link(Box::new(LinkEditAction {
+            page_index,
+            name,
+            before_state,
+            after_state,
+            before,
+            after,
+        })));
+    entry.edit.redo_stack.clear();
+    entry.edit.current_state = after_state;
+    entry.edit.history_view()
+}
+
+fn undo_link(
+    entry: &mut OpenDocument,
+    action: Box<LinkEditAction>,
+) -> Result<EditStepView, CommandError> {
+    crate::links::apply_link_snapshot(&entry.document, action.before.as_ref(), &action.name)?;
+    let page_index = action.page_index;
+    entry.edit.current_state = action.before_state;
+    entry.edit.redo_stack.push(EditAction::Link(action));
+    Ok(EditStepView {
+        page_index,
+        history: entry.edit.history_view(),
+    })
+}
+
+fn redo_link(
+    entry: &mut OpenDocument,
+    action: Box<LinkEditAction>,
+) -> Result<EditStepView, CommandError> {
+    crate::links::apply_link_snapshot(&entry.document, action.after.as_ref(), &action.name)?;
+    let page_index = action.page_index;
+    entry.edit.current_state = action.after_state;
+    entry.edit.undo_stack.push(EditAction::Link(action));
+    Ok(EditStepView {
+        page_index,
+        history: entry.edit.history_view(),
+    })
+}
+
 fn redo_field(
     entry: &mut OpenDocument,
     action: FieldEditAction,
@@ -2216,7 +2288,9 @@ fn undo_for(entry: &mut OpenDocument) -> Result<EditStepView, CommandError> {
         | Some(EditAction::Line(_))
         | Some(EditAction::FormStructure(_)) => ensure_content_editable(&entry.document)?,
         Some(EditAction::Field(_)) => crate::form::ensure_forms_editable(&entry.document)?,
-        Some(EditAction::Annotation(_)) => ensure_annotation_editable(&entry.document)?,
+        Some(EditAction::Annotation(_)) | Some(EditAction::Link(_)) => {
+            ensure_annotation_editable(&entry.document)?
+        }
         None => {
             return Err(CommandError::new(
                 CommandErrorCode::InvalidArgument,
@@ -2234,6 +2308,7 @@ fn undo_for(entry: &mut OpenDocument) -> Result<EditStepView, CommandError> {
         EditAction::Field(action) => undo_field(entry, action),
         EditAction::FormStructure(action) => undo_form_structure(entry, action),
         EditAction::Annotation(action) => undo_annotation(entry, action),
+        EditAction::Link(action) => undo_link(entry, action),
     }
 }
 
@@ -2323,7 +2398,9 @@ fn redo_for(entry: &mut OpenDocument) -> Result<EditStepView, CommandError> {
         | Some(EditAction::Line(_))
         | Some(EditAction::FormStructure(_)) => ensure_content_editable(&entry.document)?,
         Some(EditAction::Field(_)) => crate::form::ensure_forms_editable(&entry.document)?,
-        Some(EditAction::Annotation(_)) => ensure_annotation_editable(&entry.document)?,
+        Some(EditAction::Annotation(_)) | Some(EditAction::Link(_)) => {
+            ensure_annotation_editable(&entry.document)?
+        }
         None => {
             return Err(CommandError::new(
                 CommandErrorCode::InvalidArgument,
@@ -2341,6 +2418,7 @@ fn redo_for(entry: &mut OpenDocument) -> Result<EditStepView, CommandError> {
         EditAction::Field(action) => redo_field(entry, action),
         EditAction::FormStructure(action) => redo_form_structure(entry, action),
         EditAction::Annotation(action) => redo_annotation(entry, action),
+        EditAction::Link(action) => redo_link(entry, action),
     }
 }
 
