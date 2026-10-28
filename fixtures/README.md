@@ -24,6 +24,7 @@ Rust 测试通过 `src-tauri/tests/support/fixtures.rs` 读取 `manifest.json`�
 | encrypted | `encrypted-owner-restrictions.pdf` | 用户密码为空；所有者限制修改、复制与注释，允许打印 | 用户（空）/ 所有者 `pdfx-owner` |
 | encrypted | `encrypted-print-denied.pdf` | 用户密码为空；所有者仅禁止打印，编辑、复制与注释仍允许 | 用户（空）/ 所有者 `pdfx-owner` |
 | form | `form-acroform.pdf` | 两页 AcroForm：文本、复选框、单选组、列表框、下拉框；含必填、只读与带 JavaScript 动作的字段 | — |
+| form-fill | `form-fill-appearance.pdf` | 两页 AcroForm：值位于 `/Kids` 终端字段、嵌套 `/Parent` 字段、复选框、单选组、列表框、下拉框；第 2 页旋转 90°；全部控件带故意过期的红色外观流 | — |
 | signature | `signature-signed.pdf` | 已签名字段（`/V` 指向含 `/ByteRange`、`/Contents` 的占位签名字典）与通过 `/Parent` 继承 `/FT` 的空签名字段，另含普通文本字段 | — |
 | signature | `signature-field-only.pdf` | 两个空签名字段（终态 widget + 嵌套继承 `/FT`），不含 `/V` | — |
 | signature | `encrypted-signature-restricted.pdf` | 用户密码为空；所有者限制修改、复制与注释；含已签名与空签名字段 | 用户（空）/ 所有者 `pdfx-owner` |

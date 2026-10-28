@@ -91,7 +91,7 @@ fn structural_summary(source_bytes: &[u8], password: Option<&str>) -> Option<Sig
 
     let mut seen = HashSet::new();
     for field in fields {
-        tally_field(&document, field, None, true, &mut seen, &mut summary);
+        tally_field(&document, field, None, true, 0, &mut seen, &mut summary);
     }
     Some(summary)
 }
@@ -107,22 +107,42 @@ fn dictionary_of<'a>(
     }
 }
 
-/// The nearest `/FT` on the `/Parent` chain, for a widget referenced directly
-/// from `/Fields` whose owning field dictionary is not its container.
-fn parent_field_type(item: &lopdf::Dictionary, document: &lopdf::Document) -> Option<Vec<u8>> {
+/// The nearest `/FT` on the `/Parent` chain and whether any ancestor on that
+/// chain carries a signature value (`/V` dictionary).
+///
+/// This covers a widget referenced directly from `/Fields` whose owning field
+/// dictionary is not its container: the item's own type and value are
+/// inherited from `/Parent`, which may not appear anywhere in the traversed
+/// tree. Both entries are inheritable (PDF 32000-1 Table 220), so a missing
+/// owning field must not hide an actual signature.
+fn parent_field_info(
+    item: &lopdf::Dictionary,
+    document: &lopdf::Document,
+) -> (Option<Vec<u8>>, bool) {
     let mut current = item;
+    let mut field_type = None;
+    let mut signed = false;
     for _ in 0..32 {
-        let parent = current
+        let Ok(parent) = current
             .get_deref(b"Parent", document)
-            .ok()?
-            .as_dict()
-            .ok()?;
-        if let Ok(field_type) = parent.get(b"FT").and_then(lopdf::Object::as_name) {
-            return Some(field_type.to_vec());
+            .and_then(lopdf::Object::as_dict)
+        else {
+            break;
+        };
+        if field_type.is_none() {
+            if let Ok(name) = parent.get(b"FT").and_then(lopdf::Object::as_name) {
+                field_type = Some(name.to_vec());
+            }
+        }
+        if has_signature_value(parent, document) {
+            signed = true;
+        }
+        if field_type.is_some() && signed {
+            break;
         }
         current = parent;
     }
-    None
+    (field_type, signed)
 }
 
 fn has_signature_value(field: &lopdf::Dictionary, document: &lopdf::Document) -> bool {
@@ -133,14 +153,23 @@ fn has_signature_value(field: &lopdf::Dictionary, document: &lopdf::Document) ->
         .is_some()
 }
 
+/// Guards against malformed nesting. A real form field tree is only a few
+/// levels deep; an unbounded `/Kids` chain in a hostile document could
+/// otherwise exhaust the stack while opening it.
+const MAX_FIELD_DEPTH: usize = 128;
+
 fn tally_field(
     document: &lopdf::Document,
     object: &lopdf::Object,
     inherited_field_type: Option<&[u8]>,
     is_root: bool,
+    depth: usize,
     seen: &mut HashSet<lopdf::ObjectId>,
     summary: &mut SignatureSummary,
 ) {
+    if depth > MAX_FIELD_DEPTH {
+        return;
+    }
     let Some(field) = dictionary_of(object, document) else {
         return;
     };
@@ -156,11 +185,18 @@ fn tally_field(
         .and_then(lopdf::Object::as_name)
         .ok()
         .map(<[u8]>::to_vec);
-    let parent_field_type = if own_field_type.is_none() && !is_root {
-        parent_field_type(field, document)
-    } else {
-        None
-    };
+    // Inherited entries come from the recursion's ancestor when that ancestor
+    // is part of the traversed tree. A root item can still point at its owning
+    // field through /Parent without that field appearing in /Fields; follow
+    // that chain only when no ancestor was available, so a normal widget kid
+    // is not counted twice. `/V` is inheritable like `/FT`, so an actual
+    // signature on the owning field still counts as signed.
+    let (parent_field_type, parent_signed) =
+        if own_field_type.is_none() && inherited_field_type.is_none() {
+            parent_field_info(field, document)
+        } else {
+            (None, false)
+        };
     let effective_field_type = own_field_type
         .as_deref()
         .or(inherited_field_type)
@@ -177,7 +213,7 @@ fn tally_field(
         if !belongs_to_parent_field {
             summary.field_count += 1;
         }
-        if has_signature_value(field, document) {
+        if has_signature_value(field, document) || parent_signed {
             summary.signed_count += 1;
         }
     }
@@ -187,7 +223,15 @@ fn tally_field(
         .and_then(lopdf::Object::as_array)
     {
         for kid in kids {
-            tally_field(document, kid, effective_field_type, false, seen, summary);
+            tally_field(
+                document,
+                kid,
+                effective_field_type,
+                false,
+                depth + 1,
+                seen,
+                summary,
+            );
         }
     }
 }

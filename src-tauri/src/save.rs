@@ -174,11 +174,13 @@ pub enum ObjectEdit {
     SetTextValue { field_name: String, text: String },
     /// Sets a copied checkbox's `/V` and every widget's `/AS`.
     SetCheckboxValue { field_name: String, checked: bool },
-    /// Writes the AcroForm fields created in this session: `/AcroForm`,
+    /// Writes the AcroForm fields created in this session and refreshes the
+    /// appearances of existing widgets whose values changed: `/AcroForm`,
     /// `/Fields`, `/DA`, `/DR`, widget dictionaries, appearance streams and —
-    /// when text fields exist — the embedded CJK font subset.
+    /// when text or choice appearances exist — one embedded CJK font subset.
     CreateFormFields {
         fields: Vec<crate::form_create::FormFieldSpec>,
+        appearances: Vec<crate::form_create::ExistingFieldAppearance>,
     },
 }
 
@@ -1027,6 +1029,7 @@ fn apply_copy_fields_fixup(
                             .remove(&object_id)
                             .unwrap_or_else(|| dictionary.clone());
                         updated.set(b"T".to_vec(), text_string_object(&name));
+                        rename_copied_annotation_name(&mut updated, *physical);
                         objects.insert(object_id, updated);
                         new_fields.push(object_id);
                     }
@@ -1103,6 +1106,7 @@ fn apply_copy_fields_fixup(
                             .unwrap_or_default()
                     });
                     widget.set(b"Parent".to_vec(), lopdf::Object::Reference(new_parent_id));
+                    rename_copied_annotation_name(&mut widget, *physical);
                     objects.insert(*widget_id, widget);
                 }
                 new_fields.push(new_parent_id);
@@ -2005,9 +2009,10 @@ fn apply_object_edit(
             field_name,
             checked,
         } => apply_checkbox_value(incremental, field_name, *checked),
-        ObjectEdit::CreateFormFields { fields } => {
-            crate::form_create::apply_created_fields(incremental, fields)
-        }
+        ObjectEdit::CreateFormFields {
+            fields,
+            appearances,
+        } => crate::form_create::apply_created_fields(incremental, fields, appearances),
     }
 }
 
@@ -2095,7 +2100,7 @@ pub(crate) fn text_string_object(value: &str) -> lopdf::Object {
     }
 }
 
-fn option_label(object: &lopdf::Object) -> Option<String> {
+pub(crate) fn option_label(object: &lopdf::Object) -> Option<String> {
     match object {
         lopdf::Object::String(bytes, _) => Some(decode_pdf_text(bytes)),
         lopdf::Object::Array(items) => items
@@ -2106,34 +2111,122 @@ fn option_label(object: &lopdf::Object) -> Option<String> {
     }
 }
 
-fn find_form_field_id(document: &lopdf::Document, name: &str) -> Option<lopdf::ObjectId> {
-    let catalog = document.catalog().ok()?;
-    let acro_form = catalog
-        .get_deref(b"AcroForm", document)
-        .ok()?
-        .as_dict()
-        .ok()?;
-    let fields = acro_form
-        .get_deref(b"Fields", document)
-        .ok()?
-        .as_array()
-        .ok()?;
-    fields.iter().find_map(|field| {
-        let id = field.as_reference().ok()?;
-        let dictionary = document.get_dictionary(id).ok()?;
-        let field_name = dictionary
+/// The objects one terminal field owns: its dictionary (where `/V` lives)
+/// and its widget annotations in `/Kids` order.
+pub(crate) struct FormFieldObjects {
+    pub(crate) field_id: lopdf::ObjectId,
+    pub(crate) widget_ids: Vec<lopdf::ObjectId>,
+}
+
+/// Reads `/AcroForm` from the appended revision when a pass cloned it, and
+/// from the document it appends to otherwise. The AcroForm may be a reference
+/// object or inline in the catalog.
+pub(crate) fn acro_form_any(
+    incremental: &lopdf::IncrementalDocument,
+) -> Option<&lopdf::Dictionary> {
+    let previous = incremental.get_prev_documents();
+    let catalog = previous.catalog().ok()?;
+    match catalog.get(b"AcroForm").ok()? {
+        lopdf::Object::Reference(id) => dictionary_any(incremental, *id),
+        lopdf::Object::Dictionary(_) => {
+            let root = previous
+                .trailer
+                .get(b"Root")
+                .and_then(lopdf::Object::as_reference)
+                .ok()?;
+            dictionary_any(incremental, root)?
+                .get(b"AcroForm")
+                .ok()?
+                .as_dict()
+                .ok()
+        }
+        _ => None,
+    }
+}
+
+/// Finds a field by its full dotted name, walking nested `/Kids` levels
+/// (`person.name` resolves to the `name` dictionary under `person`).
+///
+/// The search starts at the appended revision's `/Fields`, which holds the
+/// copy-page fields and — once any pass clones it — every existing field too.
+/// A field is terminal when none of its kids is itself a field; its kids are
+/// then the widgets. A merged widget field is its own widget.
+pub(crate) fn find_form_field_any(
+    incremental: &lopdf::IncrementalDocument,
+    name: &str,
+) -> Option<FormFieldObjects> {
+    let acro_form = acro_form_any(incremental)?;
+    let fields = resolve_object_any(incremental, acro_form.get(b"Fields").ok()?)?;
+    walk_field_entries(incremental, fields.as_array().ok()?, "", name)
+}
+
+fn walk_field_entries(
+    incremental: &lopdf::IncrementalDocument,
+    entries: &[lopdf::Object],
+    prefix: &str,
+    target: &str,
+) -> Option<FormFieldObjects> {
+    for entry in entries {
+        let Some(id) = entry.as_reference().ok() else {
+            continue;
+        };
+        let Some(dictionary) = dictionary_any(incremental, id) else {
+            continue;
+        };
+        let title = dictionary
             .get(b"T")
-            .and_then(lopdf::Object::as_str)
             .ok()
-            .map(decode_pdf_text)?;
-        (field_name == name).then_some(id)
-    })
+            .and_then(|title| title.as_str().ok())
+            .map(decode_pdf_text);
+        let full = match &title {
+            Some(title) if prefix.is_empty() => title.clone(),
+            Some(title) => format!("{prefix}.{title}"),
+            None => prefix.to_owned(),
+        };
+        let kids: Vec<lopdf::Object> = dictionary
+            .get(b"Kids")
+            .ok()
+            .and_then(|kids| resolve_object_any(incremental, kids))
+            .and_then(|kids| kids.as_array().ok())
+            .cloned()
+            .unwrap_or_default();
+        let mut child_fields = Vec::new();
+        let mut widget_ids = Vec::new();
+        for kid in &kids {
+            let Some(kid_id) = kid.as_reference().ok() else {
+                continue;
+            };
+            let Some(kid_dictionary) = dictionary_any(incremental, kid_id) else {
+                continue;
+            };
+            if kid_dictionary.has(b"T") {
+                child_fields.push(kid.clone());
+            } else {
+                widget_ids.push(kid_id);
+            }
+        }
+        if title.is_some() && full == target && child_fields.is_empty() {
+            let widget_ids = if kids.is_empty() {
+                vec![id]
+            } else {
+                widget_ids
+            };
+            return Some(FormFieldObjects {
+                field_id: id,
+                widget_ids,
+            });
+        }
+        if let Some(found) = walk_field_entries(incremental, &child_fields, &full, target) {
+            return Some(found);
+        }
+    }
+    None
 }
 
 /// Resolves an object that may live in the appended revision or in the
 /// document it appends to. Copy-page fields are written into the new
 /// revision, so every lookup in the save pipeline must consider both.
-fn resolve_object_any<'a>(
+pub(crate) fn resolve_object_any<'a>(
     incremental: &'a lopdf::IncrementalDocument,
     object: &'a lopdf::Object,
 ) -> Option<&'a lopdf::Object> {
@@ -2147,7 +2240,7 @@ fn resolve_object_any<'a>(
     }
 }
 
-fn dictionary_any(
+pub(crate) fn dictionary_any(
     incremental: &lopdf::IncrementalDocument,
     id: lopdf::ObjectId,
 ) -> Option<&lopdf::Dictionary> {
@@ -2196,6 +2289,22 @@ fn copy_inherited_field_attributes(
     }
 }
 
+/// Gives a copied annotation its own `/NM`, so readers and scripts that look
+/// widgets up by annotation name cannot reach the source page's widget. A
+/// widget without `/NM` stays without one.
+fn rename_copied_annotation_name(dictionary: &mut lopdf::Dictionary, physical: u32) {
+    let Some(existing) = dictionary
+        .get(b"NM")
+        .ok()
+        .and_then(|name| name.as_str().ok())
+        .map(decode_pdf_text)
+    else {
+        return;
+    };
+    let name = crate::page_ops::copied_field_name(&existing, physical);
+    dictionary.set(b"NM".to_vec(), text_string_object(&name));
+}
+
 /// The full dotted field name of `id`, built from `/T` entries up the
 /// `/Parent` chain (`person.name` for nested fields).
 fn full_field_name(incremental: &lopdf::IncrementalDocument, id: lopdf::ObjectId) -> String {
@@ -2218,58 +2327,10 @@ fn full_field_name(incremental: &lopdf::IncrementalDocument, id: lopdf::ObjectId
     parts.join(".")
 }
 
-/// Finds a field by name in the appended revision's `/AcroForm`, where the
-/// copy-page fixup registers renamed widgets and cloned parent fields.
-fn find_form_field_id_any(
-    incremental: &lopdf::IncrementalDocument,
-    name: &str,
-) -> Option<lopdf::ObjectId> {
-    if let Some(id) = find_form_field_id_in_new(incremental, name) {
-        return Some(id);
-    }
-    find_form_field_id(incremental.get_prev_documents(), name)
-}
-
-fn find_form_field_id_in_new(
-    incremental: &lopdf::IncrementalDocument,
-    name: &str,
-) -> Option<lopdf::ObjectId> {
-    let previous = incremental.get_prev_documents();
-    let root = previous
-        .trailer
-        .get(b"Root")
-        .and_then(lopdf::Object::as_reference)
-        .ok()?;
-    let acro_form = previous.catalog().ok()?.get(b"AcroForm").ok()?.clone();
-    let acro_form = match acro_form {
-        lopdf::Object::Reference(id) => incremental.new_document.get_dictionary(id).ok()?,
-        lopdf::Object::Dictionary(_) => incremental
-            .new_document
-            .get_dictionary(root)
-            .ok()?
-            .get(b"AcroForm")
-            .ok()?
-            .as_dict()
-            .ok()?,
-        _ => return None,
-    };
-    let fields = resolve_object_any(incremental, acro_form.get(b"Fields").ok()?)?;
-    fields.as_array().ok()?.iter().find_map(|field| {
-        let id = field.as_reference().ok()?;
-        let dictionary = dictionary_any(incremental, id)?;
-        let field_name = dictionary
-            .get(b"T")
-            .and_then(lopdf::Object::as_str)
-            .ok()
-            .map(decode_pdf_text)?;
-        (field_name == name).then_some(id)
-    })
-}
-
 /// Returns the non-Off state name from a widget's normal appearance
 /// dictionary, resolving objects across the previous revision and the
 /// appended one.
-fn widget_on_state_any(
+pub(crate) fn widget_on_state_any(
     incremental: &lopdf::IncrementalDocument,
     widget: &lopdf::Dictionary,
 ) -> Option<Vec<u8>> {
@@ -2289,25 +2350,17 @@ fn apply_radio_group(
     state: &str,
 ) -> Result<(), CommandError> {
     let (field_id, widget_ids, on_states) = {
-        let field_id = find_form_field_id_any(incremental, field_name).ok_or_else(|| {
+        let found = find_form_field_any(incremental, field_name).ok_or_else(|| {
             lopdf_error(
                 "could not find a radio field in the saved document",
                 field_name,
             )
         })?;
-        let field = dictionary_any(incremental, field_id)
-            .ok_or_else(|| lopdf_error("could not read the radio field dictionary", field_name))?;
-        let widget_ids: Vec<lopdf::ObjectId> = match field
-            .get(b"Kids")
-            .ok()
-            .and_then(|kids| resolve_object_any(incremental, kids))
-            .and_then(|kids| kids.as_array().ok())
-        {
-            Some(kids) => kids
-                .iter()
-                .filter_map(|kid| kid.as_reference().ok())
-                .collect(),
-            None => vec![field_id],
+        let field_id = found.field_id;
+        let widget_ids = if found.widget_ids.is_empty() {
+            vec![field_id]
+        } else {
+            found.widget_ids
         };
         let on_states: Vec<Option<Vec<u8>>> = widget_ids
             .iter()
@@ -2359,12 +2412,14 @@ fn apply_choice_value(
     label: &str,
 ) -> Result<(), CommandError> {
     let (field_id, index) = {
-        let field_id = find_form_field_id_any(incremental, field_name).ok_or_else(|| {
-            lopdf_error(
-                "could not find a choice field in the saved document",
-                field_name,
-            )
-        })?;
+        let field_id = find_form_field_any(incremental, field_name)
+            .map(|found| found.field_id)
+            .ok_or_else(|| {
+                lopdf_error(
+                    "could not find a choice field in the saved document",
+                    field_name,
+                )
+            })?;
         let field = dictionary_any(incremental, field_id)
             .ok_or_else(|| lopdf_error("could not read the choice field dictionary", field_name))?;
         let index = field
@@ -2407,12 +2462,14 @@ fn apply_text_value(
     field_name: &str,
     text: &str,
 ) -> Result<(), CommandError> {
-    let field_id = find_form_field_id_any(incremental, field_name).ok_or_else(|| {
-        lopdf_error(
-            "could not find a text field in the saved document",
-            field_name,
-        )
-    })?;
+    let field_id = find_form_field_any(incremental, field_name)
+        .map(|found| found.field_id)
+        .ok_or_else(|| {
+            lopdf_error(
+                "could not find a text field in the saved document",
+                field_name,
+            )
+        })?;
     incremental
         .opt_clone_object_to_new_document(field_id)
         .map_err(|error| lopdf_error("could not clone the text field", error))?;
@@ -2430,26 +2487,17 @@ fn apply_checkbox_value(
     checked: bool,
 ) -> Result<(), CommandError> {
     let (field_id, widget_ids, on_state) = {
-        let field_id = find_form_field_id_any(incremental, field_name).ok_or_else(|| {
+        let found = find_form_field_any(incremental, field_name).ok_or_else(|| {
             lopdf_error(
                 "could not find a checkbox field in the saved document",
                 field_name,
             )
         })?;
-        let field = dictionary_any(incremental, field_id).ok_or_else(|| {
-            lopdf_error("could not read the checkbox field dictionary", field_name)
-        })?;
-        let widget_ids: Vec<lopdf::ObjectId> = match field
-            .get(b"Kids")
-            .ok()
-            .and_then(|kids| resolve_object_any(incremental, kids))
-            .and_then(|kids| kids.as_array().ok())
-        {
-            Some(kids) => kids
-                .iter()
-                .filter_map(|kid| kid.as_reference().ok())
-                .collect(),
-            None => vec![field_id],
+        let field_id = found.field_id;
+        let widget_ids = if found.widget_ids.is_empty() {
+            vec![field_id]
+        } else {
+            found.widget_ids
         };
         let on_state = widget_ids
             .iter()

@@ -582,3 +582,94 @@ pub fn non_standard_font_pdf() -> TempPdf {
     ];
     write_pdf("non-standard-font", build_pdf(objects, 1))
 }
+
+/// A 612x792 page whose `/AcroForm /Fields` lists only a widget; the owning
+/// field (`/FT /Sig`, `/T`, `/V` signature dictionary) is reachable only
+/// through the widget's `/Parent`. Some producers emit this shape instead of
+/// listing the owning field dictionary itself.
+pub fn inherited_parent_signature_pdf() -> TempPdf {
+    let objects = vec![
+        (
+            1,
+            b"<< /Type /Catalog /Pages 2 0 R \
+              /AcroForm << /Fields [5 0 R] /SigFlags 1 >> >>"
+                .to_vec(),
+        ),
+        (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+        (
+            3,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] \
+              /Contents 4 0 R /Annots [5 0 R] >>"
+                .to_vec(),
+        ),
+        (4, stream("", b"")),
+        (
+            5,
+            b"<< /Type /Annot /Subtype /Widget /Parent 6 0 R \
+              /Rect [72 650 300 690] /P 3 0 R /F 4 >>"
+                .to_vec(),
+        ),
+        (6, b"<< /FT /Sig /T (approval) /V 7 0 R >>".to_vec()),
+        (
+            7,
+            b"<< /Type /Sig /Filter /Adobe.PPKLite /SubFilter /adbe.pkcs7.detached \
+              /ByteRange [0 1234 5678 9012] /Contents <0001020304050607> \
+              /Name (PDFX SIGNER CANARY) >>"
+                .to_vec(),
+        ),
+    ];
+    write_pdf("inherited-parent-signature", build_pdf(objects, 1))
+}
+
+/// A `/Fields` tree nested `depth` levels, far deeper than any real form.
+/// Opening a hostile document must not exhaust the stack while signature
+/// structures are detected; every level is a `/FT /Sig` field.
+pub fn deeply_nested_signature_fields_pdf(depth: u32) -> TempPdf {
+    assert!(depth >= 1, "a nested field tree needs a root");
+    let mut objects = vec![
+        (
+            1,
+            b"<< /Type /Catalog /Pages 2 0 R \
+              /AcroForm << /Fields [5 0 R] /SigFlags 1 >> >>"
+                .to_vec(),
+        ),
+        (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+        (
+            3,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R >>".to_vec(),
+        ),
+        (4, stream("", b"")),
+    ];
+    for index in 0..depth {
+        let id = 5 + index;
+        let body = if index + 1 < depth {
+            format!("<< /FT /Sig /T (level{index}) /Kids [{} 0 R] >>", id + 1)
+        } else {
+            format!("<< /FT /Sig /T (level{index}) >>")
+        };
+        objects.push((id, body.into_bytes()));
+    }
+    write_pdf("deep-signature-fields", build_pdf(objects, 1))
+}
+
+/// Two `/FT /Sig` fields whose `/Kids` reference each other. A hostile cycle
+/// must not make the structural walk recurse forever.
+pub fn cyclic_signature_fields_pdf() -> TempPdf {
+    let objects = vec![
+        (
+            1,
+            b"<< /Type /Catalog /Pages 2 0 R \
+              /AcroForm << /Fields [5 0 R] >> >>"
+                .to_vec(),
+        ),
+        (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+        (
+            3,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R >>".to_vec(),
+        ),
+        (4, stream("", b"")),
+        (5, b"<< /FT /Sig /T (first) /Kids [6 0 R] >>".to_vec()),
+        (6, b"<< /FT /Sig /T (second) /Kids [5 0 R] >>".to_vec()),
+    ];
+    write_pdf("cyclic-signature-fields", build_pdf(objects, 1))
+}

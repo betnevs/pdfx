@@ -977,6 +977,71 @@ describe("PageTextLayer text boxes", () => {
       style: { fontFamily: "Times", fontSize: 24 },
     });
   });
+
+  it("restyles a legacy box whose original font is not offered", async () => {
+    let store: TextBoxTargetView[] = [];
+    const styleCalls: Record<string, unknown>[] = [];
+    const legacy = makeBox({
+      boxId: 7,
+      text: "Original",
+      created: false,
+      fontFamily: "PDFXMissingFont",
+      x: 72,
+      y: 72,
+      width: 58,
+      height: 20,
+      fontSize: 18,
+      autoHeight: true,
+    });
+
+    mockCommands({
+      text_boxes: () => [...store],
+      text_edit_target: () => {
+        store = [legacy];
+        return legacy;
+      },
+      apply_text_box_style: (args) => {
+        styleCalls.push(args);
+        const style = args.style as Record<string, unknown>;
+        store[0] = { ...store[0], ...style };
+        return {
+          pageIndex: 2,
+          target: store[0],
+          font: null,
+          history: editedHistory,
+        };
+      },
+    });
+
+    await renderLayer();
+    await enterBoxMode();
+    const region = screen.getByRole("region", { name: "文本层" });
+    fireEvent.pointerDown(region, {
+      clientX: 76,
+      clientY: 80,
+      button: 0,
+      pointerId: 1,
+    });
+    fireEvent.pointerUp(region, {
+      clientX: 76,
+      clientY: 80,
+      button: 0,
+      pointerId: 1,
+    });
+
+    // The panel cannot offer the original family, so it starts from the first
+    // built-in one instead of sending a family the backend would reject.
+    const family = await screen.findByRole("combobox", { name: "字体" });
+    expect((family as HTMLSelectElement).value).toBe("Helvetica");
+    fireEvent.click(screen.getByRole("button", { name: "粗体" }));
+    await waitFor(() => expect(styleCalls).toHaveLength(1));
+    expect(styleCalls[0]).toMatchObject({
+      documentId: "doc-1",
+      pageIndex: 2,
+      boxId: 7,
+      style: { fontFamily: "Helvetica", bold: true },
+    });
+  });
 });
 
 async function openFirstBoxEditor(): Promise<HTMLTextAreaElement> {
