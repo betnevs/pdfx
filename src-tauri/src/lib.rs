@@ -1,3 +1,4 @@
+pub mod annotations;
 pub mod commands;
 pub mod engine;
 pub mod file_association;
@@ -61,6 +62,10 @@ pub fn run() {
             text_edit::undo_text_edit,
             text_edit::redo_text_edit,
             text_edit::mark_document_saved,
+            annotations::create_text_markup_annotation,
+            annotations::list_annotations,
+            annotations::update_annotation_style,
+            annotations::delete_annotation,
             print_export::export_page,
             print_export::print_document,
             save::save_document,

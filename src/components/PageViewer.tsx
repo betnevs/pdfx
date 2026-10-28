@@ -9,6 +9,7 @@ import {
 
 import {
   renderThumbnail,
+  type AnnotationView,
   type PageImageView,
   type PageInfo,
   type PageRegionView,
@@ -387,6 +388,8 @@ export function PageSurface({
   scale,
   render,
   readOnly,
+  canAnnotate,
+  selectedAnnotation,
   surfaceRef,
 }: {
   documentId: string;
@@ -395,6 +398,8 @@ export function PageSurface({
   scale: number;
   render: PageRender;
   readOnly: boolean;
+  canAnnotate: boolean;
+  selectedAnnotation: AnnotationView | null;
   surfaceRef: RefObject<HTMLDivElement | null>;
 }) {
   const pixel = info ? pagePixelSize(info, scale) : null;
@@ -454,6 +459,8 @@ export function PageSurface({
         documentId={documentId}
         pageIndex={pageIndex}
         readOnly={readOnly}
+        canAnnotate={canAnnotate}
+        selectedAnnotation={selectedAnnotation}
         scale={scale}
       />
     </div>
