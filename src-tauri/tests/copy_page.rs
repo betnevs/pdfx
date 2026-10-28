@@ -90,18 +90,26 @@ fn rotation_of(document: &lopdf::Document, number: u32) -> i64 {
         .unwrap_or(0)
 }
 
-fn media_box(document: &lopdf::Document, number: u32) -> [f32; 4] {
+fn page_box(document: &lopdf::Document, number: u32, key: &[u8]) -> [f32; 4] {
     let array = page_dict(document, number)
-        .get(b"MediaBox")
-        .expect("page /MediaBox")
+        .get(key)
+        .unwrap_or_else(|_| panic!("page {:?}", String::from_utf8_lossy(key)))
         .as_array()
-        .expect("/MediaBox array");
+        .expect("/MediaBox or /CropBox array");
     let value = |index: usize| match &array[index] {
         lopdf::Object::Integer(number) => *number as f32,
         lopdf::Object::Real(number) => *number,
-        other => panic!("unexpected /MediaBox entry {other:?}"),
+        other => panic!("unexpected page box entry {other:?}"),
     };
     [value(0), value(1), value(2), value(3)]
+}
+
+fn media_box(document: &lopdf::Document, number: u32) -> [f32; 4] {
+    page_box(document, number, b"MediaBox")
+}
+
+fn crop_box(document: &lopdf::Document, number: u32) -> [f32; 4] {
+    page_box(document, number, b"CropBox")
 }
 
 fn catalog(document: &lopdf::Document) -> &lopdf::Dictionary {
@@ -496,6 +504,65 @@ fn copy_inserts_after_current_with_identical_content_size_rotation_and_links() {
     }
 
     close_document(document_id).expect("close document");
+}
+
+#[test]
+fn copied_page_keeps_the_crop_box_and_crop_relative_geometry() {
+    let dir = TempDir::new("copy-page-crop");
+    let source = synthetic::crop_offset_pdf();
+    let document = open(Path::new(&source.path_string()));
+    let document_id = document.document_id.clone();
+    assert_eq!(document.page_count, 1);
+
+    let original_info = page_info(document_id.clone(), 0).expect("source page info");
+    assert_eq!((original_info.width, original_info.height), (400.0, 600.0));
+    assert_eq!((original_info.crop_x, original_info.crop_y), (100.0, 100.0));
+    let original_layer = extract_text_layer(document_id.clone(), 0).expect("source text layer");
+
+    let view = pdfx_lib::page_ops::copy_page(document_id.clone(), 0).expect("copy page");
+    assert_eq!((view.page_count, view.page_index), (2, 1));
+
+    let copy_info = page_info(document_id.clone(), 1).expect("copy page info");
+    assert_eq!(
+        (
+            copy_info.width,
+            copy_info.height,
+            copy_info.crop_x,
+            copy_info.crop_y
+        ),
+        (
+            original_info.width,
+            original_info.height,
+            original_info.crop_x,
+            original_info.crop_y
+        )
+    );
+    // Text geometry is relative to the CropBox, so an equal character layer
+    // proves the copy keeps the same visible content region.
+    let copy_layer = extract_text_layer(document_id.clone(), 1).expect("copy text layer");
+    assert_eq!(copy_layer.text, original_layer.text);
+    assert_eq!(copy_layer.chars, original_layer.chars);
+    assert_eq!(copy_layer.page_width, original_layer.page_width);
+    assert_eq!(copy_layer.page_height, original_layer.page_height);
+    assert_eq!(copy_layer.crop_x, original_layer.crop_x);
+    assert_eq!(copy_layer.crop_y, original_layer.crop_y);
+
+    let output = dir.path().join("copied-crop.pdf");
+    save(&document_id, &output);
+    close_document(document_id).expect("close document");
+
+    let parsed = lopdf::Document::load(&output).expect("parse output");
+    assert_eq!(parsed.get_pages().len(), 2);
+    assert_eq!(media_box(&parsed, 1), [0.0, 0.0, 612.0, 792.0]);
+    assert_eq!(media_box(&parsed, 2), media_box(&parsed, 1));
+    assert_eq!(crop_box(&parsed, 1), [100.0, 100.0, 500.0, 700.0]);
+    assert_eq!(
+        crop_box(&parsed, 2),
+        crop_box(&parsed, 1),
+        "the copy keeps the source CropBox"
+    );
+    assert!(page_text(&parsed, 1).contains("Crop offset"));
+    assert!(page_text(&parsed, 2).contains("Crop offset"));
 }
 
 #[test]
