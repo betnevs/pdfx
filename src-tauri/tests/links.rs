@@ -1407,3 +1407,364 @@ fn a_multi_line_selection_keeps_one_quad_per_line() {
     }
     close_document(reopened.document_id).expect("close reopened");
 }
+
+/// Counts the cross-reference sections in saved PDF bytes. Each incremental
+/// revision appends one, so the delta measures how many writers touched the
+/// output after the original document.
+fn startxref_sections(bytes: &[u8]) -> usize {
+    const NEEDLE: &[u8] = b"startxref";
+    bytes
+        .windows(NEEDLE.len())
+        .filter(|window| *window == NEEDLE)
+        .count()
+}
+
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
+}
+
+#[test]
+fn a_link_to_an_inserted_blank_page_saves_and_reopens() {
+    let dir = TempDir::new("links-insert-target");
+    let pdf = synthetic::two_page_pdf();
+    let source_sections =
+        startxref_sections(&std::fs::read(pdf.path_string()).expect("source bytes"));
+    let document_id = open_synthetic(&pdf);
+    let layer = extract_text_layer(document_id.clone(), 0).expect("text layer");
+    let rect = selection_rect(&layer, "Original");
+
+    // Insert the blank page at logical slot 1, between the link's page and the
+    // original second page.
+    pdfx_lib::page_ops::insert_blank_page(
+        document_id.clone(),
+        1,
+        pdfx_lib::page_ops::BlankPageSize {
+            width: 300.0,
+            height: 400.0,
+        },
+    )
+    .expect("insert a blank page");
+
+    let created = create_link(
+        document_id.clone(),
+        CreateLinkRequest {
+            page_index: 0,
+            rects: vec![rect],
+            target: LinkTarget::Page { page_index: 1 },
+        },
+    )
+    .expect("create a link to the inserted page")
+    .link
+    .expect("created link view");
+    assert_eq!(created.target, Some(LinkTarget::Page { page_index: 1 }));
+    let created_name = created.name.clone().expect("created link name");
+
+    let output = dir.path().join("inserted-target-link.pdf");
+    save_as(&document_id, &output);
+    let output_bytes = std::fs::read(&output).expect("read output bytes");
+
+    // The inserted page forces the lopdf page-tree edit. That edit and the
+    // page-link materialization must still share exactly one appended
+    // revision after PDFium's incremental one.
+    assert_eq!(
+        startxref_sections(&output_bytes),
+        source_sections + 2,
+        "one PDFium revision plus exactly one lopdf revision"
+    );
+
+    let parsed = lopdf::Document::load(&output).expect("lopdf parses the output");
+    assert_eq!(parsed.get_pages().len(), 3, "the inserted page is saved");
+    let blank_id = *parsed.get_pages().get(&2).expect("inserted page is second");
+    let blank = parsed
+        .get_dictionary(blank_id)
+        .expect("inserted page dictionary");
+    let media_box = blank
+        .get(b"MediaBox")
+        .expect("/MediaBox")
+        .as_array()
+        .expect("/MediaBox array");
+    assert_close(float_of(&media_box[2]), 300.0, "inserted page width");
+    assert_close(float_of(&media_box[3]), 400.0, "inserted page height");
+
+    let links = link_annotations(&parsed, 1);
+    let link = links
+        .iter()
+        .find(|link| text_of(link.get(b"NM").expect("/NM name")) == created_name)
+        .expect("the saved link");
+    assert!(
+        link.get(b"PDFXLinkTarget").is_err(),
+        "the materialized annotation no longer carries the private key"
+    );
+    let action = link
+        .get(b"A")
+        .expect("/A action")
+        .as_dict()
+        .expect("action dictionary");
+    assert_eq!(name_of(action, b"S"), "GoTo");
+    let destination = action
+        .get(b"D")
+        .expect("/D destination")
+        .as_array()
+        .expect("/D array");
+    assert_eq!(
+        destination[0].as_reference().expect("page reference"),
+        blank_id,
+        "the destination names the inserted blank page"
+    );
+
+    close_document(document_id).expect("close source");
+    let reopened = open_document(output.to_string_lossy().into_owned(), None)
+        .expect("reopen the saved output");
+    let listed = pdfx_lib::links::list_links(reopened.document_id.clone()).expect("list links");
+    let link = listed
+        .iter()
+        .find(|link| link.name.as_deref() == Some(created_name.as_str()))
+        .expect("the link to the inserted page reopens");
+    assert_eq!(link.page_index, 0);
+    assert_eq!(link.target, Some(LinkTarget::Page { page_index: 1 }));
+    assert_rect_close(&link.rects[0], &rect, "reopened inserted-target rect");
+    close_document(reopened.document_id).expect("close reopened");
+}
+
+#[test]
+fn deleting_a_link_target_page_reports_the_link_as_unresolved() {
+    let dir = TempDir::new("links-deleted-target");
+    let pdf = synthetic::two_page_pdf();
+    let document_id = open_synthetic(&pdf);
+    let layer = extract_text_layer(document_id.clone(), 0).expect("text layer");
+    let rect = selection_rect(&layer, "Original");
+
+    create_link(
+        document_id.clone(),
+        CreateLinkRequest {
+            page_index: 0,
+            rects: vec![rect],
+            target: LinkTarget::Page { page_index: 1 },
+        },
+    )
+    .expect("create a link to the second page");
+
+    pdfx_lib::page_ops::delete_page(document_id.clone(), 1).expect("delete the target page");
+    let listed = pdfx_lib::links::list_links(document_id.clone()).expect("list links");
+    assert_eq!(listed.len(), 1, "the link itself survives on the kept page");
+    assert_eq!(listed[0].page_index, 0);
+    assert_eq!(
+        listed[0].target, None,
+        "a deleted target must never be reported as page 1"
+    );
+    assert_eq!(
+        listed[0].unsupported,
+        Some(pdfx_lib::links::LinkUnsupportedReason::Destination),
+        "the overlay explains that the destination cannot be resolved"
+    );
+
+    // Undoing the page deletion restores the target page's logical slot, so
+    // the same annotation speaks a normal page target again.
+    undo_text_edit(document_id.clone()).expect("undo the page deletion");
+    let restored = pdfx_lib::links::list_links(document_id.clone()).expect("list links");
+    assert_eq!(restored[0].target, Some(LinkTarget::Page { page_index: 1 }));
+
+    redo_text_edit(document_id.clone()).expect("redo the page deletion");
+    let after_redo = pdfx_lib::links::list_links(document_id.clone()).expect("list links");
+    assert_eq!(after_redo[0].target, None);
+
+    let output = dir.path().join("deleted-target-link.pdf");
+    save_as(&document_id, &output);
+    let parsed = lopdf::Document::load(&output).expect("lopdf parses the output");
+    assert_eq!(parsed.get_pages().len(), 1, "the deleted page is not saved");
+    let saved_page_ids: Vec<lopdf::ObjectId> = parsed.get_pages().values().copied().collect();
+    let links = link_annotations(&parsed, 1);
+    assert_eq!(links.len(), 1);
+    let action = links[0]
+        .get(b"A")
+        .expect("/A action")
+        .as_dict()
+        .expect("action dictionary");
+    assert_eq!(name_of(action, b"S"), "GoTo");
+    assert!(
+        links[0].get(b"PDFXLinkTarget").is_err(),
+        "the private key is still removed when its page is gone"
+    );
+    let destination = action
+        .get(b"D")
+        .expect("/D destination")
+        .as_array()
+        .expect("/D array");
+    let destination_page = destination[0].as_reference().expect("page reference");
+    assert!(
+        !saved_page_ids.contains(&destination_page),
+        "ticket 26 leaves the destination dangling rather than rewriting it"
+    );
+
+    close_document(document_id).expect("close source");
+    let reopened = open_document(output.to_string_lossy().into_owned(), None)
+        .expect("reopen the saved output");
+    let listed = pdfx_lib::links::list_links(reopened.document_id.clone()).expect("list links");
+    assert_eq!(listed.len(), 1, "the dangling link is still listed");
+    assert_eq!(
+        listed[0].target, None,
+        "a dangling saved destination reopens as unresolved, never as page 1"
+    );
+    assert_eq!(
+        listed[0].unsupported,
+        Some(pdfx_lib::links::LinkUnsupportedReason::Destination)
+    );
+    close_document(reopened.document_id).expect("close reopened");
+}
+
+#[test]
+fn link_identity_stays_on_its_own_page_when_another_page_repeats_the_nm() {
+    let pdf = synthetic::duplicate_link_names_pdf();
+    let document_id = open_synthetic(&pdf);
+    let listed = pdfx_lib::links::list_links(document_id.clone()).expect("list links");
+    assert_eq!(listed.len(), 2);
+    let page_one = listed
+        .iter()
+        .find(|link| link.page_index == 0)
+        .expect("page-one link")
+        .clone();
+    let page_two = listed
+        .iter()
+        .find(|link| link.page_index == 1)
+        .expect("page-two link")
+        .clone();
+    assert_eq!(page_one.name.as_deref(), Some("shared-name"));
+    assert_eq!(page_two.name.as_deref(), Some("shared-name"));
+
+    let updated = pdfx_lib::links::update_link_target(
+        document_id.clone(),
+        UpdateLinkTargetRequest {
+            link_id: page_two.id.clone(),
+            target: LinkTarget::Url {
+                url: "https://example.com/replaced".to_owned(),
+            },
+        },
+    )
+    .expect("edit the page-two link")
+    .link
+    .expect("updated link view");
+    assert_eq!(updated.page_index, 1);
+    assert_eq!(
+        updated.target,
+        Some(LinkTarget::Url {
+            url: "https://example.com/replaced".to_owned()
+        })
+    );
+
+    let after = pdfx_lib::links::list_links(document_id.clone()).expect("list links");
+    assert_eq!(
+        after.len(),
+        2,
+        "the page-one link with the same name survives"
+    );
+    let still_page_one = after
+        .iter()
+        .find(|link| link.page_index == 0)
+        .expect("page-one link is untouched");
+    assert_eq!(
+        still_page_one.target,
+        Some(LinkTarget::Url {
+            url: "https://foreign.example/page-one".to_owned()
+        }),
+        "editing page two must not delete or retarget page one"
+    );
+    let replaced_page_two = after
+        .iter()
+        .find(|link| link.page_index == 1)
+        .expect("page-two link");
+    assert_eq!(
+        replaced_page_two.target,
+        Some(LinkTarget::Url {
+            url: "https://example.com/replaced".to_owned()
+        })
+    );
+
+    undo_text_edit(document_id.clone()).expect("undo the target edit");
+    let restored = pdfx_lib::links::list_links(document_id.clone()).expect("list links");
+    assert_eq!(restored.len(), 2);
+    assert_eq!(
+        restored
+            .iter()
+            .find(|link| link.page_index == 1)
+            .expect("page-two link")
+            .target,
+        Some(LinkTarget::Url {
+            url: "https://foreign.example/page-two".to_owned()
+        }),
+        "undo restores the page-two link, not the page-one one"
+    );
+    assert_eq!(
+        restored
+            .iter()
+            .find(|link| link.page_index == 0)
+            .expect("page-one link")
+            .target,
+        Some(LinkTarget::Url {
+            url: "https://foreign.example/page-one".to_owned()
+        })
+    );
+
+    // Deleting the page-two link must leave the identically named page-one
+    // link alone.
+    let page_two = restored
+        .iter()
+        .find(|link| link.page_index == 1)
+        .expect("page-two link")
+        .clone();
+    pdfx_lib::links::delete_link(document_id.clone(), page_two.id)
+        .expect("delete the page-two link");
+    let remaining = pdfx_lib::links::list_links(document_id.clone()).expect("list links");
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].page_index, 0);
+    assert_eq!(
+        remaining[0].target,
+        Some(LinkTarget::Url {
+            url: "https://foreign.example/page-one".to_owned()
+        })
+    );
+
+    undo_text_edit(document_id.clone()).expect("undo the deletion");
+    assert_eq!(
+        pdfx_lib::links::list_links(document_id.clone())
+            .expect("list links")
+            .len(),
+        2
+    );
+    close_document(document_id).expect("close source");
+}
+
+#[test]
+fn a_url_only_link_save_appends_only_the_pdfium_revision() {
+    let dir = TempDir::new("links-url-revisions");
+    let pdf = synthetic::single_line_pdf();
+    let source_sections =
+        startxref_sections(&std::fs::read(pdf.path_string()).expect("source bytes"));
+    let document_id = open_synthetic(&pdf);
+    let layer = extract_text_layer(document_id.clone(), 0).expect("text layer");
+    let rect = selection_rect(&layer, "Original");
+    create_link(
+        document_id.clone(),
+        CreateLinkRequest {
+            page_index: 0,
+            rects: vec![rect],
+            target: LinkTarget::Url {
+                url: "https://example.com/revision".to_owned(),
+            },
+        },
+    )
+    .expect("create URL link");
+
+    let output = dir.path().join("url-revision.pdf");
+    save_as(&document_id, &output);
+    let output_bytes = std::fs::read(&output).expect("read output bytes");
+    assert_eq!(
+        startxref_sections(&output_bytes),
+        source_sections + 1,
+        "a URL-only change needs no lopdf revision"
+    );
+    assert!(!contains(&output_bytes, b"PDFXLinkTarget"));
+
+    close_document(document_id).expect("close source");
+}

@@ -2258,7 +2258,12 @@ fn undo_link(
     entry: &mut OpenDocument,
     action: Box<LinkEditAction>,
 ) -> Result<EditStepView, CommandError> {
-    crate::links::apply_link_snapshot(&entry.document, action.before.as_ref(), &action.name)?;
+    crate::links::apply_link_snapshot(
+        &entry.document,
+        action.page_index,
+        action.before.as_ref(),
+        &action.name,
+    )?;
     let page_index = action.page_index;
     entry.edit.current_state = action.before_state;
     entry.edit.redo_stack.push(EditAction::Link(action));
@@ -2274,7 +2279,12 @@ fn redo_link(
     entry: &mut OpenDocument,
     action: Box<LinkEditAction>,
 ) -> Result<EditStepView, CommandError> {
-    crate::links::apply_link_snapshot(&entry.document, action.after.as_ref(), &action.name)?;
+    crate::links::apply_link_snapshot(
+        &entry.document,
+        action.page_index,
+        action.after.as_ref(),
+        &action.name,
+    )?;
     let page_index = action.page_index;
     entry.edit.current_state = action.after_state;
     entry.edit.undo_stack.push(EditAction::Link(action));

@@ -267,6 +267,40 @@ pub fn foreign_links_pdf() -> TempPdf {
     write_pdf("foreign-links", build_pdf(objects, 1))
 }
 
+/// Two 612x792 pages whose links repeat one `/NM` value.
+///
+/// `/NM` only has to be unique among the annotations of its own page, so a
+/// document written by another tool may legally use the same name on two
+/// pages. The links point at different URLs so an edit that confuses them is
+/// visible in the saved actions.
+pub fn duplicate_link_names_pdf() -> TempPdf {
+    let content = b"BT /F1 18 Tf 72 720 Td (Original line.) Tj ET\n".to_vec();
+    let objects = vec![
+        (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+        (2, b"<< /Type /Pages /Kids [4 0 R 6 0 R] /Count 2 >>".to_vec()),
+        (3, HELVETICA.to_vec()),
+        (
+            4,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R /Annots [8 0 R] >>".to_vec(),
+        ),
+        (5, stream("", &content)),
+        (
+            6,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 7 0 R /Annots [9 0 R] >>".to_vec(),
+        ),
+        (7, stream("", &content)),
+        (
+            8,
+            b"<< /Type /Annot /Subtype /Link /Rect [72 690 180 710] /NM (shared-name) /A << /S /URI /URI (https://foreign.example/page-one) >> >>".to_vec(),
+        ),
+        (
+            9,
+            b"<< /Type /Annot /Subtype /Link /Rect [72 600 180 620] /NM (shared-name) /A << /S /URI /URI (https://foreign.example/page-two) >> >>".to_vec(),
+        ),
+    ];
+    write_pdf("duplicate-link-names", build_pdf(objects, 1))
+}
+
 /// Two 612x792 pages with the destination forms other writers emit.
 ///
 /// Page 1 carries four foreign links: a `/GoTo` action, a direct `/Dest` array,

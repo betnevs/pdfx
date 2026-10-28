@@ -26,8 +26,8 @@ use pdfium_render::prelude::{PdfDocument, PdfPageAnnotationType};
 use serde::{Deserialize, Serialize};
 
 use crate::annotations::{
-    bounds_of_quads, display_rect, display_rects, ensure_annotation_editable, find_target,
-    map_adapter_error, next_annotation_name, page_geometry, quad_for_rect, TextMarkupRect,
+    bounds_of_quads, display_rect, display_rects, ensure_annotation_editable, map_adapter_error,
+    next_annotation_name, page_geometry, quad_for_rect, TextMarkupRect,
 };
 use crate::commands::{
     with_open_document, CommandError, CommandErrorCode, DisplayGeometry, OpenDocument,
@@ -372,13 +372,26 @@ fn read_link_view(
 ///
 /// Links address Pdfium pages physically, like annotation snapshots, so a
 /// target follows its page object through page reordering. The overlay and the
-/// target label speak the logical page numbers the user sees. A target on a
-/// page that was deleted from the arrangement falls back to the first slot,
-/// matching how the rest of the annotation layer reports orphaned pages.
+/// target label speak the logical page numbers the user sees.
+///
+/// A target on a page that was deleted from the arrangement has no logical
+/// slot. Ticket 26 deliberately leaves the saved destination dangling, so the
+/// link is reported as an unresolved destination instead of silently
+/// pretending it targets the first page.
 fn logical_link_view(mut view: LinkView, entry: &OpenDocument) -> LinkView {
     view.page_index = entry.logical_page(view.page_index).unwrap_or(0);
-    if let Some(LinkTarget::Page { page_index }) = &mut view.target {
-        *page_index = entry.logical_page(*page_index).unwrap_or(0);
+    if let Some(LinkTarget::Page { page_index }) = view.target.clone() {
+        match entry.logical_page(page_index) {
+            Some(logical) => {
+                view.target = Some(LinkTarget::Page {
+                    page_index: logical,
+                })
+            }
+            None => {
+                view.target = None;
+                view.unsupported = Some(LinkUnsupportedReason::Destination);
+            }
+        }
     }
     view
 }
@@ -436,6 +449,36 @@ fn capture_link_snapshot(
     })
 }
 
+/// Finds the annotation named `name` on one physical page.
+///
+/// `/NM` is only required to be unique among a page's annotations, so a
+/// document written by another tool may legally repeat a name on different
+/// pages. Link mutations and undo therefore look the name up on the page the
+/// action recorded instead of taking the first match in the document.
+fn find_link_on_page(
+    document: &PdfDocument<'static>,
+    page_index: u32,
+    name: &str,
+) -> Result<Option<AnnotationRef>, CommandError> {
+    let count = {
+        let page = document.pages().get(page_index as i32).map_err(|error| {
+            internal_error(format!("could not load page {page_index}: {error:?}"))
+        })?;
+        page.annotations().len()
+    };
+    for index in 0..count {
+        let target = AnnotationRef::new(page_index as i32, index);
+        if annotation_name(document, target)
+            .map_err(map_adapter_error)?
+            .as_deref()
+            == Some(name)
+        {
+            return Ok(Some(target));
+        }
+    }
+    Ok(None)
+}
+
 /// Recreates a link exactly as a snapshot recorded it.
 ///
 /// Pdfium cannot change an action or remove one, so every target change is a
@@ -445,7 +488,7 @@ pub(crate) fn restore_link_snapshot(
     document: &PdfDocument<'static>,
     snapshot: &LinkSnapshot,
 ) -> Result<(), CommandError> {
-    if let Some(existing) = find_target(document, &snapshot.name)? {
+    if let Some(existing) = find_link_on_page(document, snapshot.page_index, &snapshot.name)? {
         remove_annotation(document, existing).map_err(map_adapter_error)?;
     }
     let uri = match &snapshot.target {
@@ -474,25 +517,31 @@ pub(crate) fn restore_link_snapshot(
     Ok(())
 }
 
-/// Removes the link named `name`; used when undo/redo crosses a creation or
-/// deletion. Missing annotations are an internal inconsistency, matching the
-/// annotation undo path.
+/// Removes the link named `name` from one physical page; used when undo/redo
+/// crosses a creation or deletion. Missing annotations are an internal
+/// inconsistency, matching the annotation undo path.
 pub(crate) fn remove_link_named(
     document: &PdfDocument<'static>,
+    page_index: u32,
     name: &str,
 ) -> Result<(), CommandError> {
-    crate::annotations::remove_annotation_named(document, name)
+    let target = find_link_on_page(document, page_index, name)?
+        .ok_or_else(|| internal_error(format!("link {name} does not exist")))?;
+    remove_annotation(document, target).map_err(map_adapter_error)
 }
 
-/// Applies one side of a link action. `None` removes the link.
+/// Applies one side of a link action. `None` removes the link. The page is the
+/// physical page the action recorded, so a repeated `/NM` on another page is
+/// never touched.
 pub(crate) fn apply_link_snapshot(
     document: &PdfDocument<'static>,
+    page_index: u32,
     target: Option<&LinkSnapshot>,
     name: &str,
 ) -> Result<(), CommandError> {
     match target {
         Some(snapshot) => restore_link_snapshot(document, snapshot),
-        None => remove_link_named(document, name),
+        None => remove_link_named(document, page_index, name),
     }
 }
 
@@ -683,7 +732,7 @@ pub fn update_link_target(
         after.target = target;
         restore_link_snapshot(&entry.document, &after)?;
 
-        let restored = find_target(&entry.document, &name)?
+        let restored = find_link_on_page(&entry.document, physical_page, &name)?
             .ok_or_else(|| internal_error("the edited link disappeared"))?;
         let view = after.view(link_id(physical_page, restored.index));
         let view = logical_link_view(view, entry);
@@ -707,7 +756,7 @@ pub fn delete_link(document_id: String, link_id: String) -> Result<LinkMutationV
         let name = ensure_link_name(&entry.document, found)?;
         let geometry = page_geometry(&entry.document, physical_page)?;
         let before = capture_link_snapshot(&entry.document, physical_page, found, &geometry)?;
-        remove_link_named(&entry.document, &name)?;
+        remove_link_named(&entry.document, physical_page, &name)?;
         let history = push_link_action(entry, physical_page, name, Some(before), None);
         Ok(LinkMutationView {
             link: None,
