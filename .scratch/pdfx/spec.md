@@ -225,7 +225,7 @@ PDFX 是一个 Tauri 2 桌面应用：Rust 负责 PDF 处理与文件系统，Re
 
 ### 字体
 
-- 内置可自由嵌入的字体（ADR-0006）：思源黑体/思源宋体、Inter、Noto Serif、Liberation Sans/Serif（作为 Arial/Times New Roman 的度量兼容替代）。
+- 内置可自由嵌入的字体（ADR-0006）：Noto Sans SC/Noto Serif SC（思源黑体/思源宋体的 TrueType 构建）、Inter、Noto Serif、Liberation Sans/Serif（作为 Arial/Times New Roman 的度量兼容替代）。CJK 必须使用 TrueType 构建以配合 CIDFontType2 + FontFile2；Adobe 的 CFF OTF 需要单独的 CIDFontType0 管线，不在本规格范围。
 - 保存时按需子集嵌入；不调用系统字体选择器，不嵌入许可不明确的系统字体。
 - 子集化会重排 glyph ID，必须保留 old-to-new GID 映射，用于 CIDToGIDMap、/W 宽度与 ToUnicode CMap。
 - CJK 横排主要依赖 cmap/glyph 选择；竖排（/W2、/DW2）与 Han unification 的语言感知回退不在 M1–M3 范围。
