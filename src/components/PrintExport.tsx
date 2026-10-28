@@ -59,6 +59,7 @@ const EXPORT_ERROR_MESSAGES: Partial<Record<CommandError["code"], string>> = {
   permission_denied: "没有写入该位置的权限，请选择其他位置。",
   file_write_failed: "无法写入文件，请检查目标位置与磁盘空间。",
   page_out_of_range: "页面不存在，文档可能已关闭。",
+  invalid_argument: "不能覆盖源 PDF 文件，请选择其他位置。",
 };
 
 const PRINT_ERROR_MESSAGES: Partial<Record<CommandError["code"], string>> = {

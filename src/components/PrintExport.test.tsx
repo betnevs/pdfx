@@ -162,6 +162,28 @@ describe("PrintExport", () => {
     );
     expect(screen.getByRole("dialog", { name: "导出当前页" })).toBeInTheDocument();
   });
+
+  it("explains why the source PDF cannot be used as the export target", async () => {
+    const user = userEvent.setup();
+    saveMock.mockResolvedValue("/tmp/report.pdf");
+    invokeMock.mockRejectedValue({
+      code: "invalid_argument",
+      message: "/tmp/report.pdf is the open Source Document",
+    });
+    renderPrintExport();
+
+    await user.click(screen.getByRole("button", { name: "导出当前页…" }));
+    await user.click(
+      within(screen.getByRole("dialog", { name: "导出当前页" })).getByRole(
+        "button",
+        { name: "导出…" },
+      ),
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "不能覆盖源 PDF 文件，请选择其他位置。",
+    );
+  });
 });
 
 function pageInfoFor(pageIndex: number) {
