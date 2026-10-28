@@ -1193,3 +1193,61 @@ fn deleting_the_page_of_an_existing_form_field_does_not_leak_it() {
 
     close_document(document_id).expect("close document");
 }
+
+#[test]
+fn deleting_a_link_target_leaves_untouched_destinations_alone() {
+    let pdf = synthetic::page_operations_pdf();
+    let source = PathBuf::from(pdf.path_string());
+    let source_ids = {
+        let parsed = lopdf::Document::load(&source).expect("parse source");
+        page_ids(&parsed)
+    };
+    let document = open(&source);
+    let document_id = document.document_id.clone();
+
+    // Page 1's link targets page 3. Deleting page 3 must not rewrite the link
+    // annotation on the untouched first page.
+    pdfx_lib::page_ops::delete_page(document_id.clone(), 2).expect("delete page 3");
+    let dir = TempDir::new("delete-link-target");
+    let output = dir.path().join("deleted-target.pdf");
+    save(&document_id, &output);
+
+    let parsed = lopdf::Document::load(&output).expect("parse output");
+    let saved_ids = page_ids(&parsed);
+    assert_eq!(saved_ids, vec![source_ids[0], source_ids[1]]);
+    let page_one = page_dict(&parsed, 1);
+    let annots = page_one
+        .get(b"Annots")
+        .expect("/Annots")
+        .as_array()
+        .expect("/Annots array");
+    let link = annots
+        .iter()
+        .map(|object| dict_of(&parsed, object))
+        .find(|dictionary| {
+            dictionary
+                .get(b"Subtype")
+                .and_then(lopdf::Object::as_name)
+                .is_ok_and(|subtype| subtype == b"Link")
+        })
+        .expect("the untouched page keeps its link annotation");
+    let action = dict_of(&parsed, link.get(b"A").expect("/A"));
+    let destination = action
+        .get(b"D")
+        .expect("/D")
+        .as_array()
+        .expect("destination array");
+    assert_eq!(
+        destination[0].as_reference().expect("destination page"),
+        source_ids[2],
+        "destinations keep pointing at the page object, deleted or not"
+    );
+    assert!(
+        !saved_ids.contains(&source_ids[2]),
+        "the destination target is out of the saved page tree"
+    );
+    // The bookmark points at the kept page 2 and is untouched.
+    assert_eq!(outline_destination_page(&parsed), source_ids[1]);
+
+    close_document(document_id).expect("close document");
+}

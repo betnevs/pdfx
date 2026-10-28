@@ -410,6 +410,12 @@ fn finalize_lopdf_revision(
 }
 
 /// The lopdf-side page tree rewrite for a logical arrangement.
+///
+/// Destinations are deliberately left alone. Bookmark and link destinations
+/// reference page objects, so they follow a page through reordering and
+/// insertion. Deleting a destination page leaves the destination pointing at
+/// an object that is no longer in the page tree (readers show it as
+/// unresolved) instead of rewriting an untouched page's annotation.
 struct PageTreeEdit {
     /// The document's `/Pages` node; included page dictionaries become its
     /// direct `/Kids` so order, count and hidden pages are expressed there.
