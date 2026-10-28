@@ -177,6 +177,7 @@ function installDocumentBackend(overrides: Record<string, CommandHandler> = {}) 
     extract_text_layer: () => textLayerView,
     form_fields: () => [],
     missing_required_fields: () => [],
+    page_images: () => [],
     edit_history: () => idleHistory,
     list_annotations: () => [],
     close_document: () => undefined,

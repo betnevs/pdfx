@@ -204,7 +204,7 @@ describe("FormLayer", () => {
     expect(onDocumentChanged).toHaveBeenCalledWith({
       documentId: "doc-1",
       pageIndex: 0,
-      origin: "form",
+      source: "form",
     });
     window.removeEventListener("pdfx://document-changed", listener);
   });

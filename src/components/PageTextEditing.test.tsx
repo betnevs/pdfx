@@ -226,7 +226,7 @@ describe("PageTextLayer text editing", () => {
     expect(changed).toHaveBeenCalledWith({
       documentId: "doc-1",
       pageIndex: 2,
-      origin: "text",
+      source: "text",
     });
     await waitFor(() =>
       expect(
@@ -250,7 +250,7 @@ describe("PageTextLayer text editing", () => {
     act(() => {
       window.dispatchEvent(
         new CustomEvent(DOCUMENT_CHANGED_EVENT, {
-          detail: { documentId: "doc-1", pageIndex: 0, origin: "form" },
+          detail: { documentId: "doc-1", pageIndex: 0, source: "form" },
         }),
       );
     });

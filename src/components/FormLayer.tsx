@@ -125,7 +125,7 @@ export function FormLayer({
   useEffect(
     () =>
       onDocumentChanged((detail) => {
-        if (detail.documentId === documentId && detail.origin !== "form") {
+        if (detail.documentId === documentId && detail.source !== "form") {
           reload();
         }
       }),
@@ -167,7 +167,7 @@ export function FormLayer({
         notifyDocumentChanged({
           documentId,
           pageIndex: field.pageIndex,
-          origin: "form",
+          source: "form",
         });
       } catch (error) {
         clearDraft(field.fieldId);

@@ -17,12 +17,15 @@ export interface DocumentChangedDetail {
   documentId: string;
   pageIndex: number;
   /**
-   * Set by the tool that made the change when its own view already reflects
-   * the new state. `"form"` marks a form fill; the form overlay updates from
-   * the command result and only other views need to refresh. `"text"` marks a
-   * Text Box edit whose command result already returned the new history.
+   * The tool that made the change, when another overlay needs to refresh
+   * tool-specific state such as the shared undo availability. Omitted by
+   * callers whose command results already carry that state.
+   *
+   * `"form"` marks a form fill whose overlay already updated from the command
+   * result; `"text"` and `"image"` mark the Text Box and Image edits whose
+   * command results returned the new history.
    */
-  origin?: "form" | "text";
+  source?: "text" | "image" | "form";
 }
 
 export function notifyDocumentChanged(detail: DocumentChangedDetail): void {
@@ -47,13 +50,18 @@ export function onDocumentChanged(
       typeof detail.documentId === "string" &&
       typeof detail.pageIndex === "number"
     ) {
-      handler({
+      const message: DocumentChangedDetail = {
         documentId: detail.documentId,
         pageIndex: detail.pageIndex,
-        ...(detail.origin === "form" || detail.origin === "text"
-          ? { origin: detail.origin }
-          : {}),
-      });
+      };
+      if (
+        detail.source === "text" ||
+        detail.source === "image" ||
+        detail.source === "form"
+      ) {
+        message.source = detail.source;
+      }
+      handler(message);
     }
   };
   window.addEventListener(DOCUMENT_CHANGED_EVENT, listener);

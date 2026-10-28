@@ -24,6 +24,7 @@ import {
 } from "../lib/pageGeometry";
 import type { PageRender, ZoomMode } from "../lib/useDocumentViewer";
 import { FormLayer } from "./FormLayer";
+import { PageImageLayer } from "./PageImageLayer";
 import { PageTextLayer } from "./PageTextLayer";
 
 /** Fixed cell height keeps thumbnail virtualization independent of page sizes. */
@@ -477,18 +478,28 @@ export function PageSurface({
         scale={scale}
       />
       {info && (
-        <FormLayer
-          documentId={documentId}
-          pageIndex={pageIndex}
-          pageWidth={info.width}
-          pageHeight={info.height}
-          scale={scale}
-          canFillForms={canFillForms}
-          focusFieldId={formFocusFieldId}
-          onFocusHandled={onFormFocusHandled}
-          onSelectPage={onSelectPage}
-          onFocusField={onFormFocusField}
-        />
+        <>
+          <PageImageLayer
+            key={`${documentId}:${pageIndex}:images`}
+            documentId={documentId}
+            pageIndex={pageIndex}
+            pageWidth={info.width}
+            pageHeight={info.height}
+            readOnly={readOnly}
+          />
+          <FormLayer
+            documentId={documentId}
+            pageIndex={pageIndex}
+            pageWidth={info.width}
+            pageHeight={info.height}
+            scale={scale}
+            canFillForms={canFillForms}
+            focusFieldId={formFocusFieldId}
+            onFocusHandled={onFormFocusHandled}
+            onSelectPage={onSelectPage}
+            onFocusField={onFormFocusField}
+          />
+        </>
       )}
     </div>
   );

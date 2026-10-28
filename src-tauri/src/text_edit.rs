@@ -545,8 +545,26 @@ impl BoxEditAction {
     }
 }
 
+/// One committed image change (insertion, transform or deletion).
+///
+/// The page-object snapshots work exactly like [`BoxEditAction`]: the detached
+/// "before" objects live in the action while it is on the undo stack, and the
+/// two snapshots are swapped when the action moves to the other stack.
+pub(crate) struct ImageEditAction {
+    pub(crate) page_index: u32,
+    pub(crate) image_id: u64,
+    pub(crate) start: usize,
+    pub(crate) before_state: u64,
+    pub(crate) after_state: u64,
+    pub(crate) before_record: Option<crate::image_edit::ImageSnapshot>,
+    pub(crate) before_objects: Option<Vec<PdfPageObject<'static>>>,
+    pub(crate) after_record: Option<crate::image_edit::ImageSnapshot>,
+    pub(crate) after_objects: Option<Vec<PdfPageObject<'static>>>,
+}
+
 pub(crate) enum EditAction {
     Box(BoxEditAction),
+    Image(ImageEditAction),
     Field(FieldEditAction),
     Annotation(AnnotationEditAction),
 }
@@ -679,6 +697,9 @@ impl TextBoxRecord {
 pub struct EditSession {
     pub(crate) records: HashMap<u32, Vec<TextBoxRecord>>,
     pub(crate) next_box_id: u64,
+    /// Images inserted by this session, per page.
+    pub(crate) images: HashMap<u32, Vec<crate::image_edit::ImageRecord>>,
+    pub(crate) next_image_id: u64,
     pub(crate) undo_stack: Vec<EditAction>,
     pub(crate) redo_stack: Vec<EditAction>,
     /// Id of the document state currently on the page.
@@ -719,7 +740,7 @@ fn no_editable_text(page_index: u32) -> CommandError {
     )
 }
 
-fn ensure_content_editable(document: &PdfDocument<'_>) -> Result<(), CommandError> {
+pub(crate) fn ensure_content_editable(document: &PdfDocument<'_>) -> Result<(), CommandError> {
     // A missing permission read is treated as denied, matching `open_document`.
     let allowed = document
         .permissions()
@@ -1838,29 +1859,56 @@ fn find_record(session: &EditSession, page_index: u32, box_id: u64) -> Result<us
         })
 }
 
-/// Updates the stored box ranges after a box at `start` changed its object
-/// count. Boxes after it move by the difference; the edited box itself keeps
-/// its start.
+/// Which tracked record the caller is editing. That record keeps its start;
+/// every other tracked page-object range is shifted.
+pub(crate) enum ObjectRef {
+    TextBox(u64),
+    Image(u64),
+}
+
+/// Updates every tracked page-object range after objects at `start` changed
+/// count. Text Boxes and images share one page-object list, so a change in
+/// either must keep the other's indices correct.
 ///
-/// When objects are inserted (`delta > 0`), a later box may already sit at
+/// When objects are inserted (`delta > 0`), a later record may already sit at
 /// exactly `start` (this happens when undoing a deletion, where the deleted
-/// box had count 0 before the undo), so an insertion shifts boxes at or after
-/// `start`. A removal (`delta < 0`) only moves boxes strictly after it.
-fn shift_later_boxes(records: &mut [TextBoxRecord], box_id: u64, start: usize, delta: isize) {
+/// record had count 0 before the undo), so an insertion shifts records at or
+/// after `start`. A removal (`delta < 0`) only moves records strictly after it.
+pub(crate) fn shift_object_indexes(
+    session: &mut EditSession,
+    page_index: u32,
+    start: usize,
+    delta: isize,
+    keep: ObjectRef,
+) {
     if delta == 0 {
         return;
     }
-    for record in records.iter_mut() {
-        if record.box_id == box_id {
-            continue;
-        }
-        let moves = if delta > 0 {
-            record.start >= start
+    let moves = |index: usize| {
+        if delta > 0 {
+            index >= start
         } else {
-            record.start > start
-        };
-        if moves {
-            record.start = (record.start as isize + delta).max(0) as usize;
+            index > start
+        }
+    };
+    if let Some(records) = session.records.get_mut(&page_index) {
+        for record in records.iter_mut() {
+            if matches!(keep, ObjectRef::TextBox(id) if record.box_id == id) {
+                continue;
+            }
+            if moves(record.start) {
+                record.start = (record.start as isize + delta).max(0) as usize;
+            }
+        }
+    }
+    if let Some(images) = session.images.get_mut(&page_index) {
+        for image in images.iter_mut() {
+            if matches!(keep, ObjectRef::Image(id) if image.image_id == id) {
+                continue;
+            }
+            if moves(image.start) {
+                image.start = (image.start as isize + delta).max(0) as usize;
+            }
         }
     }
 }
@@ -1871,7 +1919,7 @@ fn shift_later_boxes(records: &mut [TextBoxRecord], box_id: u64, start: usize, d
 /// Undo/redo use this both to take the current objects off the page and to put
 /// snapshot objects back at the same index, which preserves object order and
 /// therefore text extraction order.
-fn detach_and_insert(
+pub(crate) fn detach_and_insert(
     document: &PdfDocument<'static>,
     page_index: u32,
     start: usize,
@@ -2026,11 +2074,13 @@ fn redo_field(
 
 fn undo_for(entry: &mut OpenDocument) -> Result<EditStepView, CommandError> {
     // Check the permission of the action that is about to be applied without
-    // popping it: a Box action needs content permission, a Field action needs
-    // form-filling permission, an annotation action needs annotation
-    // permission.
+    // popping it: a Box or Image action needs content permission, a Field
+    // action needs form-filling permission, an annotation action needs
+    // annotation permission.
     match entry.edit.undo_stack.last() {
-        Some(EditAction::Box(_)) => ensure_content_editable(&entry.document)?,
+        Some(EditAction::Box(_)) | Some(EditAction::Image(_)) => {
+            ensure_content_editable(&entry.document)?
+        }
         Some(EditAction::Field(_)) => crate::form::ensure_forms_editable(&entry.document)?,
         Some(EditAction::Annotation(_)) => ensure_annotation_editable(&entry.document)?,
         None => {
@@ -2045,6 +2095,7 @@ fn undo_for(entry: &mut OpenDocument) -> Result<EditStepView, CommandError> {
     };
     match action {
         EditAction::Box(action) => undo_box(entry, action),
+        EditAction::Image(action) => crate::image_edit::undo_image(entry, action),
         EditAction::Field(action) => undo_field(entry, action),
         EditAction::Annotation(action) => undo_annotation(entry, action),
     }
@@ -2108,13 +2159,14 @@ fn undo_box(
                 records.retain(|record| record.box_id != action.box_id);
             }
         }
-        shift_later_boxes(
-            records,
-            action.box_id,
-            action.start,
-            before_count as isize - after_count as isize,
-        );
     }
+    shift_object_indexes(
+        &mut entry.edit,
+        page_index,
+        action.start,
+        before_count as isize - after_count as isize,
+        ObjectRef::TextBox(action.box_id),
+    );
 
     entry.edit.current_state = action.before_state;
     entry.edit.redo_stack.push(EditAction::Box(action));
@@ -2126,11 +2178,13 @@ fn undo_box(
 
 fn redo_for(entry: &mut OpenDocument) -> Result<EditStepView, CommandError> {
     // Check the permission of the action that is about to be applied without
-    // popping it: a Box action needs content permission, a Field action needs
-    // form-filling permission, an annotation action needs annotation
-    // permission.
+    // popping it: a Box or Image action needs content permission, a Field
+    // action needs form-filling permission, an annotation action needs
+    // annotation permission.
     match entry.edit.redo_stack.last() {
-        Some(EditAction::Box(_)) => ensure_content_editable(&entry.document)?,
+        Some(EditAction::Box(_)) | Some(EditAction::Image(_)) => {
+            ensure_content_editable(&entry.document)?
+        }
         Some(EditAction::Field(_)) => crate::form::ensure_forms_editable(&entry.document)?,
         Some(EditAction::Annotation(_)) => ensure_annotation_editable(&entry.document)?,
         None => {
@@ -2145,6 +2199,7 @@ fn redo_for(entry: &mut OpenDocument) -> Result<EditStepView, CommandError> {
     };
     match action {
         EditAction::Box(action) => redo_box(entry, action),
+        EditAction::Image(action) => crate::image_edit::redo_image(entry, action),
         EditAction::Field(action) => redo_field(entry, action),
         EditAction::Annotation(action) => redo_annotation(entry, action),
     }
@@ -2191,13 +2246,14 @@ fn redo_box(
                 records.retain(|record| record.box_id != action.box_id);
             }
         }
-        shift_later_boxes(
-            records,
-            action.box_id,
-            action.start,
-            after_count as isize - before_count as isize,
-        );
     }
+    shift_object_indexes(
+        &mut entry.edit,
+        page_index,
+        action.start,
+        after_count as isize - before_count as isize,
+        ObjectRef::TextBox(action.box_id),
+    );
 
     entry.edit.current_state = action.after_state;
     entry.edit.undo_stack.push(EditAction::Box(action));
@@ -2377,13 +2433,14 @@ fn apply_for(
             record.count = new_count;
             record.text = normalized.clone();
         }
-        shift_later_boxes(
-            records,
-            box_id,
-            start,
-            new_count as isize - old_count as isize,
-        );
     }
+    shift_object_indexes(
+        &mut entry.edit,
+        page_index,
+        start,
+        new_count as isize - old_count as isize,
+        ObjectRef::TextBox(box_id),
+    );
     let after_snapshot = entry.edit.records[&page_index][record_index].snapshot(record_index);
     push_action(
         entry,
@@ -2454,8 +2511,14 @@ fn delete_for(
             record.text.clear();
             record.deleted = true;
         }
-        shift_later_boxes(records, box_id, start, -(count as isize));
     }
+    shift_object_indexes(
+        &mut entry.edit,
+        page_index,
+        start,
+        -(count as isize),
+        ObjectRef::TextBox(box_id),
+    );
     let after_snapshot = entry.edit.records[&page_index][record_index].snapshot(record_index);
     push_action(
         entry,
@@ -2670,19 +2733,13 @@ fn apply_to_styled_box(
         }
     }
     let after_snapshot = entry.edit.records[&page_index][record_index].snapshot(record_index);
-    {
-        let records = entry
-            .edit
-            .records
-            .get_mut(&page_index)
-            .expect("Text Box page disappeared");
-        shift_later_boxes(
-            records,
-            box_id,
-            start,
-            new_count as isize - old_count as isize,
-        );
-    }
+    shift_object_indexes(
+        &mut entry.edit,
+        page_index,
+        start,
+        new_count as isize - old_count as isize,
+        ObjectRef::TextBox(box_id),
+    );
     push_action(
         entry,
         page_index,
@@ -2896,19 +2953,13 @@ fn style_for(
         record.count = new_count;
     }
     let after_snapshot = entry.edit.records[&page_index][record_index].snapshot(record_index);
-    {
-        let records = entry
-            .edit
-            .records
-            .get_mut(&page_index)
-            .expect("Text Box page disappeared");
-        shift_later_boxes(
-            records,
-            box_id,
-            start,
-            new_count as isize - old_count as isize,
-        );
-    }
+    shift_object_indexes(
+        &mut entry.edit,
+        page_index,
+        start,
+        new_count as isize - old_count as isize,
+        ObjectRef::TextBox(box_id),
+    );
     push_action(
         entry,
         page_index,
@@ -3047,19 +3098,13 @@ fn transform_for(
         record.count = new_count;
     }
     let after_snapshot = entry.edit.records[&page_index][record_index].snapshot(record_index);
-    {
-        let records = entry
-            .edit
-            .records
-            .get_mut(&page_index)
-            .expect("Text Box page disappeared");
-        shift_later_boxes(
-            records,
-            box_id,
-            start,
-            new_count as isize - old_count as isize,
-        );
-    }
+    shift_object_indexes(
+        &mut entry.edit,
+        page_index,
+        start,
+        new_count as isize - old_count as isize,
+        ObjectRef::TextBox(box_id),
+    );
     push_action(
         entry,
         page_index,
