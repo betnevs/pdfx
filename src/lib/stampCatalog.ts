@@ -33,6 +33,8 @@ export function annotationLabel(annotation: AnnotationView): string {
       return "下划线";
     case "strikeout":
       return "删除线";
+    case "squiggly":
+      return "波浪线";
     case "square":
       return "矩形";
     case "circle":
@@ -45,5 +47,9 @@ export function annotationLabel(annotation: AnnotationView): string {
       const kind = annotation.stamp?.kind;
       return kind ? `图章 · ${STAMP_LABELS[kind]}` : "图章";
     }
+    case "freetext":
+      return "自由文本";
+    case "callout":
+      return "标注框";
   }
 }

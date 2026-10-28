@@ -35,6 +35,7 @@ const highlight: AnnotationView = {
   rects: [{ x: 100, y: 100, width: 120, height: 20 }],
   shape: null,
   stamp: null,
+  freeText: null,
 };
 
 const underline: AnnotationView = {
@@ -51,6 +52,7 @@ const underline: AnnotationView = {
   rects: [{ x: 80, y: 200, width: 90, height: 18 }],
   shape: null,
   stamp: null,
+  freeText: null,
 };
 
 const stamp: AnnotationView = {
@@ -70,6 +72,7 @@ const stamp: AnnotationView = {
     kind: "approved",
     frame: { x: 216, y: 366, width: 180, height: 60, rotation: 0 },
   },
+  freeText: null,
 };
 
 const rectangle: AnnotationView = {
@@ -95,6 +98,7 @@ const rectangle: AnnotationView = {
     },
   },
   stamp: null,
+  freeText: null,
 };
 
 const note: AnnotationView = {
@@ -111,6 +115,7 @@ const note: AnnotationView = {
   rects: [{ x: 200, y: 220, width: 28, height: 28 }],
   shape: null,
   stamp: null,
+  freeText: null,
 };
 
 const ink: AnnotationView = {
@@ -136,6 +141,34 @@ const ink: AnnotationView = {
   rects: [{ x: 97, y: 297, width: 146, height: 46 }],
   shape: null,
   stamp: null,
+  freeText: null,
+};
+
+const freeText: AnnotationView = {
+  name: "ft-1",
+  pageIndex: 0,
+  kind: "freetext",
+  author: "文本作者",
+  createdAt: "D:20261028140000Z",
+  color: "#111827",
+  opacity: 100,
+  lineWidth: null,
+  text: "Hello",
+  strokes: [],
+  rects: [{ x: 100, y: 200, width: 200, height: 60 }],
+  shape: null,
+  stamp: null,
+  freeText: { kind: "freetext", fontSize: 14, align: "left" },
+};
+
+const callout: AnnotationView = {
+  ...freeText,
+  name: "ft-2",
+  pageIndex: 1,
+  kind: "callout",
+  text: "标注框内容",
+  rects: [{ x: 300, y: 100, width: 180, height: 80 }],
+  freeText: { kind: "callout", fontSize: 16, align: "center" },
 };
 
 function renderPanel(
@@ -297,7 +330,7 @@ describe("AnnotationPanel", () => {
     expect(screen.getByText("还没有注释")).toBeInTheDocument();
     expect(
       screen.getByText(
-        "选择页面文字即可添加高亮、下划线或删除线；使用页面上的形状工具绘制矩形或椭圆，也可以放置便签、手绘或图章。",
+        "选择页面文字即可添加高亮、下划线、删除线或波浪线；使用页面上的形状工具绘制矩形、椭圆、自由文本或标注框，也可以放置便签、手绘或图章。",
       ),
     ).toBeInTheDocument();
     expect(
@@ -454,6 +487,134 @@ describe("AnnotationPanel", () => {
     expect(screen.getByRole("button", { name: "应用样式" })).toBeDisabled();
     expect(
       screen.getByText("至少需要填充或描边中的一项"),
+    ).toBeInTheDocument();
+  });
+
+  it("labels free text and callouts and previews their text, size and alignment", () => {
+    renderPanel({ annotations: [freeText, callout] });
+
+    expect(
+      screen.getByRole("button", { name: "自由文本，第 1 页，文本作者" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Hello · 14 pt · 左对齐")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "标注框，第 2 页，文本作者" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("标注框内容 · 16 pt · 居中"),
+    ).toBeInTheDocument();
+  });
+
+  it("edits free text content, size, alignment, colour and opacity", async () => {
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "update_free_text") {
+        return {
+          annotation: { ...freeText, text: "修订后的文本" },
+          pageIndex: 0,
+          history: idleHistory,
+        };
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+    const { onChanged } = renderPanel({
+      annotations: [freeText],
+      selectedName: "ft-1",
+    });
+
+    expect(screen.queryByLabelText("注释颜色")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("自由文本内容")).toHaveValue("Hello");
+    expect(screen.getByLabelText("自由文本字号")).toHaveValue(14);
+    expect(screen.getByLabelText("自由文本对齐")).toHaveValue("left");
+    expect(screen.getByLabelText("自由文本颜色")).toHaveValue("#111827");
+    expect(screen.getByLabelText("自由文本透明度")).toHaveValue("100");
+    expect(
+      screen.getByRole("button", { name: "应用文本与样式" }),
+    ).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText("自由文本内容"), {
+      target: { value: "修订后的文本" },
+    });
+    fireEvent.change(screen.getByLabelText("自由文本字号"), {
+      target: { value: "20" },
+    });
+    fireEvent.change(screen.getByLabelText("自由文本对齐"), {
+      target: { value: "right" },
+    });
+    fireEvent.change(screen.getByLabelText("自由文本颜色"), {
+      target: { value: "#cc0000" },
+    });
+    fireEvent.change(screen.getByLabelText("自由文本透明度"), {
+      target: { value: "60" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "应用文本与样式" }),
+    );
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("update_free_text", {
+        documentId: "doc-1",
+        request: {
+          name: "ft-1",
+          text: "修订后的文本",
+          fontSize: 20,
+          align: "right",
+          color: "#cc0000",
+          opacity: 60,
+        },
+      });
+    });
+    expect(onChanged).toHaveBeenCalled();
+  });
+
+  it("keeps free text within the supported font size range", () => {
+    renderPanel({ annotations: [freeText], selectedName: "ft-1" });
+    const size = screen.getByLabelText("自由文本字号");
+    fireEvent.change(size, { target: { value: "200" } });
+    expect(size).toHaveValue(72);
+    fireEvent.change(size, { target: { value: "1" } });
+    expect(size).toHaveValue(6);
+  });
+
+  it("reports a refused free text update without claiming success", async () => {
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "update_free_text") {
+        throw {
+          code: "permission_denied",
+          message: "文档权限不允许修改批注",
+        };
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+    const { onChanged } = renderPanel({
+      annotations: [freeText],
+      selectedName: "ft-1",
+    });
+    fireEvent.change(screen.getByLabelText("自由文本内容"), {
+      target: { value: "修订后的文本" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "应用文本与样式" }),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "文档权限不允许修改批注",
+      ),
+    );
+    expect(onChanged).not.toHaveBeenCalled();
+  });
+
+  it("hides free text properties when annotations are restricted", () => {
+    renderPanel({
+      annotations: [freeText],
+      selectedName: "ft-1",
+      canAnnotate: false,
+    });
+    expect(screen.queryByLabelText("自由文本内容")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "应用文本与样式" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "自由文本，第 1 页，文本作者" }),
     ).toBeInTheDocument();
   });
 });

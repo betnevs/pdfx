@@ -2472,3 +2472,275 @@ button {
   font-size: 12px;
   font-weight: 600;
 }
+
+/* Eraser overlay. The layer stays inert until armed; its full-page surface
+   then sits above every annotation layer so one click can reach any kind. */
+.eraser-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  pointer-events: none;
+}
+
+.eraser-surface {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  cursor: crosshair;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.eraser-toolbar {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 8;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  max-width: calc(100% - 16px);
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--pdfx-pill-bg);
+  color: var(--pdfx-pill-text);
+  font-size: 12px;
+  line-height: 1.4;
+  user-select: none;
+  pointer-events: auto;
+}
+
+.eraser-toolbar-title {
+  font-weight: 600;
+}
+
+.eraser-toolbar button {
+  padding: 2px 8px;
+  border: 1px solid var(--pdfx-pill-border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--pdfx-pill-text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.eraser-toolbar button:hover:enabled {
+  background: var(--pdfx-pill-hover);
+}
+
+.eraser-toolbar button[aria-pressed="true"] {
+  background: var(--pdfx-pill-active);
+}
+
+.eraser-toolbar button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.eraser-toolbar-control {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.eraser-toolbar-control input[type="number"] {
+  width: 48px;
+}
+
+.eraser-toolbar-hint {
+  color: var(--pdfx-text-secondary);
+}
+
+.eraser-notice {
+  position: absolute;
+  bottom: 12px;
+  left: 50%;
+  z-index: 8;
+  max-width: calc(100% - 16px);
+  margin: 0;
+  padding: 5px 10px;
+  border: 1px solid var(--pdfx-pill-border);
+  border-radius: 6px;
+  background: var(--pdfx-pill-bg);
+  color: var(--pdfx-pill-text);
+  font-size: 12px;
+  pointer-events: none;
+  transform: translateX(-50%);
+}
+
+.eraser-notice--error {
+  border-color: var(--pdfx-danger-border);
+  background: var(--pdfx-danger-soft);
+  color: var(--pdfx-danger-text);
+}
+
+/* Free text and callout overlay. Inert except for hit areas, the active draw
+   surface, resize handle and toolbar; the saved /AP already carries the text,
+   so the overlay never repaints it. */
+.free-text-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  pointer-events: none;
+}
+
+.free-text-hit {
+  position: absolute;
+  box-sizing: border-box;
+  border: 2px dashed transparent;
+  pointer-events: auto;
+  cursor: move;
+  touch-action: none;
+}
+
+.free-text-hit--selected {
+  border-color: var(--pdfx-blue);
+  border-style: dashed;
+}
+
+.free-text-hit--selected:hover {
+  border-style: solid;
+}
+
+.free-text-create-preview {
+  position: absolute;
+  box-sizing: border-box;
+  border: 2px dashed var(--pdfx-blue);
+  background: color-mix(in srgb, var(--pdfx-blue) 12%, transparent);
+  pointer-events: none;
+}
+
+.free-text-transform-preview {
+  position: absolute;
+  box-sizing: border-box;
+  border: 2px dashed var(--pdfx-blue);
+  opacity: 0.7;
+  pointer-events: none;
+}
+
+.free-text-resize-handle {
+  position: absolute;
+  box-sizing: border-box;
+  width: 11px;
+  height: 11px;
+  padding: 0;
+  border: 1px solid var(--pdfx-page);
+  border-radius: 50%;
+  background: var(--pdfx-blue);
+  box-shadow: 0 0 0 1px var(--pdfx-blue);
+  cursor: nwse-resize;
+  touch-action: none;
+  transform: translate(-50%, -50%);
+  z-index: 7;
+}
+
+.free-text-draw-surface {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  cursor: crosshair;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.free-text-toolbar {
+  position: absolute;
+  bottom: 8px;
+  left: 8px;
+  z-index: 8;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  max-width: calc(100% - 16px);
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--pdfx-pill-bg);
+  color: var(--pdfx-pill-text);
+  font-size: 12px;
+  line-height: 1.4;
+  user-select: none;
+  pointer-events: auto;
+}
+
+.free-text-toolbar-title {
+  font-weight: 600;
+}
+
+.free-text-toolbar button {
+  padding: 2px 8px;
+  border: 1px solid var(--pdfx-pill-border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--pdfx-pill-text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.free-text-toolbar button:hover:enabled {
+  background: var(--pdfx-pill-hover);
+}
+
+.free-text-toolbar button[aria-pressed="true"] {
+  background: var(--pdfx-pill-active);
+}
+
+.free-text-toolbar button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.free-text-toolbar-control {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.free-text-toolbar-control input[type="number"] {
+  width: 48px;
+}
+
+.free-text-editor {
+  position: absolute;
+  z-index: 9;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  box-sizing: border-box;
+  padding: 4px;
+  border: 1px solid var(--pdfx-blue);
+  border-radius: 4px;
+  background: var(--pdfx-page);
+  box-shadow: var(--pdfx-page-shadow);
+  pointer-events: auto;
+}
+
+.free-text-editor textarea {
+  flex: 1;
+  min-height: 36px;
+  padding: 2px 4px;
+  border: none;
+  outline: none;
+  resize: none;
+  background: transparent;
+  color: var(--pdfx-page-ink);
+  font: inherit;
+}
+
+.free-text-editor-actions {
+  display: flex;
+  gap: 4px;
+  justify-content: flex-end;
+}
+
+.free-text-editor-actions button {
+  padding: 2px 8px;
+  border: 1px solid var(--pdfx-pill-border);
+  border-radius: 4px;
+  background: var(--pdfx-pill-bg);
+  color: var(--pdfx-pill-text);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
