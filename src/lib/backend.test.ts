@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   choosePdfFile,
   closeDocument,
+  extractTextLayer,
   initialDocumentPath,
   isFullscreen,
   MENU_EVENT,
@@ -71,6 +72,16 @@ describe("backend command seam", () => {
       pageCount: 3,
       pageWidth: 612,
       pageHeight: 792,
+      encrypted: false,
+      readOnly: false,
+      permissions: {
+        canModifyContent: true,
+        canAnnotate: true,
+        canAssemble: true,
+        canFillForms: true,
+        canPrint: true,
+        canCopyContent: true,
+      },
     });
 
     const view = await openDocument("/tmp/report.pdf");
@@ -98,6 +109,34 @@ describe("backend command seam", () => {
 
     await closeDocument("doc-1");
     expect(invokeMock).toHaveBeenCalledWith("close_document", { documentId: "doc-1" });
+  });
+
+  it("forwards a supplied password to open_document", async () => {
+    invokeMock.mockResolvedValue({
+      documentId: "doc-1",
+      name: "secret.pdf",
+      path: "/tmp/secret.pdf",
+      pageCount: 1,
+      pageWidth: 612,
+      pageHeight: 792,
+      encrypted: true,
+      readOnly: false,
+      permissions: {
+        canModifyContent: true,
+        canAnnotate: true,
+        canAssemble: true,
+        canFillForms: true,
+        canPrint: true,
+        canCopyContent: true,
+      },
+    });
+
+    await openDocument("/tmp/secret.pdf", "pdfx-user");
+
+    expect(invokeMock).toHaveBeenCalledWith("open_document", {
+      path: "/tmp/secret.pdf",
+      password: "pdfx-user",
+    });
   });
 
   it("opens a second document window through its own command", async () => {
@@ -184,6 +223,53 @@ describe("backend command seam", () => {
 
     expect(setFullscreenMock).toHaveBeenCalledWith(true);
     expect(isFullscreenMock).toHaveBeenCalled();
+  });
+
+  it("extracts a positioned text layer for one page", async () => {
+    invokeMock.mockResolvedValue({
+      pageIndex: 2,
+      pageWidth: 612,
+      pageHeight: 792,
+      rotation: 0,
+      cropX: 0,
+      cropY: 0,
+      hasText: true,
+      text: "Hi",
+      chars: [
+        {
+          text: "H",
+          x: 72,
+          y: 55.71,
+          width: 13,
+          height: 20,
+          originX: 72,
+          originY: 72,
+          fontSize: 18,
+          generated: false,
+        },
+        {
+          text: "i",
+          x: 85,
+          y: 55.71,
+          width: 5,
+          height: 20,
+          originX: 85,
+          originY: 72,
+          fontSize: 18,
+          generated: false,
+        },
+      ],
+    });
+
+    const layer = await extractTextLayer("doc-1", 2);
+
+    expect(invokeMock).toHaveBeenCalledWith("extract_text_layer", {
+      documentId: "doc-1",
+      pageIndex: 2,
+    });
+    expect(layer.chars[0].fontSize).toBe(18);
+    expect(layer.chars[1].text).toBe("i");
+    expect(layer.hasText).toBe(true);
   });
 
   it("sets the current window title", async () => {

@@ -175,12 +175,7 @@ fn render_page_region_uses_display_coordinates_for_rotated_pages() {
 /// PDFium re-rasterizes glyph edges slightly differently when a clipped render
 /// offsets the device origin, so a handful of anti-aliased edge pixels may
 /// differ. Alignment errors (a shifted region) move thousands of text pixels.
-fn assert_region_matches(
-    full: &DecodedPng,
-    region: &DecodedPng,
-    offset_x: u32,
-    offset_y: u32,
-) {
+fn assert_region_matches(full: &DecodedPng, region: &DecodedPng, offset_x: u32, offset_y: u32) {
     let mut differing = 0usize;
     let mut total = 0usize;
     let mut sum_diff = 0i64;
@@ -252,8 +247,8 @@ fn render_page_region_validates_scale_and_size() {
         render_page_region(view.document_id.clone(), 0, 0.0, 0, 0, 100, 100).expect_err("scale 0");
     assert_eq!(error.code, CommandErrorCode::InvalidScale);
 
-    let error = render_page_region(view.document_id.clone(), 0, 1.0, 0, 0, 0, 100)
-        .expect_err("zero width");
+    let error =
+        render_page_region(view.document_id.clone(), 0, 1.0, 0, 0, 0, 100).expect_err("zero width");
     assert_eq!(error.code, CommandErrorCode::InvalidArgument);
 
     let error = render_page_region(view.document_id.clone(), 1, 1.0, 0, 0, 100, 100)
@@ -293,8 +288,8 @@ fn measure_thumbnail_and_region_latency_on_a_long_document() {
     let window_started = std::time::Instant::now();
     let mut sizes = Vec::new();
     for page_index in 0..6 {
-        let thumbnail = render_thumbnail(view.document_id.clone(), page_index, 144)
-            .expect("visible thumbnail");
+        let thumbnail =
+            render_thumbnail(view.document_id.clone(), page_index, 144).expect("visible thumbnail");
         sizes.push((thumbnail.width, thumbnail.height));
     }
     let window_elapsed = window_started.elapsed();
@@ -326,11 +321,12 @@ fn measure_thumbnail_and_region_latency_on_a_long_document() {
 
     assert_eq!(info.page_index, far_index);
     assert_eq!(sizes.len(), 6);
-    assert!(sizes.iter().all(|(width, height)| *width > 0 && *height > 0));
+    assert!(sizes
+        .iter()
+        .all(|(width, height)| *width > 0 && *height > 0));
     // The 612x792 page caps its long edge at 144 px.
     assert_eq!((far.width, far.height), (111, 144));
     assert_eq!((region.width, region.height), (1400, 1000));
 
     close_document(view.document_id).expect("document should close");
 }
-

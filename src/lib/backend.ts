@@ -35,6 +35,16 @@ export interface CommandError {
   message: string;
 }
 
+/** Editing capabilities reported by the PDF security handler. */
+export interface DocumentPermissions {
+  canModifyContent: boolean;
+  canAnnotate: boolean;
+  canAssemble: boolean;
+  canFillForms: boolean;
+  canPrint: boolean;
+  canCopyContent: boolean;
+}
+
 export interface DocumentView {
   documentId: string;
   name: string;
@@ -42,6 +52,11 @@ export interface DocumentView {
   pageCount: number;
   pageWidth: number;
   pageHeight: number;
+  /** The Source Document is encrypted (User or Owner Password). */
+  encrypted: boolean;
+  /** Permission Restrictions deny every editing capability. */
+  readOnly: boolean;
+  permissions: DocumentPermissions;
 }
 
 export interface PageImageView {
@@ -87,6 +102,40 @@ export interface ExtractedTextView {
   pageIndex: number;
   text: string;
   charCount: number;
+}
+
+/**
+ * One positioned character of a page's text layer.
+ *
+ * All geometry is in display-space points: the top-left origin of the page as
+ * rendered, with the page's intrinsic rotation and CropBox origin already
+ * applied. Divide by `pageWidth`/`pageHeight` to position an overlay.
+ * Generated characters are PDFium-inserted line breaks and have zero-size
+ * boxes; they are useful for copy text but are not hit-testable.
+ */
+export interface TextCharView {
+  text: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  originX: number;
+  originY: number;
+  fontSize: number;
+  generated: boolean;
+}
+
+/** The text layer of one page, including pages with no editable text. */
+export interface TextLayerView {
+  pageIndex: number;
+  pageWidth: number;
+  pageHeight: number;
+  rotation: number;
+  cropX: number;
+  cropY: number;
+  hasText: boolean;
+  text: string;
+  chars: TextCharView[];
 }
 
 /** Event emitted to the focused window for native menu activation. */
@@ -205,6 +254,17 @@ export async function extractText(
   pageIndex: number,
 ): Promise<ExtractedTextView> {
   return invoke<ExtractedTextView>("extract_text", { documentId, pageIndex });
+}
+
+/**
+ * Reads the positioned text layer used for hit-testing, selection and copy.
+ * Scanned pages return `hasText: false` with no characters.
+ */
+export async function extractTextLayer(
+  documentId: string,
+  pageIndex: number,
+): Promise<TextLayerView> {
+  return invoke<TextLayerView>("extract_text_layer", { documentId, pageIndex });
 }
 
 /** Releases a document from the backend registry. Unknown ids are ignored. */

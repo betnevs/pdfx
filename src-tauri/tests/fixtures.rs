@@ -66,7 +66,10 @@ fn the_loader_finds_the_encrypted_fixture_by_category() {
     let manifest = fixtures::load_manifest();
     let encrypted = fixtures::fixture(&manifest, "encrypted").expect("encrypted fixture");
 
-    assert!(encrypted.password.is_some(), "encrypted fixture must declare a user password");
+    assert!(
+        encrypted.password.is_some(),
+        "encrypted fixture must declare a user password"
+    );
     assert!(encrypted.valid);
 }
 

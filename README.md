@@ -2,7 +2,7 @@
 
 本地运行、跨 macOS 与 Windows 的 PDF 编辑器。界面参照 iLovePDF 编辑页的信息架构与交互密度，但文件始终留在本机，无账户、无云端处理、无遥测。
 
-当前仓库已包含 **票 01：仓库脚手架**、**票 02：M0 浏览器原型**、**票 03：PDF 引擎技术验证**（结论见 [`docs/spikes/pdf-engine.md`](docs/spikes/pdf-engine.md)）与 **票 04：打开文档并渲染第一页**。生产桌面壳可通过文件对话框或拖放打开本地 PDF，在独立窗口中用 PDFium 渲染第 1 页；编辑、保存与翻页尚未实现。
+当前仓库已包含 **票 01：仓库脚手架**、**票 02：M0 浏览器原型**、**票 03：PDF 引擎技术验证**（结论见 [`docs/spikes/pdf-engine.md`](docs/spikes/pdf-engine.md)）、**票 04：打开文档并渲染第一页** 与 **票 17：macOS 打包**（universal、未签名 `.dmg`）。生产桌面壳可通过文件对话框或拖放打开本地 PDF，在独立窗口中用 PDFium 渲染第 1 页；编辑、保存与翻页尚未实现。
 
 ## 技术栈
 
@@ -40,7 +40,23 @@ npx tauri build --no-bundle
 ./src-tauri/target/release/pdfx
 ```
 
-完整安装包（`.dmg` / `.msi` / `.exe` / portable zip）属于分发票的范围；本仓库暂不包含签名、公证或自动更新。
+## macOS 打包与安装
+
+macOS 产物是 Apple Silicon 与 Intel 通用的 `.app` / `.dmg`，最低 macOS 12，未签名、未公证：
+
+```bash
+npm ci
+npm run build:macos
+```
+
+`scripts/build-macos.sh` 会先运行原生依赖脚本，检查 `aarch64-apple-darwin` 与 `x86_64-apple-darwin` 两个 Rust 目标和 universal PDFium 动态库（缺任一项都会给出明确的安装命令并退出），随后执行 `tauri build --target universal-apple-darwin --bundles app,dmg`，最后用 `scripts/verify-macos-bundle.sh` 检查可执行文件与 PDFium 的架构、`Contents/Frameworks` 布局、Info.plist 文件关联、许可证与 `.dmg` 内容。只校验已有产物可运行 `npm run verify:macos`。
+
+产物位置：
+
+- `src-tauri/target/universal-apple-darwin/release/bundle/macos/PDFX.app`
+- `src-tauri/target/universal-apple-darwin/release/bundle/dmg/PDFX_0.1.0_universal.dmg`
+
+首次启动会被 Gatekeeper 拦截。右键/Control 点击“打开”、在“系统设置 → 隐私与安全性”点击“仍要打开”，或执行 `xattr -dr com.apple.quarantine /Applications/PDFX.app` 即可放行。完整说明见 [`docs/install-macos.md`](docs/install-macos.md)，同一文件会随应用放入 `Contents/Resources/INSTALL-macos.md`。不购买 Apple Developer Program、不做公证是 ADR-0009 的零成本分发取舍：用户需要手动放行，应用也不会自动更新。Windows 安装器属于票 18，尚未提供。
 
 ## 命令
 
@@ -51,6 +67,8 @@ npx tauri build --no-bundle
 | `npm run test:e2e` | Playwright 原型布局冒烟（1440×900 与 1280×720），首次需 `npx playwright install chromium` |
 | `npm run build` | 类型检查 + Vite 生产构建 |
 | `npm run setup:native` | 下载并校验固定版本 PDFium 原生库到 `src-tauri/vendor/`（不提交） |
+| `npm run build:macos` | 构建未签名的 universal macOS `.app` 与 `.dmg`，并校验产物 |
+| `npm run verify:macos` | 校验已构建的 universal `.app` / `.dmg`（架构、框架、Info.plist、许可证） |
 | `npm run prototype` | 启动开发服务器并在浏览器打开 `/prototype.html` |
 | `cd src-tauri && cargo check` | Rust 编译检查 |
 | `cd src-tauri && cargo test` | 命令层、打开/渲染与 fixture 加载器测试（需先 `npm run setup:native`） |
@@ -62,7 +80,7 @@ npx tauri build --no-bundle
 ```
 prototype.html        M0 原型入口（浏览器，不含 Tauri IPC）
 e2e/                  Playwright 原型布局冒烟
-scripts/              原生依赖准备脚本（setup-native.sh）
+scripts/              原生依赖准备与 macOS 打包/校验脚本（setup-native.sh、build-macos.sh、verify-macos-bundle.sh）
 src/                  React 前端
   lib/backend.ts      Tauri 命令绑定的唯一前端入口
   App.tsx             生产工作区：打开文档、渲染第 1 页、错误与缩放
@@ -101,7 +119,7 @@ M0 原型还有两个独立 seam：
 
 ## 依赖许可
 
-仅使用宽松许可依赖：Tauri、React、Vite、Vitest、Testing Library、`pdfium-render` 为 MIT / Apache-2.0，TypeScript 为 Apache-2.0。PDFium 原生库为 BSD-3-Clause（含第三方许可，见解压后的 `src-tauri/vendor/pdfium/LICENSE`），由 setup 脚本按固定 SHA-256 获取，不随仓库分发。仓库不含付费服务、遥测或代码签名配置。
+仅使用宽松许可依赖：Tauri、React、Vite、Vitest、Testing Library、`pdfium-render` 为 MIT / Apache-2.0，TypeScript 为 Apache-2.0。PDFium 原生库为 BSD-3-Clause（含第三方许可，见解压后的 `src-tauri/vendor/pdfium/LICENSE`），由 setup 脚本按固定 SHA-256 获取，不随仓库分发；macOS 包会把 `LICENSE` 与完整 `licenses/` 目录放入 `Contents/Resources/pdfium-licenses/`。仓库不含付费服务、遥测或代码签名配置。
 
 ## 当前限制
 
@@ -113,4 +131,5 @@ M0 原型还有两个独立 seam：
 - M0 原型（票 02）只验证布局、交互与文案；不打开真实 PDF，`插入`、`表单` 等后续能力显示为占位状态。
 - fixture 中的“大文件”是 500 页的提交版本；可用 `--large-pages 2000` 生成完整压力样例。
 - 中文/Embedded Font/Font Subset fixture 待字体管线票补充（见 `fixtures/README.md`）。
-- 生产构建目前未打包、未签名；GUI 启动冒烟需在图形会话中执行。
+- 生产构建目前未签名、未公证；macOS 首次启动需按 [`docs/install-macos.md`](docs/install-macos.md) 绕过 Gatekeeper。Intel 硬件与 macOS 12 上的实机启动仍需在发布前用对应机器验证；仓库内的自动化检查只能验证 universal 架构与包结构。
+- Windows 安装器（`.msi` / `.exe` / portable zip）尚未提供，见票 18。
