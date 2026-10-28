@@ -27,6 +27,10 @@ export type CommandErrorCode =
   | "invalid_argument"
   | "render_failed"
   | "window_failed"
+  | "update_not_configured"
+  | "update_check_failed"
+  | "update_manifest_invalid"
+  | "update_open_failed"
   | "internal";
 
 /** A structured error crossing the Tauri command boundary. */

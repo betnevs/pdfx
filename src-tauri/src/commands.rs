@@ -16,6 +16,7 @@ use crate::engine::Engine;
 use crate::file_association;
 use crate::logging;
 use crate::settings::{self, Settings, SettingsStore, SettingsUpdateResult};
+use crate::updater::{self, UpdateCheckResult, UpdateError};
 
 /// Rendering limits. A full-page bitmap above this size is rejected instead of
 /// exhausting memory; the frontend switches to `render_page_region` (viewport
@@ -64,6 +65,10 @@ pub enum CommandErrorCode {
     InvalidArgument,
     RenderFailed,
     WindowFailed,
+    UpdateNotConfigured,
+    UpdateCheckFailed,
+    UpdateManifestInvalid,
+    UpdateOpenFailed,
     Internal,
 }
 
@@ -1253,4 +1258,67 @@ pub fn export_diagnostics(destination: String) -> Result<DiagnosticsExportView, 
         bytes: export.bytes,
         log_files: export.log_files,
     })
+}
+
+fn map_update_error(error: UpdateError) -> CommandError {
+    match error {
+        UpdateError::NotConfigured => {
+            CommandError::new(CommandErrorCode::UpdateNotConfigured, "未配置更新地址。")
+        }
+        // The settings page validates this before it can be persisted; treat a
+        // bad address here as a bad argument rather than a network failure.
+        UpdateError::InvalidManifestUrl(message) => {
+            CommandError::new(CommandErrorCode::InvalidArgument, message)
+        }
+        UpdateError::InvalidDownloadUrl(message) | UpdateError::ManifestInvalid(message) => {
+            CommandError::new(CommandErrorCode::UpdateManifestInvalid, message)
+        }
+        UpdateError::Http(message) => {
+            CommandError::new(CommandErrorCode::UpdateCheckFailed, message)
+        }
+        UpdateError::OpenFailed(message) => {
+            CommandError::new(CommandErrorCode::UpdateOpenFailed, message)
+        }
+    }
+}
+
+/// The `check_for_updates` command.
+///
+/// ADR-0009: this is the only network path in PDFX, and it runs only when the
+/// user clicks "检查更新". It reads the persisted manifest address, performs
+/// one GET with a finite timeout and no retries, and never sends document
+/// data, cookies or usage data. An unset address returns a dedicated error
+/// without touching the network.
+#[tauri::command]
+pub fn check_for_updates(app: AppHandle) -> Result<UpdateCheckResult, CommandError> {
+    let settings = settings_store(&app)?.load();
+    match updater::check_for_updates(&settings.update_manifest_url, env!("CARGO_PKG_VERSION")) {
+        Ok(result) => {
+            // The user-configured address is not logged: only the outcome.
+            logging::event(
+                "update.check",
+                &format!(
+                    "status={:?} version={} currentVersion={}",
+                    result.status, result.version, result.current_version
+                ),
+            );
+            Ok(result)
+        }
+        Err(error) => {
+            logging::event("update.check.failed", &format!("error={error}"));
+            Err(map_update_error(error))
+        }
+    }
+}
+
+/// The `open_download_page` command. Opens the manifest's download page in the
+/// system browser; never in an in-app webview. The URL is re-validated here so
+/// the launcher only receives an absolute http(s) address.
+#[tauri::command]
+pub fn open_download_page(url: String) -> Result<(), CommandError> {
+    updater::open_download_page(&updater::SystemOpener, &url)
+        .map_err(map_update_error)
+        .inspect_err(|error| {
+            logging::event("update.open.failed", &format!("code={:?}", error.code));
+        })
 }

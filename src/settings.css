@@ -303,6 +303,23 @@
   line-height: 1.55;
 }
 
+.settings-guidance p {
+  margin: 0 0 8px;
+}
+
+.settings-notes {
+  white-space: pre-wrap;
+}
+
+.settings-guidance .secondary-button {
+  margin-bottom: 0;
+}
+
+.settings-error {
+  margin: 8px 0 0;
+  color: #b3261e;
+}
+
 .settings-footer {
   display: flex;
   align-items: center;
