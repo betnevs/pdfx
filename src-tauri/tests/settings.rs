@@ -89,6 +89,85 @@ fn settings_default_to_chinese_system_theme_and_file_association_off() {
     assert_eq!(settings.theme, Theme::System);
     assert_eq!(settings.annotation_author, DEFAULT_ANNOTATION_AUTHOR);
     assert!(!settings.file_association_enabled);
+    assert_eq!(settings.update_manifest_url, "");
+}
+
+#[test]
+fn update_manifest_url_survives_a_restart_and_is_trimmed() {
+    let dir = TempDir::new("settings-update-url");
+    let store = store_in(&dir);
+    let platform = MockPlatform::user_action_required();
+    let next = Settings {
+        update_manifest_url: "  https://example.com/pdfx/latest.json  ".to_owned(),
+        ..Settings::default()
+    };
+
+    let result = apply_update(&store, &platform, next).expect("apply update");
+
+    assert_eq!(
+        result.settings.update_manifest_url,
+        "https://example.com/pdfx/latest.json"
+    );
+    assert_eq!(
+        store.load().update_manifest_url,
+        "https://example.com/pdfx/latest.json"
+    );
+}
+
+#[test]
+fn invalid_update_manifest_urls_are_rejected_without_writing() {
+    let dir = TempDir::new("settings-update-url-invalid");
+    let store = store_in(&dir);
+    let platform = MockPlatform::user_action_required();
+
+    for url in [
+        "not a url",
+        "example.com/latest.json",
+        "ftp://example.com/latest.json",
+        "file:///tmp/latest.json",
+        "javascript:alert(1)",
+        "https://",
+    ] {
+        let next = Settings {
+            update_manifest_url: url.to_owned(),
+            ..Settings::default()
+        };
+
+        let error = apply_update(&store, &platform, next).expect_err("url is invalid");
+        assert!(
+            matches!(error, SettingsError::InvalidArgument(_)),
+            "unexpected error for {url}: {error:?}"
+        );
+    }
+
+    assert!(!store.path().exists());
+    assert!(platform.calls().is_empty());
+}
+
+#[test]
+fn an_empty_update_manifest_url_is_allowed_and_clears_the_setting() {
+    let dir = TempDir::new("settings-update-url-cleared");
+    let store = store_in(&dir);
+    let platform = MockPlatform::user_action_required();
+    store
+        .save(&Settings {
+            update_manifest_url: "https://example.com/pdfx/latest.json".to_owned(),
+            ..Settings::default()
+        })
+        .expect("seed settings");
+
+    let result = apply_update(
+        &store,
+        &platform,
+        Settings {
+            update_manifest_url: "   ".to_owned(),
+            ..Settings::default()
+        },
+    )
+    .expect("apply update");
+
+    assert_eq!(result.settings.update_manifest_url, "");
+    assert_eq!(store.load().update_manifest_url, "");
 }
 
 #[test]
@@ -99,6 +178,7 @@ fn settings_survive_a_restart_through_a_new_store() {
         theme: Theme::Dark,
         annotation_author: "Alice".to_owned(),
         file_association_enabled: true,
+        update_manifest_url: "https://example.com/pdfx/latest.json".to_owned(),
     };
 
     store_in(&dir).save(&settings).expect("save settings");
@@ -116,6 +196,7 @@ fn settings_file_uses_the_frontend_camel_case_contract() {
         theme: Theme::Dark,
         annotation_author: "Alice".to_owned(),
         file_association_enabled: true,
+        update_manifest_url: "https://example.com/pdfx/latest.json".to_owned(),
     };
 
     store.save(&settings).expect("save settings");
@@ -130,6 +211,10 @@ fn settings_file_uses_the_frontend_camel_case_contract() {
     assert_eq!(json["theme"], "dark");
     assert_eq!(json["annotationAuthor"], "Alice");
     assert_eq!(json["fileAssociationEnabled"], true);
+    assert_eq!(
+        json["updateManifestUrl"],
+        "https://example.com/pdfx/latest.json"
+    );
 }
 
 #[test]
@@ -178,6 +263,7 @@ fn updating_other_fields_does_not_touch_the_file_association_platform() {
         theme: Theme::Dark,
         annotation_author: "Alice".to_owned(),
         file_association_enabled: false,
+        update_manifest_url: String::new(),
     };
 
     let result = apply_update(&store, &platform, next.clone()).expect("apply update");

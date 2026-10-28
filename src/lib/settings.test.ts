@@ -27,7 +27,9 @@ afterEach(() => {
   invokeMock.mockReset();
   saveMock.mockReset();
   document.documentElement.removeAttribute("data-theme");
+  document.documentElement.removeAttribute("data-resolved-theme");
   document.documentElement.lang = "";
+  window.localStorage.clear();
 });
 
 describe("settings command seam", () => {

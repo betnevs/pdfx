@@ -23,6 +23,12 @@ pub fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     let export_page = MenuItemBuilder::with_id("file.export_page", "导出当前页…")
         .accelerator("CmdOrCtrl+Shift+E")
         .build(app)?;
+    let save = MenuItemBuilder::with_id("file.save", "保存")
+        .accelerator("CmdOrCtrl+S")
+        .build(app)?;
+    let save_as = MenuItemBuilder::with_id("file.save_as", "另存为…")
+        .accelerator("CmdOrCtrl+Shift+S")
+        .build(app)?;
     let settings = MenuItemBuilder::with_id("app.settings", "设置…")
         .accelerator("CmdOrCtrl+,")
         .build(app)?;
@@ -41,6 +47,9 @@ pub fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         .item(&print)
         .item(&export_page);
     let file = file_builder
+        .separator()
+        .item(&save)
+        .item(&save_as)
         .separator()
         .close_window_with_text("关闭窗口")
         .quit_with_text("退出 PDFX")

@@ -8,6 +8,7 @@ import {
 } from "./components/PrintExport";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { PasswordPrompt } from "./components/PasswordPrompt";
+import { SaveConfirmDialog } from "./components/SaveConfirmDialog";
 import {
   choosePdfFile,
   closeDocument,
@@ -27,6 +28,7 @@ import {
   type DocumentView,
 } from "./lib/backend";
 import { scaleToPercent } from "./lib/pageGeometry";
+import { useDocumentSave } from "./lib/useDocumentSave";
 import { useDocumentViewer } from "./lib/useDocumentViewer";
 import { useSettings } from "./lib/useSettings";
 
@@ -91,14 +93,9 @@ export function App() {
   const settings = useSettings();
   const [passwordPrompt, setPasswordPrompt] = useState<PasswordPromptState | null>(null);
 
-  // Editing arrives in a later ticket; the scaffold tracks dirty state and the
-  // close guard so nothing silently discards future unsaved changes.
-  const [dirty] = useState(false);
-
   const editorRef = useRef(editor);
   editorRef.current = editor;
-  const dirtyRef = useRef(dirty);
-  dirtyRef.current = dirty;
+  const dirtyRef = useRef(false);
   const openingRef = useRef(false);
   const printExportRef = useRef<PrintExportHandle>(null);
 
@@ -120,6 +117,26 @@ export function App() {
   const viewer = useDocumentViewer(openDocumentView, handleViewerError);
   const viewerRef = useRef(viewer);
   viewerRef.current = viewer;
+
+  // Save state lives next to the viewer so the header, title and close guard
+  // all read the same dirty flag the backend reports.
+  const save = useDocumentSave(openDocumentView);
+  const saveRef = useRef(save);
+  saveRef.current = save;
+  dirtyRef.current = save.dirty;
+
+  const openDocumentId = openDocumentView?.documentId ?? null;
+  const openDocumentName = openDocumentView?.name ?? null;
+
+  useEffect(() => {
+    if (!openDocumentName) {
+      return;
+    }
+    const marker = save.dirty ? "（未保存）" : "";
+    void setWindowTitle(`${openDocumentName}${marker} — PDFX`).catch(() => {
+      // The title is cosmetic; a missing window capability must not fail open.
+    });
+  }, [openDocumentId, openDocumentName, save.dirty]);
 
   useEffect(() => {
     let cancelled = false;
@@ -170,10 +187,6 @@ export function App() {
       const document = await openDocument(path, password);
       openedDocumentId = document.documentId;
       setPasswordPrompt(null);
-
-      await setWindowTitle(`${document.name} — PDFX`).catch(() => {
-        // The title is cosmetic; a missing window capability must not fail open.
-      });
 
       setEditor({ status: "open", document });
     } catch (error) {
@@ -247,6 +260,12 @@ export function App() {
         break;
       case "file.export_page":
         printExportRef.current?.openExportDialog();
+        break;
+      case "file.save":
+        saveRef.current.saveChanges();
+        break;
+      case "file.save_as":
+        saveRef.current.saveAs();
         break;
       case "view.zoom_in":
         current.zoomBy(ZOOM_STEP);
@@ -355,6 +374,11 @@ export function App() {
               {open.document.name}
             </span>
           )}
+          {open && save.dirty && (
+            <span className="dirty-indicator" title="有未保存的更改">
+              未保存
+            </span>
+          )}
           <span className="app-mode">本地 PDF 编辑器</span>
           <button
             type="button"
@@ -385,6 +409,15 @@ export function App() {
           busy={passwordPrompt.busy}
           onSubmit={submitPassword}
           onCancel={cancelPasswordPrompt}
+        />
+      )}
+
+      {open && save.confirmation && (
+        <SaveConfirmDialog
+          documentName={open.document.name}
+          busy={save.busy}
+          onConfirm={save.confirmUnencrypted}
+          onCancel={save.cancelConfirmation}
         />
       )}
 
@@ -446,7 +479,7 @@ export function App() {
               document={open.document}
               pageIndex={viewer.pageIndex}
             />
-            <DocumentAccess document={open.document} />
+            <DocumentAccess document={open.document} save={save} />
             <div className="document-body">
               <ThumbnailRail
                 documentId={open.document.documentId}

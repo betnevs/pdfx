@@ -16,6 +16,7 @@ use crate::engine::Engine;
 use crate::file_association;
 use crate::logging;
 use crate::settings::{self, Settings, SettingsStore, SettingsUpdateResult};
+use crate::updater::{self, UpdateCheckResult, UpdateError};
 
 /// Rendering limits. A full-page bitmap above this size is rejected instead of
 /// exhausting memory; the frontend switches to `render_page_region` (viewport
@@ -73,6 +74,22 @@ pub enum CommandErrorCode {
     /// The platform print operation could not be started.
     PrintFailed,
     WindowFailed,
+    /// Writing the Output Document failed. The Source Document and any
+    /// previous Output Document are unchanged; the save may be retried.
+    SaveFailed,
+    /// Save As targeted the Source Document itself, which is never modified.
+    SaveTargetIsSource,
+    /// Save Changes has no Output Document yet; the first save must be Save As.
+    NoOutputDocument,
+    /// The Source Document is encrypted and the caller did not confirm that the
+    /// output is written unencrypted (ADR-0007).
+    UnencryptedOutputConfirmationRequired,
+    /// Permission Restrictions forbid saving changes to this document.
+    ReadOnlyDocument,
+    UpdateNotConfigured,
+    UpdateCheckFailed,
+    UpdateManifestInvalid,
+    UpdateOpenFailed,
     Internal,
 }
 
@@ -238,13 +255,14 @@ pub struct TextLayerView {
 }
 
 pub(crate) struct OpenDocument {
-    /// Where the Source Document was read from. Export and print use it to
-    /// refuse overwriting the file the Document was opened from.
+    /// Path the Source Document was opened from. Export and print refuse to
+    /// overwrite it, and Save As refuses to target it.
     pub(crate) source_path: PathBuf,
     /// The unmodified bytes read from disk, kept for the incremental-save
     /// pipeline. PDFium owns its own copy of the input buffer.
-    #[allow(dead_code)]
     pub(crate) source_bytes: Vec<u8>,
+    /// Save target state: the Output Document path and object-level edits.
+    pub(crate) save: crate::save::SaveState,
     /// Session-level edit state for this Document. Declared before `document`
     /// so detached page-object snapshots held by undo/redo are destroyed
     /// before PDFium closes the owning document.
@@ -381,6 +399,7 @@ fn open_document_impl(
         OpenDocument {
             source_path: path,
             source_bytes: bytes,
+            save: crate::save::SaveState::default(),
             edit: crate::text_edit::EditSession::default(),
             document,
         },
@@ -395,7 +414,9 @@ fn open_document_impl(
 /// capability for unencrypted documents and for documents opened with the
 /// Owner Password; Permission Restrictions only narrow the flags when the
 /// document was opened with the User Password.
-fn document_permissions(document: &PdfDocument<'_>) -> (bool, bool, DocumentPermissions) {
+pub(crate) fn document_permissions(
+    document: &PdfDocument<'_>,
+) -> (bool, bool, DocumentPermissions) {
     let permissions = document.permissions();
 
     // `Unprotected` is the only unencrypted revision. PDFium reports an error
@@ -1373,4 +1394,67 @@ pub fn export_diagnostics(destination: String) -> Result<DiagnosticsExportView, 
         bytes: export.bytes,
         log_files: export.log_files,
     })
+}
+
+fn map_update_error(error: UpdateError) -> CommandError {
+    match error {
+        UpdateError::NotConfigured => {
+            CommandError::new(CommandErrorCode::UpdateNotConfigured, "未配置更新地址。")
+        }
+        // The settings page validates this before it can be persisted; treat a
+        // bad address here as a bad argument rather than a network failure.
+        UpdateError::InvalidManifestUrl(message) => {
+            CommandError::new(CommandErrorCode::InvalidArgument, message)
+        }
+        UpdateError::InvalidDownloadUrl(message) | UpdateError::ManifestInvalid(message) => {
+            CommandError::new(CommandErrorCode::UpdateManifestInvalid, message)
+        }
+        UpdateError::Http(message) => {
+            CommandError::new(CommandErrorCode::UpdateCheckFailed, message)
+        }
+        UpdateError::OpenFailed(message) => {
+            CommandError::new(CommandErrorCode::UpdateOpenFailed, message)
+        }
+    }
+}
+
+/// The `check_for_updates` command.
+///
+/// ADR-0009: this is the only network path in PDFX, and it runs only when the
+/// user clicks "检查更新". It reads the persisted manifest address, performs
+/// one GET with a finite timeout and no retries, and never sends document
+/// data, cookies or usage data. An unset address returns a dedicated error
+/// without touching the network.
+#[tauri::command]
+pub fn check_for_updates(app: AppHandle) -> Result<UpdateCheckResult, CommandError> {
+    let settings = settings_store(&app)?.load();
+    match updater::check_for_updates(&settings.update_manifest_url, env!("CARGO_PKG_VERSION")) {
+        Ok(result) => {
+            // The user-configured address is not logged: only the outcome.
+            logging::event(
+                "update.check",
+                &format!(
+                    "status={:?} version={} currentVersion={}",
+                    result.status, result.version, result.current_version
+                ),
+            );
+            Ok(result)
+        }
+        Err(error) => {
+            logging::event("update.check.failed", &format!("error={error}"));
+            Err(map_update_error(error))
+        }
+    }
+}
+
+/// The `open_download_page` command. Opens the manifest's download page in the
+/// system browser; never in an in-app webview. The URL is re-validated here so
+/// the launcher only receives an absolute http(s) address.
+#[tauri::command]
+pub fn open_download_page(url: String) -> Result<(), CommandError> {
+    updater::open_download_page(&updater::SystemOpener, &url)
+        .map_err(map_update_error)
+        .inspect_err(|error| {
+            logging::event("update.open.failed", &format!("code={:?}", error.code));
+        })
 }

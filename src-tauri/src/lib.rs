@@ -5,8 +5,10 @@ pub mod logging;
 mod menu;
 pub mod pdfium_adapter;
 pub mod print_export;
+pub mod save;
 pub mod settings;
 pub mod text_edit;
+pub mod updater;
 
 use tauri::{Emitter, Manager};
 
@@ -61,9 +63,12 @@ pub fn run() {
             text_edit::mark_document_saved,
             print_export::export_page,
             print_export::print_document,
+            save::save_document,
             commands::get_settings,
             commands::update_settings,
             commands::export_diagnostics,
+            commands::check_for_updates,
+            commands::open_download_page,
         ])
         .setup(|app| {
             // Logging is local-only and must never prevent the shell from

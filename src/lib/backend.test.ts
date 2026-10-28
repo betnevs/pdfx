@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   choosePageImageDestination,
   choosePdfFile,
+  chooseSaveFile,
   closeDocument,
   exportPage,
   extractTextLayer,
@@ -16,6 +17,7 @@ import {
   MENU_EVENT,
   onFileDrop,
   onMenuEvent,
+  onSaveProgress,
   openDocument,
   openDocumentInNewWindow,
   pageInfo,
@@ -23,6 +25,8 @@ import {
   renderPage,
   renderPageRegion,
   renderThumbnail,
+  SAVE_PROGRESS_EVENT,
+  saveDocument,
   setFullscreen,
   setWindowTitle,
   toCommandError,
@@ -396,5 +400,99 @@ describe("backend command seam", () => {
       code: "internal",
       message: "ipc unavailable",
     });
+  });
+
+  it("recognizes the save pipeline error codes", () => {
+    for (const code of [
+      "save_failed",
+      "save_target_is_source",
+      "no_output_document",
+      "unencrypted_output_confirmation_required",
+      "read_only_document",
+    ] as const) {
+      expect(toCommandError({ code, message: "detail" })).toEqual({
+        code,
+        message: "detail",
+      });
+    }
+  });
+
+  it("asks the save dialog for a PDF, preselecting the document name", async () => {
+    vi.mocked(saveDialog).mockResolvedValue("/tmp/copy.pdf");
+
+    await expect(chooseSaveFile("report.pdf")).resolves.toBe("/tmp/copy.pdf");
+    expect(saveDialog).toHaveBeenCalledWith({
+      defaultPath: "report.pdf",
+      filters: [{ name: "PDF", extensions: ["pdf"] }],
+    });
+  });
+
+  it("returns null when the save dialog is cancelled", async () => {
+    vi.mocked(saveDialog).mockResolvedValue(null);
+
+    await expect(chooseSaveFile()).resolves.toBeNull();
+    expect(saveDialog).toHaveBeenCalledWith({
+      defaultPath: undefined,
+      filters: [{ name: "PDF", extensions: ["pdf"] }],
+    });
+  });
+
+  it("sends the save request under the save_document command", async () => {
+    const result = {
+      documentId: "doc-1",
+      outputPath: "/tmp/copy.pdf",
+      kind: "save_as",
+      bytesWritten: 12,
+      backupPath: null,
+      history: {
+        canUndo: true,
+        canRedo: false,
+        revision: 1,
+        savedRevision: 1,
+        dirty: false,
+      },
+    };
+    invokeMock.mockResolvedValue(result);
+
+    await expect(
+      saveDocument("doc-1", {
+        saveAsPath: "/tmp/copy.pdf",
+        confirmUnencryptedOutput: false,
+      }),
+    ).resolves.toEqual(result);
+    expect(invokeMock).toHaveBeenCalledWith("save_document", {
+      documentId: "doc-1",
+      request: {
+        saveAsPath: "/tmp/copy.pdf",
+        confirmUnencryptedOutput: false,
+      },
+    });
+  });
+
+  it("subscribes to save progress and forwards the payload", async () => {
+    const unlisten = vi.fn();
+    let handler: ((event: { payload: unknown }) => void) | undefined;
+    vi.mocked(listen).mockImplementation(async (event, callback) => {
+      expect(event).toBe(SAVE_PROGRESS_EVENT);
+      handler = callback as (event: { payload: unknown }) => void;
+      return unlisten;
+    });
+    const received: unknown[] = [];
+
+    const dispose = await onSaveProgress((progress) => received.push(progress));
+    handler?.({
+      payload: {
+        documentId: "doc-1",
+        stage: "writing",
+        completed: 3,
+        total: 4,
+      },
+    });
+
+    expect(received).toEqual([
+      { documentId: "doc-1", stage: "writing", completed: 3, total: 4 },
+    ]);
+    dispose();
+    expect(unlisten).toHaveBeenCalled();
   });
 });

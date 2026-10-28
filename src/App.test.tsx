@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
@@ -12,6 +12,7 @@ import {
   READ_ONLY_REASON,
   UNENCRYPTED_OUTPUT_WARNING,
 } from "./lib/document-policy";
+import { notifyDocumentChanged } from "./lib/documentEvents";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
@@ -21,6 +22,7 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn(), save: vi.fn() }));
 
 const invokeMock = vi.mocked(invoke);
 const openDialogMock = vi.mocked(openDialog);
+const saveDialogMock = vi.mocked(saveDialog);
 const listenMock = vi.mocked(listen);
 
 const allGrantedPermissions = {
@@ -43,6 +45,42 @@ const documentView = {
   readOnly: false,
   permissions: allGrantedPermissions,
 };
+
+const idleHistory = {
+  canUndo: false,
+  canRedo: false,
+  revision: 0,
+  savedRevision: 0,
+  dirty: false,
+};
+
+const dirtyHistory = {
+  canUndo: true,
+  canRedo: false,
+  revision: 1,
+  savedRevision: 0,
+  dirty: true,
+};
+
+const cleanHistory = {
+  canUndo: true,
+  canRedo: false,
+  revision: 2,
+  savedRevision: 2,
+  dirty: false,
+};
+
+function savedResult(overrides: Record<string, unknown> = {}) {
+  return {
+    documentId: "doc-1",
+    outputPath: "/tmp/copy.pdf",
+    kind: "save_as",
+    bytesWritten: 2048,
+    backupPath: null,
+    history: cleanHistory,
+    ...overrides,
+  };
+}
 
 const pageImage = {
   documentId: "doc-1",
@@ -112,6 +150,7 @@ function installBackend(overrides: Record<string, CommandHandler> = {}) {
         theme: "system",
         annotationAuthor: "PDFX 用户",
         fileAssociationEnabled: false,
+        updateManifestUrl: "",
       };
     }
     const handler = overrides[command];
@@ -145,6 +184,7 @@ function installDocumentBackend(overrides: Record<string, CommandHandler> = {}) 
       return { ...region, pngBase64: "iVBORw0KGgo=" };
     },
     extract_text_layer: () => textLayerView,
+    edit_history: () => idleHistory,
     close_document: () => undefined,
     ...overrides,
   });
@@ -202,6 +242,7 @@ let setFullscreenMock: ReturnType<typeof vi.fn>;
 let isFullscreenMock: ReturnType<typeof vi.fn>;
 let dragDropHandler: ((event: unknown) => void) | undefined;
 let menuHandler: ((event: unknown) => void) | undefined;
+let saveProgressHandler: ((event: { payload: unknown }) => void) | undefined;
 
 beforeEach(() => {
   setTitle = vi.fn().mockResolvedValue(undefined);
@@ -210,6 +251,7 @@ beforeEach(() => {
   isFullscreenMock = vi.fn().mockResolvedValue(false);
   dragDropHandler = undefined;
   menuHandler = undefined;
+  saveProgressHandler = undefined;
   onDragDropEvent = vi.fn(async (handler: (event: unknown) => void) => {
     dragDropHandler = handler;
     return () => {};
@@ -224,11 +266,16 @@ beforeEach(() => {
   vi.mocked(getCurrentWebview).mockReturnValue({
     onDragDropEvent,
   } as unknown as ReturnType<typeof getCurrentWebview>);
-  listenMock.mockImplementation(async (_event, handler) => {
-    menuHandler = handler as (event: unknown) => void;
+  listenMock.mockImplementation(async (event, handler) => {
+    if (event === "pdfx://menu") {
+      menuHandler = handler as (event: unknown) => void;
+    } else if (event === "pdfx://save-progress") {
+      saveProgressHandler = handler as (event: { payload: unknown }) => void;
+    }
     return () => {};
   });
   openDialogMock.mockResolvedValue(null);
+  saveDialogMock.mockResolvedValue(null);
   window.history.replaceState({}, "", "/");
 });
 
@@ -238,6 +285,7 @@ afterEach(() => {
   vi.mocked(getCurrentWebview).mockReset();
   listenMock.mockReset();
   openDialogMock.mockReset();
+  saveDialogMock.mockReset();
   window.history.replaceState({}, "", "/");
 });
 
@@ -332,6 +380,9 @@ describe("PDFX workspace", () => {
         ["open_document", { path: "/tmp/dropped.pdf", password: null }],
       ]);
     });
+    // Wait for the opened document's effects so the save listener is
+    // registered inside this test rather than after it tears its mocks down.
+    expect(await screen.findByText("report.pdf")).toBeInTheDocument();
   });
 
   it("opens a second file in its own window instead of replacing the first document", async () => {
@@ -508,7 +559,7 @@ describe("PDFX workspace", () => {
     expect(editing).toHaveAttribute("aria-describedby", "read-only-reason");
 
     expect(screen.getByRole("button", { name: "保存更改" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "另存为…" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "另存为…" })).toBeEnabled();
     expect(screen.getByText(UNENCRYPTED_OUTPUT_WARNING)).toBeInTheDocument();
   });
 
@@ -525,7 +576,7 @@ describe("PDFX workspace", () => {
     expect(await screen.findByRole("img", { name: "第 1 页" })).toBeInTheDocument();
     expect(screen.queryByText(READ_ONLY_REASON)).not.toBeInTheDocument();
     expect(screen.getByText(UNENCRYPTED_OUTPUT_WARNING)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "保存更改" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "保存更改" })).toBeEnabled();
   });
 
   it("navigates pages with the toolbar, the page input and Home/End", async () => {
@@ -1160,6 +1211,443 @@ describe("PDFX workspace", () => {
     expect(preventDefault).not.toHaveBeenCalled();
     expect(commandCalls("close_document")).toEqual([
       ["close_document", { documentId: "doc-1" }],
+    ]);
+  });
+
+  it("saves a new document through the Save As dialog and clears the dirty marker", async () => {
+    installDocumentBackend({
+      edit_history: () => dirtyHistory,
+      save_document: () => savedResult(),
+    });
+    openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+    saveDialogMock.mockResolvedValueOnce("/tmp/copy.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+
+    expect(await screen.findByText("未保存")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "另存为…" }));
+
+    await waitFor(() => {
+      expect(commandCalls("save_document")).toEqual([
+        [
+          "save_document",
+          {
+            documentId: "doc-1",
+            request: {
+              saveAsPath: "/tmp/copy.pdf",
+              confirmUnencryptedOutput: false,
+            },
+          },
+        ],
+      ]);
+    });
+    expect(saveDialogMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        defaultPath: "report.pdf",
+        filters: [{ name: "PDF", extensions: ["pdf"] }],
+      }),
+    );
+    expect(await screen.findByText(/已保存到/)).toHaveTextContent("copy.pdf");
+    await waitFor(() => {
+      expect(screen.queryByText("未保存")).not.toBeInTheDocument();
+      expect(setTitle).toHaveBeenLastCalledWith("report.pdf — PDFX");
+    });
+  });
+
+  it("does not save when the Save As dialog is cancelled", async () => {
+    installDocumentBackend();
+    openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+    saveDialogMock.mockResolvedValueOnce(null);
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("report.pdf");
+    await user.click(screen.getByRole("button", { name: "另存为…" }));
+
+    expect(saveDialogMock).toHaveBeenCalledTimes(1);
+    expect(commandCalls("save_document")).toHaveLength(0);
+  });
+
+  it("overwrites the chosen Output Document on Save Changes without another dialog", async () => {
+    installDocumentBackend({
+      save_document: (args) =>
+        savedResult({
+          kind: (args as { request: { saveAsPath: string | null } }).request
+            .saveAsPath
+            ? "save_as"
+            : "save_changes",
+          backupPath: "/tmp/copy.pdfx-backup.pdf",
+        }),
+    });
+    openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+    saveDialogMock.mockResolvedValueOnce("/tmp/copy.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("report.pdf");
+    await user.click(screen.getByRole("button", { name: "另存为…" }));
+    await screen.findByText(/已保存到/);
+
+    await user.click(screen.getByRole("button", { name: "保存更改" }));
+
+    await waitFor(() => {
+      expect(commandCalls("save_document")).toEqual([
+        [
+          "save_document",
+          {
+            documentId: "doc-1",
+            request: {
+              saveAsPath: "/tmp/copy.pdf",
+              confirmUnencryptedOutput: false,
+            },
+          },
+        ],
+        [
+          "save_document",
+          {
+            documentId: "doc-1",
+            request: {
+              saveAsPath: null,
+              confirmUnencryptedOutput: false,
+            },
+          },
+        ],
+      ]);
+    });
+    expect(saveDialogMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("routes the first Save Changes through Save As because no output exists yet", async () => {
+    installDocumentBackend({ save_document: () => savedResult() });
+    openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+    saveDialogMock.mockResolvedValueOnce("/tmp/first.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("report.pdf");
+    await user.click(screen.getByRole("button", { name: "保存更改" }));
+
+    expect(saveDialogMock).toHaveBeenCalledTimes(1);
+    await waitFor(() => {
+      expect(commandCalls("save_document")).toEqual([
+        [
+          "save_document",
+          {
+            documentId: "doc-1",
+            request: {
+              saveAsPath: "/tmp/first.pdf",
+              confirmUnencryptedOutput: false,
+            },
+          },
+        ],
+      ]);
+    });
+  });
+
+  it("requires confirmation before writing an unencrypted copy of an encrypted document", async () => {
+    installDocumentBackend({
+      open_document: () => ({ ...documentView, name: "secret.pdf", encrypted: true }),
+      save_document: () =>
+        savedResult({ outputPath: "/tmp/secret-copy.pdf" }),
+    });
+    openDialogMock.mockResolvedValueOnce("/tmp/secret.pdf");
+    saveDialogMock.mockResolvedValue("/tmp/secret-copy.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("secret.pdf");
+    await user.click(screen.getByRole("button", { name: "另存为…" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "输出将不加密" });
+    expect(commandCalls("save_document")).toHaveLength(0);
+
+    await user.click(within(dialog).getByRole("button", { name: "取消" }));
+    expect(
+      screen.queryByRole("dialog", { name: "输出将不加密" }),
+    ).not.toBeInTheDocument();
+    expect(commandCalls("save_document")).toHaveLength(0);
+
+    await user.click(screen.getByRole("button", { name: "另存为…" }));
+    await user.click(
+      await screen.findByRole("button", { name: "继续保存（不加密）" }),
+    );
+    await waitFor(() => {
+      expect(commandCalls("save_document")).toEqual([
+        [
+          "save_document",
+          {
+            documentId: "doc-1",
+            request: {
+              saveAsPath: "/tmp/secret-copy.pdf",
+              confirmUnencryptedOutput: true,
+            },
+          },
+        ],
+      ]);
+    });
+
+    // Save Changes asks for the same confirmation on every write.
+    await screen.findByText(/已保存到/);
+    await user.click(screen.getByRole("button", { name: "保存更改" }));
+    await user.click(
+      await screen.findByRole("button", { name: "继续保存（不加密）" }),
+    );
+    await waitFor(() => {
+      expect(commandCalls("save_document")).toHaveLength(2);
+    });
+    expect(commandCalls("save_document")[1]).toEqual([
+      "save_document",
+      {
+        documentId: "doc-1",
+        request: {
+          saveAsPath: null,
+          confirmUnencryptedOutput: true,
+        },
+      },
+    ]);
+  });
+
+  it("lets a read-only document write an unencrypted copy after confirmation", async () => {
+    installDocumentBackend({
+      open_document: () => ({
+        ...documentView,
+        name: "restricted.pdf",
+        encrypted: true,
+        readOnly: true,
+      }),
+      save_document: () =>
+        savedResult({ outputPath: "/tmp/restricted-copy.pdf" }),
+    });
+    openDialogMock.mockResolvedValueOnce("/tmp/restricted.pdf");
+    saveDialogMock.mockResolvedValueOnce("/tmp/restricted-copy.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("restricted.pdf");
+
+    expect(screen.getByRole("button", { name: "保存更改" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "另存为…" }));
+    await user.click(
+      await screen.findByRole("button", { name: "继续保存（不加密）" }),
+    );
+
+    await waitFor(() => {
+      expect(commandCalls("save_document")).toEqual([
+        [
+          "save_document",
+          {
+            documentId: "doc-1",
+            request: {
+              saveAsPath: "/tmp/restricted-copy.pdf",
+              confirmUnencryptedOutput: true,
+            },
+          },
+        ],
+      ]);
+    });
+  });
+
+  it("shows a retryable error when a save fails and retries the same request", async () => {
+    let attempts = 0;
+    installDocumentBackend({
+      save_document: async () => {
+        attempts += 1;
+        if (attempts === 1) {
+          throw { code: "save_failed", message: "disk full while writing" };
+        }
+        return savedResult();
+      },
+    });
+    openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+    saveDialogMock.mockResolvedValueOnce("/tmp/copy.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("report.pdf");
+    await user.click(screen.getByRole("button", { name: "另存为…" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("保存失败");
+    expect(alert).toHaveTextContent("disk full while writing");
+
+    await user.click(screen.getByRole("button", { name: "重试保存" }));
+
+    await waitFor(() => expect(attempts).toBe(2));
+    expect(await screen.findByText(/已保存到/)).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("chooses a new path when the Save As target is the source document", async () => {
+    let attempts = 0;
+    installDocumentBackend({
+      save_document: async (args) => {
+        attempts += 1;
+        const request = (args as { request: { saveAsPath: string | null } }).request;
+        if (attempts === 1) {
+          throw { code: "save_target_is_source", message: "choose another path" };
+        }
+        return savedResult({ outputPath: request.saveAsPath });
+      },
+    });
+    openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+    saveDialogMock
+      .mockResolvedValueOnce("/tmp/report.pdf")
+      .mockResolvedValueOnce("/tmp/report-copy.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("report.pdf");
+    await user.click(screen.getByRole("button", { name: "另存为…" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "不能把源文件本身作为输出",
+    );
+    await user.click(screen.getByRole("button", { name: "重新选择…" }));
+
+    await waitFor(() => expect(attempts).toBe(2));
+    expect(saveDialogMock).toHaveBeenCalledTimes(2);
+    expect(commandCalls("save_document")[1]).toEqual([
+      "save_document",
+      {
+        documentId: "doc-1",
+        request: {
+          saveAsPath: "/tmp/report-copy.pdf",
+          confirmUnencryptedOutput: false,
+        },
+      },
+    ]);
+  });
+
+  it("reports save progress while the write is in flight", async () => {
+    let resolveSave: (value: unknown) => void = () => {};
+    installDocumentBackend({
+      save_document: () =>
+        new Promise((resolve) => {
+          resolveSave = resolve;
+        }),
+    });
+    openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+    saveDialogMock.mockResolvedValueOnce("/tmp/copy.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("report.pdf");
+    await waitFor(() => expect(saveProgressHandler).toBeDefined());
+    await user.click(screen.getByRole("button", { name: "另存为…" }));
+    await waitFor(() => expect(commandCalls("save_document")).toHaveLength(1));
+
+    act(() => {
+      saveProgressHandler?.({
+        payload: {
+          documentId: "doc-1",
+          stage: "serializing",
+          completed: 1,
+          total: 4,
+        },
+      });
+    });
+    expect(await screen.findByText("正在生成 PDF…")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "另存为…" })).toBeDisabled();
+
+    act(() => {
+      saveProgressHandler?.({
+        payload: {
+          documentId: "doc-1",
+          stage: "writing",
+          completed: 3,
+          total: 4,
+        },
+      });
+    });
+    expect(await screen.findByText("正在写入文件…")).toBeInTheDocument();
+
+    await act(async () => {
+      resolveSave(savedResult());
+    });
+    expect(await screen.findByText(/已保存到/)).toBeInTheDocument();
+    expect(screen.queryByText("正在写入文件…")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "保存更改" })).toBeEnabled();
+  });
+
+  it("tracks dirty state through edit history and guards closing a dirty document", async () => {
+    let dirty = false;
+    installDocumentBackend({
+      edit_history: () => (dirty ? dirtyHistory : idleHistory),
+      save_document: () => savedResult(),
+    });
+    openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+    saveDialogMock.mockResolvedValueOnce("/tmp/copy.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("report.pdf");
+    expect(screen.queryByText("未保存")).not.toBeInTheDocument();
+
+    dirty = true;
+    act(() => {
+      notifyDocumentChanged({ documentId: "doc-1", pageIndex: 0 });
+    });
+
+    expect(await screen.findByText("未保存")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(setTitle).toHaveBeenLastCalledWith("report.pdf（未保存） — PDFX"),
+    );
+
+    await waitFor(() => expect(onCloseRequested).toHaveBeenCalled());
+    const closeHandler = onCloseRequested.mock.calls[0][0] as (event: {
+      preventDefault: () => void;
+    }) => void;
+    const preventDefault = vi.fn();
+    closeHandler({ preventDefault });
+    expect(preventDefault).toHaveBeenCalled();
+    expect(commandCalls("close_document")).toHaveLength(0);
+
+    await user.click(screen.getByRole("button", { name: "另存为…" }));
+    await screen.findByText(/已保存到/);
+    await waitFor(() => {
+      expect(screen.queryByText("未保存")).not.toBeInTheDocument();
+      expect(setTitle).toHaveBeenLastCalledWith("report.pdf — PDFX");
+    });
+  });
+
+  it("wires the file.save and file.save_as menu ids to the save flow", async () => {
+    installDocumentBackend({ save_document: () => savedResult() });
+    openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+    saveDialogMock.mockResolvedValueOnce("/tmp/copy.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("report.pdf");
+    await waitFor(() => expect(menuHandler).toBeDefined());
+
+    act(() => menuHandler?.({ payload: "file.save_as" }));
+    await screen.findByText(/已保存到/);
+    expect(saveDialogMock).toHaveBeenCalledTimes(1);
+
+    act(() => menuHandler?.({ payload: "file.save" }));
+    await waitFor(() => expect(commandCalls("save_document")).toHaveLength(2));
+    expect(saveDialogMock).toHaveBeenCalledTimes(1);
+    expect(commandCalls("save_document")[1]).toEqual([
+      "save_document",
+      {
+        documentId: "doc-1",
+        request: {
+          saveAsPath: null,
+          confirmUnencryptedOutput: false,
+        },
+      },
     ]);
   });
 
