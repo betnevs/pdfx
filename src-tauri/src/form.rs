@@ -67,6 +67,11 @@ pub struct FormFieldView {
     pub options: Vec<String>,
     /// Index into `options` for choice fields.
     pub selected_index: Option<u32>,
+    /// Every selected index for choice fields (multiple entries only for a
+    /// multi-select list box).
+    pub selected_indices: Vec<u32>,
+    /// True for a list box whose MultiSelect flag is set.
+    pub multi_select: bool,
     pub required: bool,
     pub read_only: bool,
     pub multiline: bool,
@@ -140,13 +145,13 @@ fn describe_value(
             view.radio_group = Some(view.name.clone());
         }
         PdfFormField::ComboBox(combo) => {
-            describe_choice(combo.options(), view);
+            describe_choice(combo.options(), false, view);
             view.value = combo.value();
             apply_choice_overlay(view, overlay);
             sync_choice_index(view);
         }
         PdfFormField::ListBox(list) => {
-            describe_choice(list.options(), view);
+            describe_choice(list.options(), list.is_multiselect(), view);
             view.value = list.value();
             apply_choice_overlay(view, overlay);
             sync_choice_index(view);
@@ -173,21 +178,26 @@ fn apply_choice_overlay(view: &mut FormFieldView, overlay: &FormOverlay) {
         .iter()
         .position(|option| option == value)
         .map(|index| index as u32);
+    view.selected_indices = view.selected_index.into_iter().collect();
 }
 
 fn describe_choice(
     options: &pdfium_render::prelude::PdfFormFieldOptions<'_>,
+    multi_select: bool,
     view: &mut FormFieldView,
 ) {
     view.options = options
         .iter()
         .filter_map(|option| option.label().cloned())
         .collect();
-    view.selected_index = options
+    view.selected_indices = options
         .iter()
         .enumerate()
-        .find(|(_, option)| option.is_set())
-        .map(|(index, _)| index as u32);
+        .filter(|(_, option)| option.is_set())
+        .map(|(index, _)| index as u32)
+        .collect();
+    view.selected_index = view.selected_indices.first().copied();
+    view.multi_select = multi_select;
 }
 
 /// On-state names of every radio widget, keyed by field name and in `/Kids`
@@ -420,6 +430,8 @@ fn widget_view(
         checked: false,
         options: Vec::new(),
         selected_index: None,
+        selected_indices: Vec::new(),
+        multi_select: false,
         required: field.is_required(),
         read_only: field.is_read_only(),
         multiline: false,
@@ -729,6 +741,13 @@ fn fill_for(
             format!("form field {} is read-only", field.name),
         ));
     }
+    if field.kind == FormFieldKind::Signature {
+        // Signature fields are structure only: PDFX never signs and has no
+        // certificate code, so there is nothing this command could write.
+        return Err(invalid_value(
+            "此字段仅创建签名结构，PDFX 不执行证书签名，无法填写。",
+        ));
+    }
     if field.created {
         // Created fields live in the session store until the save pipeline
         // writes them; their value change is a content edit with a full-record
@@ -769,6 +788,20 @@ fn fill_for(
                     return Err(field_not_found(&field_id));
                 }
                 after.selected_option = Some(index);
+                after
+            }
+            FormFieldKind::ComboBox | FormFieldKind::ListBox => {
+                let FormFieldValueInput::Choice { value } = value else {
+                    return Err(invalid_value("此表单字段只接受列表中的选项。"));
+                };
+                let index = before
+                    .options
+                    .iter()
+                    .position(|option| option == &value)
+                    .ok_or_else(|| invalid_value(format!("“{value}”不是此字段的可选项。")))?;
+                // Picking a value replaces the selection; multiple defaults are
+                // set through the property panel's multi-select list box.
+                after.selected_options = vec![index];
                 after
             }
             _ => return Err(invalid_value("此表单字段类型不支持填写。")),

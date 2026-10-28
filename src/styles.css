@@ -882,6 +882,45 @@ button {
   accent-color: var(--pdfx-blue-ui);
 }
 
+.form-field--signature {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  padding: 2px 4px;
+  border: 1px dashed var(--pdfx-page-control-border);
+  border-radius: 2px;
+  background: transparent;
+  color: var(--pdfx-page-control-border);
+  font-family: "Noto Sans SC", Helvetica, Arial, sans-serif;
+  line-height: 1.15;
+  text-align: center;
+  cursor: default;
+}
+
+.form-field--signature.form-field--created {
+  border-color: var(--pdfx-blue-ui);
+  color: var(--pdfx-blue-ui);
+  cursor: pointer;
+}
+
+.form-field-signature-label {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.form-field-signature-hint {
+  font-size: 9px;
+  opacity: 0.85;
+}
+
+.form-field-panel-disclosure {
+  color: var(--pdfx-page-control-border);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 .form-field:focus-visible {
   outline: 2px solid var(--pdfx-blue-ui);
   outline-offset: 1px;

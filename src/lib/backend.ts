@@ -442,6 +442,10 @@ export interface FormFieldView {
   /** Choice labels in document order; empty for other kinds. */
   options: string[];
   selectedIndex: number | null;
+  /** Every selected option; only a multi-select list box has several. */
+  selectedIndices: number[];
+  /** True for a list box whose MultiSelect flag is set. */
+  multiSelect: boolean;
   required: boolean;
   readOnly: boolean;
   multiline: boolean;
@@ -491,7 +495,7 @@ export interface FormStructureEditResult {
   history: EditHistoryView;
 }
 
-/** Places a text, checkbox or radio-group field on a page. */
+/** Places a text, checkbox, radio, choice or signature field on a page. */
 export type CreateFormFieldRequest =
   | ({ kind: "text" } & CreateFormTextFieldRequest)
   | {
@@ -517,6 +521,45 @@ export type CreateFormFieldRequest =
       options: string[];
       /** Index of the initially selected option, or `null` for none. */
       selectedIndex: number | null;
+    }
+  | {
+      kind: "comboBox";
+      /** Display-space rectangle, top-left origin. */
+      rect: FormFieldRect;
+      /** `null` asks the backend for a generated `combo_box_N` name. */
+      name: string | null;
+      tooltip: string | null;
+      required: boolean;
+      /** `/Opt` labels in display order. An empty list creates one option. */
+      options: string[];
+      /** Default selected option index, or `null` for none. */
+      selectedIndex: number | null;
+      fontSize: number | null;
+    }
+  | {
+      kind: "listBox";
+      /** Display-space rectangle, top-left origin. */
+      rect: FormFieldRect;
+      /** `null` asks the backend for a generated `list_box_N` name. */
+      name: string | null;
+      tooltip: string | null;
+      required: boolean;
+      /** `/Opt` labels in display order. An empty list creates one option. */
+      options: string[];
+      /** Default selected option indices; a single-select list takes one. */
+      selectedIndices: number[];
+      /** Sets the MultiSelect flag (list boxes only). */
+      multiSelect: boolean;
+      fontSize: number | null;
+    }
+  | {
+      /** An empty signature placeholder: structure only, never a signature. */
+      kind: "signature";
+      /** Display-space rectangle, top-left origin. */
+      rect: FormFieldRect;
+      /** `null` asks the backend for a generated `signature_N` name. */
+      name: string | null;
+      tooltip: string | null;
     };
 
 /** The selected widget id, the refreshed widget list and shared history. */
@@ -544,6 +587,31 @@ export type UpdateFormFieldRequest =
       /** The complete option-label list in display order. */
       options: string[];
       selectedIndex: number | null;
+    }
+  | {
+      kind: "comboBox";
+      name: string;
+      tooltip: string | null;
+      required: boolean;
+      options: string[];
+      selectedIndex: number | null;
+      fontSize: number;
+    }
+  | {
+      kind: "listBox";
+      name: string;
+      tooltip: string | null;
+      required: boolean;
+      options: string[];
+      selectedIndices: number[];
+      multiSelect: boolean;
+      fontSize: number;
+    }
+  | {
+      /** Signature fields carry only identity: PDFX never signs them. */
+      kind: "signature";
+      name: string;
+      tooltip: string | null;
     };
 
 /** A value the user committed for one widget. */

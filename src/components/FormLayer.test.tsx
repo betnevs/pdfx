@@ -26,6 +26,8 @@ function field(overrides: Partial<FormFieldView> = {}): FormFieldView {
     checked: false,
     options: [],
     selectedIndex: null,
+    selectedIndices: [],
+    multiSelect: false,
     required: false,
     readOnly: false,
     multiline: false,
@@ -773,6 +775,421 @@ describe("FormLayer", () => {
     ).toBeChecked();
   });
 
+  it("places a combo box and edits its options, default and font size", async () => {
+    const comboViews = (request: {
+      name: string;
+      tooltip: string | null;
+      required: boolean;
+      options: string[];
+      selectedIndex: number | null;
+      fontSize: number;
+    }): FormFieldView[] => [
+      field({
+        fieldId: "new:1",
+        name: request.name,
+        kind: "comboBox",
+        order: 0,
+        rect: { x: 72, y: 100, width: 180, height: 24 },
+        value:
+          request.selectedIndex === null
+            ? null
+            : (request.options[request.selectedIndex] ?? null),
+        options: request.options,
+        selectedIndex: request.selectedIndex,
+        selectedIndices:
+          request.selectedIndex === null ? [] : [request.selectedIndex],
+        required: request.required,
+        tooltip: request.tooltip,
+        fontSize: request.fontSize,
+        created: true,
+      }),
+    ];
+    let stored: FormFieldView[] = [];
+    const updates: Array<{
+      fieldId: string;
+      request: {
+        kind: string;
+        name: string;
+        tooltip: string | null;
+        required: boolean;
+        options: string[];
+        selectedIndex: number | null;
+        fontSize: number;
+      };
+    }> = [];
+    invokeMock.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "form_fields") {
+        return stored;
+      }
+      if (command === "edit_history") {
+        return emptyHistory;
+      }
+      if (command === "create_form_field") {
+        expect(args).toEqual({
+          documentId: "doc-1",
+          pageIndex: 0,
+          request: {
+            kind: "comboBox",
+            rect: { x: 72, y: 100, width: 180, height: 24 },
+            name: null,
+            tooltip: null,
+            required: false,
+            options: ["选项 1"],
+            selectedIndex: null,
+            fontSize: 12,
+          },
+        });
+        stored = comboViews({
+          name: "combo_box_1",
+          tooltip: null,
+          required: false,
+          options: ["选项 1"],
+          selectedIndex: null,
+          fontSize: 12,
+        });
+        return { fieldId: "new:1", fields: stored, history: dirtyHistory };
+      }
+      if (command === "update_form_field") {
+        const payload = args as (typeof updates)[number];
+        updates.push(payload);
+        stored = comboViews(payload.request);
+        return { fields: stored, history: dirtyHistory };
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+    const { container } = renderLayer({ canModifyContent: true });
+
+    fireEvent.click(await screen.findByRole("button", { name: "添加下拉框" }));
+    const layer = container.querySelector(".form-layer");
+    fireEvent.pointerDown(layer!, {
+      clientX: 72,
+      clientY: 100,
+      button: 0,
+      pointerId: 1,
+    });
+    fireEvent.pointerUp(layer!, {
+      clientX: 72,
+      clientY: 100,
+      button: 0,
+      pointerId: 1,
+    });
+
+    expect(await screen.findByLabelText("字段名称")).toHaveValue("combo_box_1");
+    expect(screen.getByLabelText("字号")).toHaveValue(12);
+    expect(screen.getByLabelText("选项 1")).toHaveValue("选项 1");
+    expect(screen.queryByLabelText("允许多选")).not.toBeInTheDocument();
+
+    const firstOption = screen.getByLabelText("选项 1");
+    fireEvent.change(firstOption, { target: { value: "中国" } });
+    fireEvent.blur(firstOption);
+    await waitFor(() => expect(updates).toHaveLength(1));
+    expect(updates[0].request).toEqual({
+      kind: "comboBox",
+      name: "combo_box_1",
+      tooltip: null,
+      required: false,
+      options: ["中国"],
+      selectedIndex: null,
+      fontSize: 12,
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "添加选项" }));
+    await waitFor(() => expect(updates).toHaveLength(2));
+    expect(updates[1].request.options).toEqual(["中国", "选项 2"]);
+
+    fireEvent.change(screen.getByLabelText("默认选项"), {
+      target: { value: "1" },
+    });
+    await waitFor(() => expect(updates).toHaveLength(3));
+    expect(updates[2].request.selectedIndex).toBe(1);
+    await waitFor(() =>
+      expect(screen.getByLabelText("combo_box_1")).toHaveValue("选项 2"),
+    );
+
+    const fontSize = screen.getByLabelText("字号");
+    fireEvent.change(fontSize, { target: { value: "18" } });
+    fireEvent.blur(fontSize);
+    await waitFor(() => expect(updates).toHaveLength(4));
+    expect(updates[3].request).toEqual({
+      kind: "comboBox",
+      name: "combo_box_1",
+      tooltip: null,
+      required: false,
+      options: ["中国", "选项 2"],
+      selectedIndex: 1,
+      fontSize: 18,
+    });
+  });
+
+  it("places a list box and edits multi-select defaults", async () => {
+    const listViews = (request: {
+      name: string;
+      tooltip: string | null;
+      required: boolean;
+      options: string[];
+      selectedIndices: number[];
+      multiSelect: boolean;
+      fontSize: number;
+    }): FormFieldView[] => [
+      field({
+        fieldId: "new:1",
+        name: request.name,
+        kind: "listBox",
+        order: 0,
+        rect: { x: 72, y: 100, width: 180, height: 48 },
+        value:
+          request.selectedIndices.length === 0
+            ? null
+            : (request.options[request.selectedIndices[0]] ?? null),
+        options: request.options,
+        selectedIndex: request.selectedIndices[0] ?? null,
+        selectedIndices: request.selectedIndices,
+        multiSelect: request.multiSelect,
+        required: request.required,
+        tooltip: request.tooltip,
+        fontSize: request.fontSize,
+        created: true,
+      }),
+    ];
+    let stored: FormFieldView[] = [];
+    const updates: Array<{
+      fieldId: string;
+      request: {
+        kind: string;
+        name: string;
+        tooltip: string | null;
+        required: boolean;
+        options: string[];
+        selectedIndices: number[];
+        multiSelect: boolean;
+        fontSize: number;
+      };
+    }> = [];
+    invokeMock.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "form_fields") {
+        return stored;
+      }
+      if (command === "edit_history") {
+        return emptyHistory;
+      }
+      if (command === "create_form_field") {
+        expect(args).toEqual({
+          documentId: "doc-1",
+          pageIndex: 0,
+          request: {
+            kind: "listBox",
+            rect: { x: 72, y: 100, width: 180, height: 48 },
+            name: null,
+            tooltip: null,
+            required: false,
+            options: ["选项 1"],
+            selectedIndices: [],
+            multiSelect: false,
+            fontSize: 12,
+          },
+        });
+        stored = listViews({
+          name: "list_box_1",
+          tooltip: null,
+          required: false,
+          options: ["选项 1"],
+          selectedIndices: [],
+          multiSelect: false,
+          fontSize: 12,
+        });
+        return { fieldId: "new:1", fields: stored, history: dirtyHistory };
+      }
+      if (command === "update_form_field") {
+        const payload = args as (typeof updates)[number];
+        updates.push(payload);
+        stored = listViews(payload.request);
+        return { fields: stored, history: dirtyHistory };
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+    const { container } = renderLayer({ canModifyContent: true });
+
+    fireEvent.click(await screen.findByRole("button", { name: "添加列表框" }));
+    const layer = container.querySelector(".form-layer");
+    fireEvent.pointerDown(layer!, {
+      clientX: 72,
+      clientY: 100,
+      button: 0,
+      pointerId: 1,
+    });
+    fireEvent.pointerUp(layer!, {
+      clientX: 72,
+      clientY: 100,
+      button: 0,
+      pointerId: 1,
+    });
+
+    expect(await screen.findByLabelText("字段名称")).toHaveValue("list_box_1");
+    expect(screen.getByLabelText("字号")).toHaveValue(12);
+    expect(screen.getByLabelText("允许多选")).not.toBeChecked();
+    expect(screen.getByLabelText("默认选项")).toHaveValue("");
+
+    fireEvent.click(screen.getByLabelText("允许多选"));
+    await waitFor(() => expect(updates).toHaveLength(1));
+    expect(updates[0].request.multiSelect).toBe(true);
+    expect(updates[0].request.selectedIndices).toEqual([]);
+
+    const firstOption = screen.getByLabelText("选项 1");
+    fireEvent.change(firstOption, { target: { value: "北京" } });
+    fireEvent.blur(firstOption);
+    await waitFor(() => expect(updates).toHaveLength(2));
+
+    fireEvent.click(screen.getByRole("button", { name: "添加选项" }));
+    await waitFor(() => expect(updates).toHaveLength(3));
+    const secondOption = await screen.findByLabelText("选项 2");
+    fireEvent.change(secondOption, { target: { value: "上海" } });
+    fireEvent.blur(secondOption);
+    await waitFor(() => expect(updates).toHaveLength(4));
+    expect(updates[3].request.options).toEqual(["北京", "上海"]);
+
+    const defaults = screen.getByLabelText("默认选项") as HTMLSelectElement;
+    for (const option of Array.from(defaults.options)) {
+      option.selected = option.value === "0" || option.value === "1";
+    }
+    fireEvent.change(defaults);
+    await waitFor(() => expect(updates).toHaveLength(5));
+    expect(updates[4].request.selectedIndices).toEqual([0, 1]);
+    expect(updates[4].request.multiSelect).toBe(true);
+
+    fireEvent.click(screen.getByLabelText("允许多选"));
+    await waitFor(() => expect(updates).toHaveLength(6));
+    expect(updates[5].request.multiSelect).toBe(false);
+    expect(updates[5].request.selectedIndices).toEqual([0]);
+    await waitFor(() =>
+      expect(screen.getByLabelText("list_box_1")).toHaveValue("北京"),
+    );
+  });
+
+  it("places an empty signature field and discloses that PDFX does not sign", async () => {
+    const signatureView = (name: string): FormFieldView => [
+      field({
+        fieldId: "new:1",
+        name,
+        kind: "signature",
+        order: 0,
+        rect: { x: 72, y: 100, width: 240, height: 60 },
+        fontSize: null,
+        created: true,
+      }),
+    ][0];
+    let stored: FormFieldView[] = [];
+    const updates: unknown[] = [];
+    invokeMock.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "form_fields") {
+        return stored;
+      }
+      if (command === "edit_history") {
+        return emptyHistory;
+      }
+      if (command === "create_form_field") {
+        expect(args).toEqual({
+          documentId: "doc-1",
+          pageIndex: 0,
+          request: {
+            kind: "signature",
+            rect: { x: 72, y: 100, width: 240, height: 60 },
+            name: null,
+            tooltip: null,
+          },
+        });
+        stored = [signatureView("signature_1")];
+        return { fieldId: "new:1", fields: stored, history: dirtyHistory };
+      }
+      if (command === "update_form_field") {
+        updates.push(args);
+        const payload = args as {
+          fieldId: string;
+          request: { name: string; tooltip: string | null };
+        };
+        stored = [signatureView(payload.request.name)];
+        return { fields: stored, history: dirtyHistory };
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+    const { container } = renderLayer({ canModifyContent: true });
+
+    const tool = await screen.findByRole("button", { name: "添加签名字段" });
+    fireEvent.click(tool);
+    expect(screen.getByText("仅创建签名字段结构，不执行证书签名")).toBeInTheDocument();
+
+    const layer = container.querySelector(".form-layer");
+    fireEvent.pointerDown(layer!, {
+      clientX: 72,
+      clientY: 100,
+      button: 0,
+      pointerId: 1,
+    });
+    fireEvent.pointerUp(layer!, {
+      clientX: 72,
+      clientY: 100,
+      button: 0,
+      pointerId: 1,
+    });
+
+    expect(await screen.findByLabelText("字段名称")).toHaveValue("signature_1");
+    // A signature is never required, sized or filled from this panel.
+    expect(screen.queryByLabelText("必填字段")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("字号")).not.toBeInTheDocument();
+    expect(
+      screen.getAllByText("仅创建签名字段结构，不执行证书签名").length,
+    ).toBeGreaterThanOrEqual(2);
+    expect(
+      screen.getByRole("button", {
+        name: "signature_1：签名字段（仅创建签名字段结构，不执行证书签名）",
+      }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "signature_1" })).toBeNull();
+
+    const name = screen.getByLabelText("字段名称");
+    fireEvent.change(name, { target: { value: "sign_here" } });
+    fireEvent.blur(name);
+    await waitFor(() => expect(updates).toHaveLength(1));
+    expect(updates[0]).toEqual({
+      documentId: "doc-1",
+      fieldId: "new:1",
+      request: {
+        kind: "signature",
+        name: "sign_here",
+        tooltip: null,
+      },
+    });
+  });
+
+  it("shows a discovered signature field as an inert placeholder", async () => {
+    installFields([
+      field({
+        fieldId: "0:9",
+        name: "customer_signature",
+        kind: "signature",
+        order: 0,
+        rect: { x: 72, y: 100, width: 240, height: 60 },
+        fontSize: null,
+      }),
+    ]);
+    renderLayer();
+
+    const marker = await screen.findByRole("img", {
+      name: "customer_signature：签名字段（仅创建签名字段结构，不执行证书签名）",
+    });
+    expect(marker.tagName).toBe("DIV");
+    expect(marker).toHaveClass("form-field--signature");
+    expect(
+      screen.getByText("仅创建签名字段结构，不执行证书签名"),
+    ).toBeInTheDocument();
+    // Discovery exposes no fill control and never calls the fill command.
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+    expect(invokeMock).not.toHaveBeenCalledWith(
+      "fill_form_field",
+      expect.anything(),
+    );
+  });
+
   it("updates created field properties from the panel", async () => {
     const updates: unknown[] = [];
     let stored: FormFieldView[] = [createdField];
@@ -946,7 +1363,14 @@ describe("FormLayer", () => {
     installFields([]);
     renderLayer({ canModifyContent: false });
 
-    for (const name of ["添加文本字段", "添加复选框", "添加单选按钮组"]) {
+    for (const name of [
+      "添加文本字段",
+      "添加复选框",
+      "添加单选按钮组",
+      "添加下拉框",
+      "添加列表框",
+      "添加签名字段",
+    ]) {
       const button = await screen.findByRole("button", { name });
       expect(button).toBeDisabled();
       expect(button).toHaveAttribute(

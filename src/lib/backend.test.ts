@@ -630,6 +630,92 @@ describe("backend command seam", () => {
     });
   });
 
+  it("maps choice and signature requests to the shared generic seam", async () => {
+    const history = {
+      canUndo: true,
+      canRedo: false,
+      revision: 1,
+      savedRevision: 0,
+      dirty: true,
+    };
+    const field = {
+      fieldId: "new:3",
+      name: "signature_1",
+      kind: "signature",
+      pageIndex: 0,
+      order: 0,
+      rect: { x: 72, y: 100, width: 240, height: 60 },
+      value: null,
+      checked: false,
+      options: [],
+      selectedIndex: null,
+      selectedIndices: [],
+      multiSelect: false,
+      required: false,
+      readOnly: false,
+      multiline: false,
+      radioGroup: null,
+      exportValue: null,
+    };
+    const createResult = { fieldId: "new:3", fields: [field], history };
+
+    const comboRequest = {
+      kind: "comboBox" as const,
+      rect: { x: 72, y: 100, width: 180, height: 24 },
+      name: null,
+      tooltip: null,
+      required: false,
+      options: ["中国", "美国"],
+      selectedIndex: 1,
+      fontSize: 12,
+    };
+    invokeMock.mockResolvedValue(createResult);
+    await expect(createFormField("doc-1", 0, comboRequest)).resolves.toEqual(
+      createResult,
+    );
+    expect(invokeMock).toHaveBeenLastCalledWith("create_form_field", {
+      documentId: "doc-1",
+      pageIndex: 0,
+      request: comboRequest,
+    });
+
+    const structureResult = { fields: [field], history };
+    const listRequest = {
+      kind: "listBox" as const,
+      name: "cities",
+      tooltip: null,
+      required: false,
+      options: ["北京", "上海"],
+      selectedIndices: [0, 1],
+      multiSelect: true,
+      fontSize: 10,
+    };
+    invokeMock.mockResolvedValue(structureResult);
+    await expect(
+      updateFormField("doc-1", "new:3", listRequest),
+    ).resolves.toEqual(structureResult);
+    expect(invokeMock).toHaveBeenLastCalledWith("update_form_field", {
+      documentId: "doc-1",
+      fieldId: "new:3",
+      request: listRequest,
+    });
+
+    const signatureRequest = {
+      kind: "signature" as const,
+      name: "sign_here",
+      tooltip: "请在此签名",
+    };
+    invokeMock.mockResolvedValue(structureResult);
+    await expect(
+      updateFormField("doc-1", "new:3", signatureRequest),
+    ).resolves.toEqual(structureResult);
+    expect(invokeMock).toHaveBeenLastCalledWith("update_form_field", {
+      documentId: "doc-1",
+      fieldId: "new:3",
+      request: signatureRequest,
+    });
+  });
+
   it("asks the save dialog for a PDF, preselecting the document name", async () => {
     vi.mocked(saveDialog).mockResolvedValue("/tmp/copy.pdf");
 

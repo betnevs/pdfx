@@ -123,12 +123,19 @@ fn discovers_every_existing_field_in_page_and_widget_order() {
     assert_eq!(country.options, ["China", "Japan", "Germany"]);
     assert_eq!(country.value.as_deref(), Some("Japan"));
     assert_eq!(country.selected_index, Some(1));
+    assert_eq!(country.selected_indices, [1]);
+    assert!(
+        !country.multi_select,
+        "the fixture list box is single-select"
+    );
 
     let department = field("department");
     assert_eq!(department.kind, FormFieldKind::ComboBox);
     assert_eq!(department.options, ["Engineering", "Design", "Sales"]);
     assert_eq!(department.value, None);
     assert_eq!(department.selected_index, None);
+    assert!(department.selected_indices.is_empty());
+    assert!(!department.multi_select);
 
     assert!(field("notes").multiline);
     assert!(field("agree").required);
