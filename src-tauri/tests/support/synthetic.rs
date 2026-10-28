@@ -1,0 +1,193 @@
+//! Minimal in-memory PDFs for tests that need page geometry the shared
+//! fixture corpus does not cover (offset CropBox, extra rotations, CJK fonts).
+//!
+//! The fixtures live in a unique temporary file for the duration of the test.
+
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+pub struct TempPdf {
+    path: PathBuf,
+}
+
+impl TempPdf {
+    pub fn path_string(&self) -> String {
+        self.path.to_string_lossy().into_owned()
+    }
+}
+
+impl Drop for TempPdf {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+fn write_pdf(name: &str, bytes: Vec<u8>) -> TempPdf {
+    let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!(
+        "pdfx-text-layer-{}-{unique}-{name}.pdf",
+        std::process::id()
+    ));
+    std::fs::write(&path, bytes).expect("write synthetic PDF");
+    TempPdf { path }
+}
+
+fn build_pdf(mut objects: Vec<(u32, Vec<u8>)>, root: u32) -> Vec<u8> {
+    objects.sort_by_key(|(number, _)| *number);
+    let last = objects.last().expect("at least one object").0;
+
+    let mut out = Vec::new();
+    out.extend_from_slice(b"%PDF-1.7\n%\xE2\xE3\xCF\xD3\n");
+    let mut offsets = vec![0usize; (last + 1) as usize];
+    for (number, body) in &objects {
+        offsets[*number as usize] = out.len();
+        out.extend_from_slice(format!("{number} 0 obj\n").as_bytes());
+        out.extend_from_slice(body);
+        out.extend_from_slice(b"\nendobj\n");
+    }
+
+    let xref_offset = out.len();
+    out.extend_from_slice(format!("xref\n0 {}\n", last + 1).as_bytes());
+    out.extend_from_slice(b"0000000000 65535 f \n");
+    for number in 1..=last {
+        out.extend_from_slice(format!("{:010} 00000 n \n", offsets[number as usize]).as_bytes());
+    }
+    out.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root {root} 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n",
+            last + 1
+        )
+        .as_bytes(),
+    );
+    out
+}
+
+fn stream(extra: &str, data: &[u8]) -> Vec<u8> {
+    let mut body = format!("<< /Length {} {extra} >>\nstream\n", data.len()).into_bytes();
+    body.extend_from_slice(data);
+    body.extend_from_slice(b"\nendstream");
+    body
+}
+
+const HELVETICA: &[u8] =
+    b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>";
+
+/// One 612x792 page whose CropBox is [100 100 500 700], with Helvetica 12pt
+/// text drawn at user-space (150, 600). The rendered page is 400x600 points
+/// and the text starts 50 points from the left and 100 points from the top of
+/// the *crop* box.
+pub fn crop_offset_pdf() -> TempPdf {
+    let content = b"BT /F1 12 Tf 150 600 Td (Crop offset) Tj ET\n".to_vec();
+    let objects = vec![
+        (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+        (2, b"<< /Type /Pages /Kids [4 0 R] /Count 1 >>".to_vec()),
+        (3, HELVETICA.to_vec()),
+        (
+            4,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /CropBox [100 100 500 700] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R >>".to_vec(),
+        ),
+        (5, stream("", &content)),
+    ];
+    write_pdf("crop-offset", build_pdf(objects, 1))
+}
+
+/// Three 612x792 pages sharing a [50 80 450 680] CropBox, rotated 90, 180 and
+/// 270 degrees. Each page draws Helvetica 12pt text at user-space (100, 600).
+pub fn rotated_crop_pdf() -> TempPdf {
+    let mut objects: Vec<(u32, Vec<u8>)> = vec![
+        (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+        (3, HELVETICA.to_vec()),
+    ];
+    let mut kids = Vec::new();
+    let mut next = 4;
+    for rotation in [90u16, 180, 270] {
+        let page_number = next;
+        let content_number = next + 1;
+        next += 2;
+        kids.push(format!("{page_number} 0 R"));
+        objects.push((
+            page_number,
+            format!(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /CropBox [50 80 450 680] /Rotate {rotation} /Resources << /Font << /F1 3 0 R >> >> /Contents {content_number} 0 R >>"
+            )
+            .into_bytes(),
+        ));
+        let content = format!("BT /F1 12 Tf 100 600 Td (Rotate {rotation}) Tj ET\n");
+        objects.push((content_number, stream("", content.as_bytes())));
+    }
+    objects.push((
+        2,
+        format!("<< /Type /Pages /Kids [{}] /Count 3 >>", kids.join(" ")).into_bytes(),
+    ));
+    write_pdf("rotated-crop", build_pdf(objects, 1))
+}
+
+fn utf16be_hex(text: &str) -> String {
+    text.encode_utf16()
+        .map(|unit| format!("{unit:04X}"))
+        .collect()
+}
+
+/// A 612x792 page with a non-embedded Type0/CIDFontType2 font using the
+/// predefined UniGB-UCS2-H CMap, drawing mixed Chinese and Latin text at
+/// Helvetica-compatible 18pt.
+pub fn cjk_mixed_pdf() -> TempPdf {
+    let text = "中文 PDF 混合";
+    let content = format!("BT /F1 18 Tf 72 720 Td <{}> Tj ET\n", utf16be_hex(text)).into_bytes();
+    let objects = vec![
+        (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+        (2, b"<< /Type /Pages /Kids [6 0 R] /Count 1 >>".to_vec()),
+        (
+            3,
+            b"<< /Type /Font /Subtype /Type0 /BaseFont /SimSun /Encoding /UniGB-UCS2-H /DescendantFonts [4 0 R] >>".to_vec(),
+        ),
+        (
+            4,
+            b"<< /Type /Font /Subtype /CIDFontType2 /BaseFont /SimSun /CIDSystemInfo << /Registry (Adobe) /Ordering (GB1) /Supplement 2 >> /FontDescriptor 5 0 R /DW 1000 >>".to_vec(),
+        ),
+        (
+            5,
+            b"<< /Type /FontDescriptor /FontName /SimSun /Flags 4 /FontBBox [-25 -254 1000 880] /ItalicAngle 0 /Ascent 880 /Descent -120 /CapHeight 880 /StemV 80 >>".to_vec(),
+        ),
+        (
+            6,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 7 0 R >>".to_vec(),
+        ),
+        (7, stream("", &content)),
+    ];
+    write_pdf("cjk-mixed", build_pdf(objects, 1))
+}
+
+/// A 612x792 page whose Latin character code is mapped by ToUnicode to
+/// U+1F600, a supplementary-plane character stored as a UTF-16 surrogate pair.
+pub fn surrogate_pair_pdf() -> TempPdf {
+    let to_unicode = b"/CIDInit /ProcSet findresource begin\n\
+12 dict begin\n\
+begincmap\n\
+/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n\
+/CMapName /Adobe-Identity-UCS def\n\
+/CMapType 2 def\n\
+1 begincodespacerange\n<00> <FF>\nendcodespacerange\n\
+1 beginbfchar\n<41> <D83DDE00>\nendbfchar\n\
+endcmap\n\
+CMapName currentdict /CMap defineresource pop\n\
+end\nend\n";
+    let content = b"BT /F1 18 Tf 72 720 Td (A) Tj ET\n".to_vec();
+    let objects = vec![
+        (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+        (2, b"<< /Type /Pages /Kids [5 0 R] /Count 1 >>".to_vec()),
+        (
+            3,
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding /ToUnicode 4 0 R >>".to_vec(),
+        ),
+        (4, stream("", to_unicode)),
+        (
+            5,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 6 0 R >>".to_vec(),
+        ),
+        (6, stream("", &content)),
+    ];
+    write_pdf("surrogate-pair", build_pdf(objects, 1))
+}

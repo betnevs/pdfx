@@ -36,6 +36,7 @@ pub fn run() {
             commands::open_document_window,
             commands::render_page,
             commands::extract_text,
+            commands::extract_text_layer,
             commands::close_document,
         ])
         .setup(|app| {

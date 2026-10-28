@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
+import { PageTextLayer } from "./components/PageTextLayer";
 import {
   choosePdfFile,
   closeDocument,
@@ -367,7 +368,14 @@ export function App() {
               </button>
             </div>
             <div className="page-stage">
-              <PageCanvas page={open.page} />
+              <div className="page-surface">
+                <PageCanvas page={open.page} />
+                <PageTextLayer
+                  key={`${open.document.documentId}:${open.page.pageIndex}`}
+                  documentId={open.document.documentId}
+                  pageIndex={open.page.pageIndex}
+                />
+              </div>
             </div>
           </section>
         )}
