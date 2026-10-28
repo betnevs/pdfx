@@ -1333,7 +1333,7 @@ pub struct DiagnosticsExportView {
     pub log_files: u32,
 }
 
-fn settings_store(app: &AppHandle) -> Result<SettingsStore, CommandError> {
+pub(crate) fn settings_store(app: &AppHandle) -> Result<SettingsStore, CommandError> {
     let directory = app.path().app_config_dir().map_err(|error| {
         CommandError::new(
             CommandErrorCode::Internal,

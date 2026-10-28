@@ -177,6 +177,7 @@ function installDocumentBackend(overrides: Record<string, CommandHandler> = {}) 
     extract_text_layer: () => textLayerView,
     page_images: () => [],
     edit_history: () => idleHistory,
+    list_annotations: () => [],
     close_document: () => undefined,
     ...overrides,
   });
@@ -375,6 +376,70 @@ describe("PDFX workspace", () => {
     // Wait for the opened document's effects so the save listener is
     // registered inside this test rather than after it tears its mocks down.
     expect(await screen.findByText("report.pdf")).toBeInTheDocument();
+  });
+
+  it("jumps to a listed annotation's page, outlines it and deletes it", async () => {
+    let annotations = [
+      {
+        name: "pdfx-ann-1",
+        pageIndex: 2,
+        kind: "highlight" as const,
+        author: "测试作者",
+        createdAt: "D:20261028123456Z",
+        color: "#ffd400",
+        opacity: 50,
+        rects: [{ x: 100, y: 100, width: 12, height: 20 }],
+      },
+    ];
+    installDocumentBackend({
+      list_annotations: () => annotations,
+      delete_annotation: () => {
+        annotations = [];
+        return {
+          annotation: null,
+          pageIndex: 2,
+          history: {
+            canUndo: true,
+            canRedo: false,
+            revision: 1,
+            savedRevision: 0,
+            dirty: true,
+          },
+        };
+      },
+    });
+    openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("report.pdf");
+
+    const item = await screen.findByRole("button", {
+      name: "高亮，第 3 页，测试作者",
+    });
+    expect(screen.getByRole("heading", { name: "第 3 页" })).toBeInTheDocument();
+
+    await user.click(item);
+    await waitFor(() => {
+      expect(renderPageCalls().at(-1)).toMatchObject({ pageIndex: 2 });
+    });
+    expect(
+      await screen.findByTestId("selected-annotation-outline"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("2026-10-28 12:34 UTC")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "删除注释" }));
+
+    await waitFor(() => {
+      expect(commandCalls("delete_annotation")).toEqual([
+        ["delete_annotation", { documentId: "doc-1", name: "pdfx-ann-1" }],
+      ]);
+    });
+    expect(await screen.findByText("还没有注释")).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("selected-annotation-outline"),
+    ).not.toBeInTheDocument();
   });
 
   it("opens a second file in its own window instead of replacing the first document", async () => {

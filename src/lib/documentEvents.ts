@@ -46,7 +46,14 @@ export function onDocumentChanged(
       typeof detail.documentId === "string" &&
       typeof detail.pageIndex === "number"
     ) {
-      handler({ documentId: detail.documentId, pageIndex: detail.pageIndex });
+      const message: DocumentChangedDetail = {
+        documentId: detail.documentId,
+        pageIndex: detail.pageIndex,
+      };
+      if (detail.source === "text" || detail.source === "image") {
+        message.source = detail.source;
+      }
+      handler(message);
     }
   };
   window.addEventListener(DOCUMENT_CHANGED_EVENT, listener);

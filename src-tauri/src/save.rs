@@ -12,6 +12,14 @@
 //!    Only one engine writes a revision, and lopdf always appends to PDFium's
 //!    output rather than to the source.
 //!
+//! Font subsets follow the same rule. CJK text loads a `subsetter`-produced
+//! CIDFontType2 into the live document with `FPDFText_LoadCidType2Font`, so
+//! PDFium writes the font program, `/W`, ToUnicode and CIDToGIDMap into its
+//! incremental revision. Fonts therefore need no `ObjectEdit` and cannot end
+//! up in a second save path. The edit session caches the font token per
+//! character set, so repeat saves re-emit the same subset instead of embedding
+//! a duplicate (see `src-tauri/tests/cjk_fonts.rs`).
+//!
 //! The output is written to a temp file in the target directory, fsynced and
 //! renamed into place; when an Output Document already exists it is first
 //! copied to a backup. A failure at any step leaves both the Source Document

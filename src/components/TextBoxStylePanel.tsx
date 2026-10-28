@@ -18,10 +18,11 @@ export interface TextBoxStylePanelProps {
 /**
  * Whole-box style controls for a selected Text Box.
  *
- * Only fonts advertised by the backend's registry are offered. Until the
- * subset-embedding pipeline lands that registry contains the PDF base-14
- * Latin families, so the note explains the limitation instead of pretending
- * arbitrary TrueType fonts can be embedded.
+ * Only fonts advertised by the backend's registry are offered: the PDF base-14
+ * Latin families and the bundled Noto Sans SC CJK family. Existing text keeps
+ * its original embedded font when ttf-parser proves glyph coverage; otherwise
+ * the backend falls back to the bundled font and reports it, which the canvas
+ * surfaces as a notice.
  */
 export function TextBoxStylePanel({
   target,
@@ -157,7 +158,9 @@ export function TextBoxStylePanel({
       </div>
 
       <p className="text-box-font-note">
-        仅支持 PDF 基础字体（Helvetica、Times、Courier，Latin 字符）。更多字体需等待字体嵌入功能完成。
+        支持 PDF 基础字体（Helvetica、Times、Courier，Latin 字符）和内置中文字体
+        Noto Sans SC（中文与 Latin 混排）。编辑已有文字时优先保留原字体；原字体缺少所需字形时自动改用
+        Noto Sans SC，并在画布上提示。
       </p>
 
       <button

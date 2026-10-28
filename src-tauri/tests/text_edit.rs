@@ -1086,7 +1086,7 @@ fn non_standard_fonts_fall_back_with_a_documented_reason() {
 }
 
 #[test]
-fn unsupported_scripts_are_rejected_instead_of_emitting_missing_glyphs() {
+fn characters_the_bundled_font_lacks_are_rejected_without_mutating_the_document() {
     let pdf = synthetic::single_line_pdf();
     let document_id = open_synthetic(&pdf);
     let before = extract_text_layer(document_id.clone(), 0).expect("text layer");
@@ -1098,17 +1098,20 @@ fn unsupported_scripts_are_rejected_instead_of_emitting_missing_glyphs() {
     )
     .expect("target");
 
+    // Latin, Chinese and other scripts covered by Noto Sans SC now succeed;
+    // an emoji has no glyph in the bundled font and must still be refused
+    // rather than rendered as a missing-glyph box.
     let error = apply_text_edit(
         document_id.clone(),
         0,
         target.box_id,
-        "中文 replacement".to_owned(),
+        "😀 replacement".to_owned(),
     )
-    .expect_err("CJK editing is not supported yet");
+    .expect_err("a character without a bundled glyph must be rejected");
     assert_eq!(error.code, CommandErrorCode::UnsupportedFont);
     assert!(
-        error.message.contains("CJK"),
-        "the error must record the limitation: {}",
+        error.message.contains("Noto Sans SC") && error.message.contains("no glyphs"),
+        "the error must name the bundled font and the missing coverage: {}",
         error.message
     );
 

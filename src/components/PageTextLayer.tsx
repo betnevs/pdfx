@@ -12,6 +12,7 @@ import {
   applyTextBoxStyle,
   applyTextEdit,
   createTextBox,
+  createTextMarkupAnnotation,
   deleteTextBox,
   editHistory,
   extractTextLayer,
@@ -22,12 +23,14 @@ import {
   toCommandError,
   transformTextBox,
   undoTextEdit,
+  type AnnotationView,
   type CommandError,
   type EditHistoryView,
   type TextBoxFontView,
   type TextBoxStyleView,
   type TextBoxTargetView,
   type TextLayerView,
+  type TextMarkupKind,
 } from "../lib/backend";
 import { notifyDocumentChanged, onDocumentChanged } from "../lib/documentEvents";
 import {
@@ -99,12 +102,19 @@ type BoxInteraction =
 
 const READ_ONLY_REASON = "此文档不允许编辑内容";
 const SCANNED_REASON = "此页没有可编辑文字";
+const ANNOTATION_PERMISSION_REASON = "此文档不允许添加注释";
+const DEFAULT_MARKUP_COLOR = "#ffd400";
+const DEFAULT_MARKUP_OPACITY = 50;
 
 export interface PageTextLayerProps {
   documentId: string;
   pageIndex: number;
   /** Permission Restrictions forbid changing document content. */
   readOnly?: boolean;
+  /** The PDF security handler allows adding and modifying annotations. */
+  canAnnotate?: boolean;
+  /** Annotation selected in the document-wide list, outlined on its page. */
+  selectedAnnotation?: AnnotationView | null;
   /** Page render scale, used to size the inline editor text. */
   scale?: number;
 }
@@ -179,7 +189,7 @@ function TextEditToolbar({
       <button
         type="button"
         disabled={!history?.canUndo || busy}
-        title={history?.canUndo ? "撤销上一步文字编辑" : "没有可撤销的操作"}
+        title={history?.canUndo ? "撤销上一步编辑" : "没有可撤销的操作"}
         onClick={onUndo}
       >
         撤销
@@ -187,7 +197,7 @@ function TextEditToolbar({
       <button
         type="button"
         disabled={!history?.canRedo || busy}
-        title={history?.canRedo ? "重做上一步文字编辑" : "没有可重做的操作"}
+        title={history?.canRedo ? "重做上一步编辑" : "没有可重做的操作"}
         onClick={onRedo}
       >
         重做
@@ -224,11 +234,16 @@ export function PageTextLayer({
   documentId,
   pageIndex,
   readOnly = false,
+  canAnnotate = false,
+  selectedAnnotation = null,
   scale = 1,
 }: PageTextLayerProps) {
   const [state, setState] = useState<LayerState>({ status: "loading" });
   const [selection, setSelection] = useState<TextRange | null>(null);
   const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "failed">("idle");
+  const [markupColor, setMarkupColor] = useState(DEFAULT_MARKUP_COLOR);
+  const [markupOpacity, setMarkupOpacity] = useState(DEFAULT_MARKUP_OPACITY);
+  const [markupBusy, setMarkupBusy] = useState(false);
   const [editMode, setEditMode] = useState(false);
   const [boxMode, setBoxMode] = useState(false);
   const [boxes, setBoxes] = useState<TextBoxTargetView[]>([]);
@@ -417,7 +432,7 @@ export function PageTextLayer({
   }
 
   const editingBusy = editor?.status === "editing" && editor.busy;
-  const operationBusy = Boolean(editingBusy) || boxBusy;
+  const operationBusy = Boolean(editingBusy) || boxBusy || markupBusy;
   const toolbarFor = (canEdit: boolean) => (
     <TextEditToolbar
       canEdit={canEdit}
@@ -1117,6 +1132,37 @@ export function PageTextLayer({
     }
   };
 
+  const createMarkup = async (kind: TextMarkupKind): Promise<void> => {
+    if (!selection || markupBusy || readOnly || !canAnnotate) {
+      return;
+    }
+    const rects = selectionRects(textStructure, selection);
+    if (rects.length === 0) {
+      return;
+    }
+    setMarkupBusy(true);
+    setNotice(null);
+    try {
+      const result = await createTextMarkupAnnotation(documentId, {
+        pageIndex,
+        kind,
+        color: markupColor,
+        opacity: markupOpacity,
+        rects,
+      });
+      setHistory(result.history);
+      // The native annotation is now part of the page bitmap; clear the
+      // selection so a second click cannot create a duplicate by accident.
+      setSelection(null);
+      setCopyStatus("idle");
+      notifyDocumentChanged({ documentId, pageIndex });
+    } catch (error) {
+      setNotice({ kind: "error", text: toCommandError(error).message });
+    } finally {
+      setMarkupBusy(false);
+    }
+  };
+
   const handleKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
     if (event.key === "Escape") {
       if (editor) {
@@ -1241,6 +1287,23 @@ export function PageTextLayer({
           }}
         />
       ))}
+
+      {selectedAnnotation?.pageIndex === pageIndex &&
+        selectedAnnotation.rects.map((rect, index) => (
+          <div
+            key={`selected:${index}:${rect.x}:${rect.y}`}
+            className="annotation-selection-outline"
+            data-testid="selected-annotation-outline"
+            aria-hidden="true"
+            style={{
+              left: `${(rect.x / textLayer.pageWidth) * 100}%`,
+              top: `${(rect.y / textLayer.pageHeight) * 100}%`,
+              width: `${(rect.width / textLayer.pageWidth) * 100}%`,
+              height: `${(rect.height / textLayer.pageHeight) * 100}%`,
+              borderColor: selectedAnnotation.color,
+            }}
+          />
+        ))}
 
       {boxMode && (
         <div className="text-box-overlay">
@@ -1409,6 +1472,62 @@ export function PageTextLayer({
           {copyStatus !== "idle" && (
             <span role="status" className="text-copy-status">
               {copyStatus === "copied" ? "已复制" : "复制失败"}
+            </span>
+          )}
+          {canAnnotate && !readOnly ? (
+            <span className="text-markup-controls">
+              <span className="toolbar-divider" aria-hidden="true" />
+              <label className="text-markup-control">
+                颜色
+                <input
+                  type="color"
+                  aria-label="注释颜色"
+                  value={markupColor}
+                  disabled={markupBusy}
+                  onChange={(event) => setMarkupColor(event.target.value)}
+                />
+              </label>
+              <label className="text-markup-control">
+                透明度
+                <input
+                  type="range"
+                  aria-label="注释透明度"
+                  min={0}
+                  max={100}
+                  step={1}
+                  value={markupOpacity}
+                  disabled={markupBusy}
+                  onChange={(event) =>
+                    setMarkupOpacity(Number.parseInt(event.target.value, 10))
+                  }
+                />
+                <span>{markupOpacity}%</span>
+              </label>
+              <button
+                type="button"
+                disabled={markupBusy}
+                onClick={() => void createMarkup("highlight")}
+              >
+                高亮
+              </button>
+              <button
+                type="button"
+                disabled={markupBusy}
+                onClick={() => void createMarkup("underline")}
+              >
+                下划线
+              </button>
+              <button
+                type="button"
+                disabled={markupBusy}
+                onClick={() => void createMarkup("strikeout")}
+              >
+                删除线
+              </button>
+            </span>
+          ) : (
+            <span className="text-annotation-reason">
+              {ANNOTATION_PERMISSION_REASON}
             </span>
           )}
         </div>
