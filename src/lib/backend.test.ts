@@ -420,6 +420,18 @@ describe("backend command seam", () => {
     }
   });
 
+  it("recognizes the page export target error codes", () => {
+    for (const code of [
+      "export_target_is_source",
+      "export_target_is_output",
+    ] as const) {
+      expect(toCommandError({ code, message: "detail" })).toEqual({
+        code,
+        message: "detail",
+      });
+    }
+  });
+
   it("recognizes the form error codes", () => {
     for (const code of [
       "form_field_not_found",

@@ -11,6 +11,7 @@ pub mod pdfium_adapter;
 pub mod print_export;
 pub mod save;
 pub mod settings;
+mod target_path;
 pub mod text_edit;
 pub mod updater;
 

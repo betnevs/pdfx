@@ -277,7 +277,7 @@ fn resolve_target(
 /// Refuses a target that resolves to the Source Document. The Source Document
 /// is never modified, including through a symlink that points at it.
 fn ensure_target_is_not_source(source: &Path, target: &Path) -> Result<(), CommandError> {
-    if same_file(source, target) {
+    if crate::target_path::same_file(source, target) {
         Err(CommandError::new(
             CommandErrorCode::SaveTargetIsSource,
             format!(
@@ -287,36 +287,6 @@ fn ensure_target_is_not_source(source: &Path, target: &Path) -> Result<(), Comma
         ))
     } else {
         Ok(())
-    }
-}
-
-fn same_file(left: &Path, right: &Path) -> bool {
-    // Canonical paths resolve symlinks and relative components. For a target
-    // that does not exist yet, resolve its parent so `../` cannot hide it.
-    let normalize = |path: &Path| -> Option<String> {
-        let resolved = match fs::canonicalize(path) {
-            Ok(resolved) => resolved,
-            Err(_) => {
-                let parent = path
-                    .parent()
-                    .filter(|parent| !parent.as_os_str().is_empty())
-                    .unwrap_or_else(|| Path::new("."));
-                let name = path.file_name()?;
-                fs::canonicalize(parent).ok()?.join(name)
-            }
-        };
-        let text = resolved.to_string_lossy().into_owned();
-        // macOS and Windows filesystems are case-insensitive by default.
-        Some(if cfg!(any(target_os = "macos", target_os = "windows")) {
-            text.to_lowercase()
-        } else {
-            text
-        })
-    };
-
-    match (normalize(left), normalize(right)) {
-        (Some(left), Some(right)) => left == right,
-        _ => false,
     }
 }
 
