@@ -387,6 +387,105 @@ fn an_internal_page_link_saves_as_a_goto_destination_and_reopens() {
 }
 
 #[test]
+fn page_links_follow_logical_page_numbers_after_reordering() {
+    let dir = TempDir::new("links-page-reorder");
+    let pdf = synthetic::page_operations_pdf();
+    let document_id = open_synthetic(&pdf);
+
+    // Move the first page to the last slot so logical and physical indexes
+    // differ. Logical page 0 is then the physical page carrying "Page two"
+    // (object 6), and logical page 3 is the original page one (object 4).
+    pdfx_lib::page_ops::move_page(document_id.clone(), 0, 2).expect("move page");
+    let layer = extract_text_layer(document_id.clone(), 0).expect("text layer");
+    assert!(
+        layer.text.contains("Page two"),
+        "logical page 0 is the moved-to-slot page: {}",
+        layer.text
+    );
+    let rect = selection_rect(&layer, "Page");
+
+    let created = create_link(
+        document_id.clone(),
+        CreateLinkRequest {
+            page_index: 0,
+            rects: vec![rect],
+            target: LinkTarget::Page { page_index: 1 },
+        },
+    )
+    .expect("create Page link")
+    .link
+    .expect("created link");
+    assert_eq!(created.page_index, 0, "the host page is reported logically");
+    assert_eq!(created.target, Some(LinkTarget::Page { page_index: 1 }));
+    let created_name = created.name.clone().expect("created link name");
+
+    // Retargeting speaks logical page numbers too: slot 2 currently shows the
+    // original page one.
+    let updated = pdfx_lib::links::update_link_target(
+        document_id.clone(),
+        UpdateLinkTargetRequest {
+            link_id: created.id,
+            target: LinkTarget::Page { page_index: 2 },
+        },
+    )
+    .expect("retarget the link")
+    .link
+    .expect("updated link");
+    assert_eq!(updated.page_index, 0);
+    assert_eq!(updated.target, Some(LinkTarget::Page { page_index: 2 }));
+
+    let listed = pdfx_lib::links::list_links(document_id.clone()).expect("list links");
+    let ours = listed
+        .iter()
+        .find(|link| link.name.as_deref() == Some(created_name.as_str()))
+        .expect("the created link is listed");
+    assert_eq!(ours.page_index, 0);
+    assert_eq!(ours.target, Some(LinkTarget::Page { page_index: 2 }));
+
+    let output = dir.path().join("reordered-page-link.pdf");
+    save_as(&document_id, &output);
+
+    // The saved page tree is the logical arrangement: the link hangs off the
+    // first saved page (object 6) and its destination names the third saved
+    // page, which is the old page-one object (4).
+    let parsed = lopdf::Document::load(&output).expect("lopdf parses the output");
+    let target_page = *parsed.get_pages().get(&3).expect("saved page 3 object");
+    let links = link_annotations(&parsed, 1);
+    let link = links
+        .iter()
+        .find(|link| text_of(link.get(b"NM").expect("/NM name")) == created_name)
+        .expect("saved link");
+    let action = link
+        .get(b"A")
+        .expect("/A action")
+        .as_dict()
+        .expect("action dictionary");
+    assert_eq!(name_of(action, b"S"), "GoTo");
+    let destination = action
+        .get(b"D")
+        .expect("/D destination")
+        .as_array()
+        .expect("/D array");
+    assert_eq!(
+        destination[0].as_reference().expect("page reference"),
+        target_page,
+        "the destination follows the logical target page after reordering"
+    );
+
+    close_document(document_id).expect("close source");
+    let reopened = open_document(output.to_string_lossy().into_owned(), None)
+        .expect("reopen the saved output");
+    let listed = pdfx_lib::links::list_links(reopened.document_id.clone()).expect("list links");
+    let ours = listed
+        .iter()
+        .find(|link| link.name.as_deref() == Some(created_name.as_str()))
+        .expect("the reordered link reopens");
+    assert_eq!(ours.page_index, 0);
+    assert_eq!(ours.target, Some(LinkTarget::Page { page_index: 2 }));
+    close_document(reopened.document_id).expect("close reopened");
+}
+
+#[test]
 fn a_link_target_edit_saves_and_is_undoable_and_redoable() {
     let dir = TempDir::new("links-edit");
     let pdf = synthetic::single_line_pdf();

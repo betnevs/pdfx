@@ -29,7 +29,9 @@ use crate::annotations::{
     bounds_of_quads, display_rect, display_rects, ensure_annotation_editable, find_target,
     map_adapter_error, next_annotation_name, page_geometry, quad_for_rect, TextMarkupRect,
 };
-use crate::commands::{with_open_document, CommandError, CommandErrorCode, DisplayGeometry};
+use crate::commands::{
+    with_open_document, CommandError, CommandErrorCode, DisplayGeometry, OpenDocument,
+};
 use crate::pdfium_adapter::{
     annotation_author, annotation_bounds, annotation_contents, annotation_creation_date,
     annotation_name, annotation_quads, annotation_string_value, annotation_type, append_link_quads,
@@ -366,6 +368,31 @@ fn read_link_view(
     })
 }
 
+/// Maps the physical page indexes a link view carries to logical page slots.
+///
+/// Links address Pdfium pages physically, like annotation snapshots, so a
+/// target follows its page object through page reordering. The overlay and the
+/// target label speak the logical page numbers the user sees. A target on a
+/// page that was deleted from the arrangement falls back to the first slot,
+/// matching how the rest of the annotation layer reports orphaned pages.
+fn logical_link_view(mut view: LinkView, entry: &OpenDocument) -> LinkView {
+    view.page_index = entry.logical_page(view.page_index).unwrap_or(0);
+    if let Some(LinkTarget::Page { page_index }) = &mut view.target {
+        *page_index = entry.logical_page(*page_index).unwrap_or(0);
+    }
+    view
+}
+
+/// Maps a validated logical target page to the physical page it lives on.
+fn physical_target(entry: &OpenDocument, target: LinkTarget) -> Result<LinkTarget, CommandError> {
+    match target {
+        LinkTarget::Url { url } => Ok(LinkTarget::Url { url }),
+        LinkTarget::Page { page_index } => Ok(LinkTarget::Page {
+            page_index: entry.physical_page(page_index)?,
+        }),
+    }
+}
+
 /// Captures everything an undo step must restore for one link.
 fn capture_link_snapshot(
     document: &PdfDocument<'static>,
@@ -544,31 +571,33 @@ fn ensure_link_supported(
 pub fn list_links(document_id: String) -> Result<Vec<LinkView>, CommandError> {
     with_open_document(&document_id, |entry| {
         let document = &entry.document;
-        let page_count = document.pages().len();
+        let logical_count = entry.logical_page_count();
         let mut views = Vec::new();
-        for page_index in 0..page_count {
+        for logical_index in 0..logical_count {
+            let physical_index = entry.physical_page(logical_index)?;
             let count = document
                 .pages()
-                .get(page_index)
+                .get(physical_index as i32)
                 .map_err(|error| {
-                    internal_error(format!("could not load page {page_index}: {error:?}"))
+                    internal_error(format!("could not load page {physical_index}: {error:?}"))
                 })?
                 .annotations()
                 .len();
             if count == 0 {
                 continue;
             }
-            let geometry = page_geometry(document, page_index as u32)?;
+            let geometry = page_geometry(document, physical_index)?;
             for index in 0..count {
-                let target = AnnotationRef::new(page_index, index);
+                let target = AnnotationRef::new(physical_index as i32, index);
                 let Ok(annotation_kind) = annotation_type(document, target) else {
                     continue;
                 };
                 if annotation_kind != PdfPageAnnotationType::Link {
                     continue;
                 }
-                let mut view = read_link_view(document, target, &geometry)?;
-                view.id = link_id(page_index as u32, index);
+                let view = read_link_view(document, target, &geometry)?;
+                let mut view = logical_link_view(view, entry);
+                view.id = link_id(physical_index, index);
                 views.push(view);
             }
         }
@@ -585,10 +614,12 @@ pub fn create_link(
     validate_rects(&request.rects)?;
     with_open_document(&document_id, |entry| {
         ensure_annotation_editable(&entry.document)?;
-        let page_count = entry.document.pages().len().max(0) as usize;
+        let page_count = entry.logical_page_count() as usize;
         validate_page_index(request.page_index, page_count)?;
         let target = normalize_target(&request.target, page_count)?;
-        let geometry = page_geometry(&entry.document, request.page_index)?;
+        let physical_page = entry.physical_page(request.page_index)?;
+        let target = physical_target(entry, target)?;
+        let geometry = page_geometry(&entry.document, physical_page)?;
         let quads: Vec<[f32; 8]> = request
             .rects
             .iter()
@@ -600,9 +631,8 @@ pub fn create_link(
             LinkTarget::Url { url } => url.clone(),
             LinkTarget::Page { page_index } => placeholder_uri(*page_index),
         };
-        let created =
-            create_link_annotation(&entry.document, request.page_index as i32, &uri, bounds)
-                .map_err(map_adapter_error)?;
+        let created = create_link_annotation(&entry.document, physical_page as i32, &uri, bounds)
+            .map_err(map_adapter_error)?;
         set_annotation_name(&entry.document, created, &name).map_err(map_adapter_error)?;
         if let LinkTarget::Page { page_index } = target {
             set_annotation_string_value(
@@ -615,11 +645,11 @@ pub fn create_link(
         }
         append_link_quads(&entry.document, created, &quads).map_err(map_adapter_error)?;
 
-        let snapshot =
-            capture_link_snapshot(&entry.document, request.page_index, created, &geometry)?;
+        let snapshot = capture_link_snapshot(&entry.document, physical_page, created, &geometry)?;
         let name = snapshot.name.clone();
-        let view = snapshot.view(link_id(request.page_index, created.index));
-        let history = push_link_action(entry, request.page_index, name, None, Some(snapshot));
+        let view = snapshot.view(link_id(physical_page, created.index));
+        let view = logical_link_view(view, entry);
+        let history = push_link_action(entry, physical_page, name, None, Some(snapshot));
         Ok(LinkMutationView {
             link: Some(view),
             page_index: request.page_index,
@@ -640,25 +670,27 @@ pub fn update_link_target(
 ) -> Result<LinkMutationView, CommandError> {
     with_open_document(&document_id, |entry| {
         ensure_annotation_editable(&entry.document)?;
-        let page_count = entry.document.pages().len().max(0) as usize;
+        let page_count = entry.logical_page_count() as usize;
         let target = normalize_target(&request.target, page_count)?;
-        let (page_index, found) = locate_link(&entry.document, &request.link_id)?;
+        let target = physical_target(entry, target)?;
+        let (physical_page, found) = locate_link(&entry.document, &request.link_id)?;
         ensure_link_supported(&entry.document, found)?;
 
         let name = ensure_link_name(&entry.document, found)?;
-        let geometry = page_geometry(&entry.document, page_index)?;
-        let before = capture_link_snapshot(&entry.document, page_index, found, &geometry)?;
+        let geometry = page_geometry(&entry.document, physical_page)?;
+        let before = capture_link_snapshot(&entry.document, physical_page, found, &geometry)?;
         let mut after = before.clone();
         after.target = target;
         restore_link_snapshot(&entry.document, &after)?;
 
         let restored = find_target(&entry.document, &name)?
             .ok_or_else(|| internal_error("the edited link disappeared"))?;
-        let view = after.view(link_id(page_index, restored.index));
-        let history = push_link_action(entry, page_index, name, Some(before), Some(after));
+        let view = after.view(link_id(physical_page, restored.index));
+        let view = logical_link_view(view, entry);
+        let history = push_link_action(entry, physical_page, name, Some(before), Some(after));
         Ok(LinkMutationView {
             link: Some(view),
-            page_index,
+            page_index: entry.logical_page(physical_page).unwrap_or(0),
             history,
         })
     })
@@ -669,17 +701,17 @@ pub fn update_link_target(
 pub fn delete_link(document_id: String, link_id: String) -> Result<LinkMutationView, CommandError> {
     with_open_document(&document_id, |entry| {
         ensure_annotation_editable(&entry.document)?;
-        let (page_index, found) = locate_link(&entry.document, &link_id)?;
+        let (physical_page, found) = locate_link(&entry.document, &link_id)?;
         ensure_link_supported(&entry.document, found)?;
 
         let name = ensure_link_name(&entry.document, found)?;
-        let geometry = page_geometry(&entry.document, page_index)?;
-        let before = capture_link_snapshot(&entry.document, page_index, found, &geometry)?;
+        let geometry = page_geometry(&entry.document, physical_page)?;
+        let before = capture_link_snapshot(&entry.document, physical_page, found, &geometry)?;
         remove_link_named(&entry.document, &name)?;
-        let history = push_link_action(entry, page_index, name, Some(before), None);
+        let history = push_link_action(entry, physical_page, name, Some(before), None);
         Ok(LinkMutationView {
             link: None,
-            page_index,
+            page_index: entry.logical_page(physical_page).unwrap_or(0),
             history,
         })
     })

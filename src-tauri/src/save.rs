@@ -883,6 +883,11 @@ fn apply_dictionary_edit(dictionary: &mut lopdf::Dictionary, edit: &AnnotationDi
             if let Some(page_id) = target_page {
                 dictionary.set(b"A".to_vec(), page_goto_action(*page_id));
                 dictionary.remove(b"Dest");
+                // The private page index is meaningful only inside the live
+                // Pdfium session, where page reordering can differ from the
+                // saved tree. Removing it makes a reopened output resolve the
+                // real destination instead of a stale session index.
+                dictionary.remove(crate::links::LINK_TARGET_KEY.as_bytes());
             }
         }
     }
