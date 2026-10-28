@@ -19,7 +19,11 @@ use pdfx_lib::commands::{
 };
 use pdfx_lib::recovery::maybe_snapshot_at;
 use pdfx_lib::save::{save_document_with_progress, SaveDocumentRequest, SaveKind, SaveResultView};
+use pdfx_lib::signature::SignatureSummary;
 use pdfx_lib::text_edit::{apply_text_edit, create_text_box, edit_history, CreateTextBoxRequest};
+use support::synthetic::{
+    cyclic_signature_fields_pdf, deeply_nested_signature_fields_pdf, inherited_parent_signature_pdf,
+};
 
 const SIGNER_CANARY: &str = "PDFX SIGNER CANARY";
 const REASON_CANARY: &str = "PDFX REASON CANARY";
@@ -201,6 +205,21 @@ fn lopdf_signature_object_counts(document: &lopdf::Document) -> (usize, usize) {
     (signature_fields, signature_dictionaries)
 }
 
+/// The one `/Type /Sig` dictionary, for byte-level preservation assertions.
+fn signature_dictionary(document: &lopdf::Document) -> &lopdf::Dictionary {
+    document
+        .objects
+        .values()
+        .filter_map(|object| object.as_dict().ok())
+        .find(|dictionary| {
+            dictionary
+                .get(b"Type")
+                .and_then(lopdf::Object::as_name)
+                .is_ok_and(|name| name == b"Sig")
+        })
+        .expect("one signature dictionary")
+}
+
 fn temp_save_files(dir: &Path) -> Vec<PathBuf> {
     fs::read_dir(dir)
         .expect("read dir")
@@ -300,6 +319,56 @@ fn confirming_the_warning_saves_and_keeps_the_signature_structures() {
         lopdf_signature_object_counts(&parsed),
         (2, 1),
         "two /FT /Sig fields and one /Type /Sig dictionary remain in the output"
+    );
+    // The signature dictionary must survive the write byte for byte: PDFX
+    // warns that saving invalidates the signature, it never rewrites it.
+    let source_parsed = lopdf::Document::load(&source).expect("independent parse of the source");
+    assert_eq!(
+        signature_dictionary(&parsed),
+        signature_dictionary(&source_parsed),
+        "the signature dictionary entries are unchanged"
+    );
+    let signature = signature_dictionary(&parsed);
+    assert_eq!(
+        signature
+            .get(b"ByteRange")
+            .and_then(lopdf::Object::as_array)
+            .expect("/ByteRange")
+            .iter()
+            .filter_map(|value| value.as_i64().ok())
+            .collect::<Vec<_>>(),
+        vec![0, 1234, 5678, 9012],
+        "/ByteRange is intact"
+    );
+    assert_eq!(
+        signature
+            .get(b"Contents")
+            .and_then(lopdf::Object::as_str)
+            .expect("/Contents"),
+        (0u8..64).collect::<Vec<u8>>().as_slice(),
+        "the signature contents bytes are intact"
+    );
+    let acro_form = parsed
+        .catalog()
+        .expect("catalog")
+        .get_deref(b"AcroForm", &parsed)
+        .and_then(lopdf::Object::as_dict)
+        .expect("/AcroForm dictionary");
+    assert_eq!(
+        acro_form
+            .get(b"SigFlags")
+            .and_then(lopdf::Object::as_i64)
+            .expect("/SigFlags"),
+        1,
+        "/SigFlags is preserved"
+    );
+    assert!(
+        !acro_form.has(b"NeedAppearances"),
+        "PDFX must not introduce /NeedAppearances"
+    );
+    assert!(
+        !parsed.catalog().expect("catalog").has(b"Perms"),
+        "PDFX must not introduce a /Perms signature permission"
     );
 
     let reopened = open(&output);
@@ -653,4 +722,134 @@ fn ordinary_documents_report_no_signature_structures() {
         "fillable form fields are not signature structures"
     );
     close_document(form_document.document_id).expect("close form document");
+}
+
+#[test]
+fn signature_fields_inherited_from_an_out_of_tree_parent_are_detected() {
+    let dir = TempDir::new("open-inherited-parent");
+    let source = inherited_parent_signature_pdf();
+    let output = dir.path().join("output.pdf");
+
+    let document =
+        open_document(source.path_string(), None).expect("open the inherited-parent fixture");
+    assert_eq!(
+        document.signature,
+        Some(SignatureSummary {
+            signed_count: 1,
+            field_count: 1,
+        }),
+        "the /FT and /V a widget inherits through /Parent must be followed"
+    );
+
+    // The save gate covers this shape too: a widget whose owning field is not
+    // listed in /Fields still represents an actual signature.
+    let error = save_error(&document.document_id, save_request(Some(&output), false));
+    assert_eq!(
+        error.code,
+        CommandErrorCode::SignatureInvalidationConfirmationRequired
+    );
+    assert!(!output.exists());
+    let result = save(&document.document_id, save_request(Some(&output), true));
+    assert!(result.signature_invalidated);
+
+    let parsed = lopdf::Document::load(&output).expect("independent parse");
+    assert_eq!(lopdf_signature_object_counts(&parsed), (1, 1));
+    assert_eq!(
+        signature_dictionary(&parsed)
+            .get(b"ByteRange")
+            .and_then(lopdf::Object::as_array)
+            .expect("/ByteRange")
+            .len(),
+        4,
+        "the inherited signature dictionary survives the save"
+    );
+    close_document(document.document_id).expect("close document");
+}
+
+#[test]
+fn a_deeply_nested_field_tree_opens_without_exhausting_the_stack() {
+    // Far deeper than any real form. The structural walk must stay bounded;
+    // an unbounded /Kids recursion would abort the process while opening.
+    let source = deeply_nested_signature_fields_pdf(20_000);
+    let document = open_document(source.path_string(), None).expect("the deep tree opens");
+    let signature = document
+        .signature
+        .expect("the root of the chain is a signature field");
+    assert!(
+        (1..=129).contains(&signature.field_count),
+        "the depth guard bounds the walk: {signature:?}"
+    );
+    close_document(document.document_id).expect("close document");
+}
+
+#[test]
+fn a_cyclic_field_tree_is_walked_once_without_hanging() {
+    let source = cyclic_signature_fields_pdf();
+    let document = open_document(source.path_string(), None).expect("the cyclic tree opens");
+    assert_eq!(
+        document.signature,
+        Some(SignatureSummary {
+            signed_count: 0,
+            field_count: 2,
+        }),
+        "each field in the cycle is counted exactly once"
+    );
+    close_document(document.document_id).expect("close document");
+}
+
+/// Re-writes `source` as an AES-256 (V5, revision 6) encrypted document. Only
+/// used to prove the opening password reaches the structural detection walk:
+/// the empty-password fixture would parse even if the password were ignored.
+#[allow(deprecated)]
+fn write_aes256_signed_document(source: &Path, target: &Path, user_password: &str) {
+    let mut document = lopdf::Document::load(source).expect("load fixture for encryption");
+    let file_encryption_key = [0x37_u8; 32];
+    let crypt_filters: std::collections::BTreeMap<
+        Vec<u8>,
+        std::sync::Arc<dyn lopdf::encryption::crypt_filters::CryptFilter>,
+    > = std::collections::BTreeMap::from([(
+        b"StdCF".to_vec(),
+        std::sync::Arc::new(lopdf::encryption::crypt_filters::Aes256CryptFilter)
+            as std::sync::Arc<dyn lopdf::encryption::crypt_filters::CryptFilter>,
+    )]);
+    let version = lopdf::EncryptionVersion::V5 {
+        encrypt_metadata: true,
+        crypt_filters,
+        file_encryption_key: &file_encryption_key,
+        stream_filter: b"StdCF".to_vec(),
+        string_filter: b"StdCF".to_vec(),
+        owner_password: "pdfx-test-owner",
+        user_password,
+        permissions: lopdf::Permissions::all(),
+    };
+    let state = lopdf::EncryptionState::try_from(version).expect("build the AES-256 state");
+    document.encrypt(&state).expect("encrypt the fixture");
+    document.save(target).expect("write the encrypted fixture");
+}
+
+#[test]
+fn detection_uses_the_opening_password_of_a_signed_encrypted_document() {
+    let dir = TempDir::new("open-password-signed");
+    let source = copy_fixture("signature-signed", &dir, "signed.pdf");
+    let protected = dir.path().join("protected.pdf");
+    let password = "pdfx-signature-password";
+    write_aes256_signed_document(&source, &protected, password);
+
+    let missing = open_document(path_string(&protected), None)
+        .expect_err("an encrypted document does not open without its password");
+    assert_eq!(missing.code, CommandErrorCode::PasswordRequired);
+    let wrong = open_document(path_string(&protected), Some("wrong".to_owned()))
+        .expect_err("a wrong password must be refused");
+    assert_eq!(wrong.code, CommandErrorCode::InvalidPassword);
+
+    // lopdf can only read the encrypted field tree with this password, so this
+    // assertion fails if detection stops forwarding the opening password.
+    let document = open_with_password(&protected, password);
+    assert!(document.encrypted);
+    let signature = document
+        .signature
+        .expect("the password decrypts the AcroForm field tree");
+    assert_eq!(signature.signed_count, 1, "{signature:?}");
+    assert_eq!(signature.field_count, 2, "{signature:?}");
+    close_document(document.document_id).expect("close document");
 }
