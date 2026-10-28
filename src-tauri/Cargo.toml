@@ -40,6 +40,10 @@ semver = "1"
 open = { version = "5", features = ["shellexecute-on-windows"] }
 # Glyph coverage checks before rewriting text with an embedded font.
 ttf-parser = "0.25"
+# Appends the object-level revision PDFium cannot write, as one incremental
+# revision after PDFium's (ADR-0004). Pinned to the version probed in the
+# engine spike.
+lopdf = "0.46"
 
 [features]
 default = []

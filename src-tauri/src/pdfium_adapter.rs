@@ -129,6 +129,35 @@ impl From<PdfiumError> for AdapterError {
     }
 }
 
+/// Returns `true` if an already-open document has an active standard security
+/// handler.
+///
+/// The save pipeline borrows the live document instead of moving it into a
+/// [`PdfiumAdapter`], because the same handle also owns the undo/redo snapshots
+/// and must stay open across saves. This free function exposes the adapter's
+/// encryption check for that borrowed case.
+pub fn document_is_encrypted(document: &PdfDocument<'_>) -> Result<bool, AdapterError> {
+    Ok(document.permissions().security_handler_revision()?
+        != PdfSecurityHandlerRevision::Unprotected)
+}
+
+/// Saves an already-open document with the given [SaveMode].
+///
+/// Incremental and plain full-rewrite saves of an encrypted document are
+/// refused with [AdapterError::EncryptedDocument] rather than silently writing
+/// encrypted output; use [SaveMode::RemoveSecurity] for the unencrypted
+/// rewrite ADR-0007 requires.
+pub fn save_document_with_mode(
+    document: &PdfDocument<'_>,
+    mode: SaveMode,
+) -> Result<Vec<u8>, AdapterError> {
+    if mode != SaveMode::RemoveSecurity && document_is_encrypted(document)? {
+        return Err(AdapterError::EncryptedDocument);
+    }
+
+    Ok(document.save_to_bytes_with_flags(mode.flags())?)
+}
+
 /// Owns a [`PdfDocument`] and exposes the patched PDFium edit and save surface.
 ///
 /// All edits made through the high-level `pdfium-render` API before or during
@@ -143,7 +172,6 @@ impl<'a> PdfiumAdapter<'a> {
     pub fn new(document: PdfDocument<'a>) -> Self {
         Self { document }
     }
-
     /// Returns the wrapped document, for read-only high-level operations such
     /// as rendering or text extraction.
     pub fn document(&self) -> &PdfDocument<'a> {
@@ -166,8 +194,7 @@ impl<'a> PdfiumAdapter<'a> {
     /// A document opened with its user password still reports the handler that
     /// protects it; only [SaveMode::RemoveSecurity] produces unencrypted output.
     pub fn is_encrypted(&self) -> Result<bool, AdapterError> {
-        Ok(self.document.permissions().security_handler_revision()?
-            != PdfSecurityHandlerRevision::Unprotected)
+        document_is_encrypted(&self.document)
     }
 
     /// Writes the document using the given [SaveMode].
@@ -176,11 +203,7 @@ impl<'a> PdfiumAdapter<'a> {
     /// refused with [AdapterError::EncryptedDocument] rather than silently
     /// writing encrypted output.
     pub fn save(&self, mode: SaveMode) -> Result<Vec<u8>, AdapterError> {
-        if mode != SaveMode::RemoveSecurity && self.is_encrypted()? {
-            return Err(AdapterError::EncryptedDocument);
-        }
-
-        Ok(self.document.save_to_bytes_with_flags(mode.flags())?)
+        save_document_with_mode(&self.document, mode)
     }
 
     /// Appends an incremental revision to the source bytes.

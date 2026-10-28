@@ -4,6 +4,7 @@ pub mod file_association;
 pub mod logging;
 mod menu;
 pub mod pdfium_adapter;
+pub mod save;
 pub mod settings;
 pub mod text_edit;
 pub mod updater;
@@ -59,6 +60,7 @@ pub fn run() {
             text_edit::undo_text_edit,
             text_edit::redo_text_edit,
             text_edit::mark_document_saved,
+            save::save_document,
             commands::get_settings,
             commands::update_settings,
             commands::export_diagnostics,

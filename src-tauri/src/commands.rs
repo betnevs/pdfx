@@ -70,6 +70,18 @@ pub enum CommandErrorCode {
     UnsupportedFont,
     RenderFailed,
     WindowFailed,
+    /// Writing the Output Document failed. The Source Document and any
+    /// previous Output Document are unchanged; the save may be retried.
+    SaveFailed,
+    /// Save As targeted the Source Document itself, which is never modified.
+    SaveTargetIsSource,
+    /// Save Changes has no Output Document yet; the first save must be Save As.
+    NoOutputDocument,
+    /// The Source Document is encrypted and the caller did not confirm that the
+    /// output is written unencrypted (ADR-0007).
+    UnencryptedOutputConfirmationRequired,
+    /// Permission Restrictions forbid saving changes to this document.
+    ReadOnlyDocument,
     UpdateNotConfigured,
     UpdateCheckFailed,
     UpdateManifestInvalid,
@@ -239,10 +251,13 @@ pub struct TextLayerView {
 }
 
 pub(crate) struct OpenDocument {
+    /// Path the Source Document was opened from. Save As refuses to target it.
+    pub(crate) source_path: PathBuf,
     /// The unmodified bytes read from disk, kept for the incremental-save
     /// pipeline. PDFium owns its own copy of the input buffer.
-    #[allow(dead_code)]
     pub(crate) source_bytes: Vec<u8>,
+    /// Save target state: the Output Document path and object-level edits.
+    pub(crate) save: crate::save::SaveState,
     /// Session-level edit state for this Document. Declared before `document`
     /// so detached page-object snapshots held by undo/redo are destroyed
     /// before PDFium closes the owning document.
@@ -377,7 +392,9 @@ fn open_document_impl(
     registry.documents.insert(
         document_id,
         OpenDocument {
+            source_path: path.clone(),
             source_bytes: bytes,
+            save: crate::save::SaveState::default(),
             edit: crate::text_edit::EditSession::default(),
             document,
         },
@@ -392,7 +409,9 @@ fn open_document_impl(
 /// capability for unencrypted documents and for documents opened with the
 /// Owner Password; Permission Restrictions only narrow the flags when the
 /// document was opened with the User Password.
-fn document_permissions(document: &PdfDocument<'_>) -> (bool, bool, DocumentPermissions) {
+pub(crate) fn document_permissions(
+    document: &PdfDocument<'_>,
+) -> (bool, bool, DocumentPermissions) {
     let permissions = document.permissions();
 
     // `Unprotected` is the only unencrypted revision. PDFium reports an error
