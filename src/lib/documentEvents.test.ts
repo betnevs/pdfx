@@ -101,6 +101,39 @@ describe("document change events", () => {
     unsubscribe();
   });
 
+  it("passes watermark sources and all-pages invalidations through", () => {
+    const handler = vi.fn();
+    const unsubscribe = onDocumentChanged(handler);
+
+    notifyDocumentChanged({
+      documentId: "doc-1",
+      pageIndex: 0,
+      allPagesChanged: true,
+      source: "watermark",
+    });
+    window.dispatchEvent(
+      new CustomEvent(DOCUMENT_CHANGED_EVENT, {
+        detail: {
+          documentId: "doc-1",
+          pageIndex: 1,
+          allPagesChanged: false,
+        },
+      }),
+    );
+
+    expect(handler).toHaveBeenNthCalledWith(1, {
+      documentId: "doc-1",
+      pageIndex: 0,
+      allPagesChanged: true,
+      source: "watermark",
+    });
+    expect(handler).toHaveBeenNthCalledWith(2, {
+      documentId: "doc-1",
+      pageIndex: 1,
+    });
+    unsubscribe();
+  });
+
   it("ignores malformed events and stops after unsubscribe", () => {
     const handler = vi.fn();
     const unsubscribe = onDocumentChanged(handler);

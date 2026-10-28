@@ -81,6 +81,7 @@ pub(crate) struct ImageLayout {
 }
 
 /// A decoded image ready to be placed on a page.
+#[derive(Clone)]
 pub(crate) struct DecodedImage {
     pub(crate) width: u32,
     pub(crate) height: u32,
@@ -222,11 +223,11 @@ pub struct ImageEditResultView {
     pub history: EditHistoryView,
 }
 
-struct LoadedImage {
-    name: String,
-    format: ImageFormat,
-    source: Vec<u8>,
-    decoded: DecodedImage,
+pub(crate) struct LoadedImage {
+    pub(crate) name: String,
+    pub(crate) format: ImageFormat,
+    pub(crate) source: Vec<u8>,
+    pub(crate) decoded: DecodedImage,
 }
 
 fn decode_failed(message: impl Into<String>) -> CommandError {
@@ -242,7 +243,7 @@ fn too_large(message: impl Into<String>) -> CommandError {
 }
 
 /// Reads and decodes an image file without touching any open document.
-fn load_image(path: &str) -> Result<LoadedImage, CommandError> {
+pub(crate) fn load_image(path: &str) -> Result<LoadedImage, CommandError> {
     let path_ref = Path::new(path);
     let name = path_ref
         .file_name()
@@ -514,7 +515,7 @@ fn normalize_rotation(angle: f32) -> f32 {
     }
 }
 
-fn check_layout(layout: &ImageLayout) -> Result<(), CommandError> {
+pub(crate) fn check_layout(layout: &ImageLayout) -> Result<(), CommandError> {
     if !layout.x.is_finite()
         || !layout.y.is_finite()
         || !layout.width.is_finite()
@@ -597,7 +598,7 @@ fn page_geometry(
     Ok((geometry, object_count))
 }
 
-fn build_image_object(
+pub(crate) fn build_image_object(
     document: &PdfDocument<'static>,
     geometry: &DisplayGeometry,
     layout: &ImageLayout,
