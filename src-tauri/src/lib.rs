@@ -46,9 +46,6 @@ pub fn run() {
             commands::extract_text,
             commands::extract_text_layer,
             commands::close_document,
-            commands::get_settings,
-            commands::update_settings,
-            commands::export_diagnostics,
             text_edit::text_edit_target,
             text_edit::apply_text_edit,
             text_edit::delete_text_box,
@@ -61,6 +58,9 @@ pub fn run() {
             text_edit::undo_text_edit,
             text_edit::redo_text_edit,
             text_edit::mark_document_saved,
+            commands::get_settings,
+            commands::update_settings,
+            commands::export_diagnostics,
         ])
         .setup(|app| {
             // Logging is local-only and must never prevent the shell from
