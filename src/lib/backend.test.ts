@@ -967,6 +967,7 @@ describe("backend command seam", () => {
       outputPath: "/tmp/copy.pdf",
       kind: "save_as",
       bytesWritten: 12,
+      encrypted: false,
       backupPath: null,
       history: {
         canUndo: true,

@@ -17,7 +17,7 @@ import {
   InsertBlankPageDialog,
 } from "./components/PageOperationDialogs";
 import { RecoveryPrompt } from "./components/RecoveryPrompt";
-import { SaveConfirmDialog } from "./components/SaveConfirmDialog";
+import { SaveOptionsDialog } from "./components/SaveOptionsDialog";
 import {
   choosePdfFile,
   closeDocument,
@@ -1115,13 +1115,16 @@ export function App() {
         />
       )}
 
-      {/* Rendered after the close dialog so the unencrypted-output question it
-          raises during the close save paints on top. */}
+      {/* Rendered after the close dialog so the save options it raises during
+          the close save paint on top. */}
       {open && save.confirmation && (
-        <SaveConfirmDialog
+        <SaveOptionsDialog
           documentName={open.document.name}
           busy={save.busy}
-          onConfirm={save.confirmUnencrypted}
+          sourceEncrypted={open.document.encrypted}
+          outputEncrypted={save.confirmation.outputEncrypted}
+          initialProtect={save.confirmation.preferPassword}
+          onSave={save.confirmSaveOptions}
           onCancel={save.cancelConfirmation}
         />
       )}

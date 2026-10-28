@@ -2451,6 +2451,47 @@ button {
   margin-top: 6px;
 }
 
+/* Save options: opening-password choice and the unencrypted-output warning. */
+
+.save-options-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--pdfx-text-secondary);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.password-dialog .save-options-checkbox input {
+  width: 15px;
+  height: 15px;
+  padding: 0;
+  accent-color: var(--pdfx-accent);
+}
+
+.save-options-warning {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 2px;
+  padding: 9px 11px;
+  border: 1px solid var(--pdfx-warning-border);
+  border-radius: 7px;
+  background: var(--pdfx-warning-soft);
+}
+
+.save-options-warning-title {
+  margin: 0;
+  color: var(--pdfx-warning-strong-text);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.save-options-warning .password-hint {
+  margin: 0;
+}
+
 /* Start-up recovery question: one row per Recovery File. */
 
 .recovery-dialog {

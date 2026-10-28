@@ -18,6 +18,27 @@ export const PRINT_DISABLED_REASON = "文档所有者限制了打印权限。";
 export const UNENCRYPTED_OUTPUT_WARNING =
   "另存为会生成不加密的副本；输出文件不会保留打开密码或权限限制。";
 
+/** Dialog title and labels for the save flow's opening-password option. */
+export const SAVE_OPTIONS_TITLE = "保存选项";
+export const SAVE_PASSWORD_OPTION_LABEL = "设置打开密码";
+export const SAVE_PASSWORD_LABEL = "打开密码";
+export const SAVE_PASSWORD_CONFIRM_LABEL = "确认密码";
+
+/** Validation copy shown inside the save-options dialog. */
+export const SAVE_PASSWORD_REQUIRED = "请输入打开密码";
+export const SAVE_PASSWORD_MISMATCH = "两次输入的密码不一致";
+
+/**
+ * Heading shown when saving without a password would write an unencrypted
+ * Output Document. ADR-0007 requires the user to accept that explicitly; the
+ * primary action spells the consequence out ("继续保存（不加密）").
+ */
+export const UNENCRYPTED_OUTPUT_HEADING = "输出将不加密";
+
+/** Explanation when the current Output Document already carries a password. */
+export const PROTECTED_OUTPUT_WARNING =
+  "当前输出文件已设置打开密码；不设置新密码将写入不加密的文件。";
+
 /** The save and edit affordances a Document allows. */
 export interface DocumentPolicy {
   readOnly: boolean;

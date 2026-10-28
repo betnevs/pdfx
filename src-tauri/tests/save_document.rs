@@ -85,6 +85,16 @@ fn save_request_confirmed(
     SaveDocumentRequest {
         save_as_path: save_as_path.map(path_string),
         confirm_unencrypted_output,
+        password: None,
+    }
+}
+
+/// A save that asks for a User Password on the Output Document.
+fn save_request_with_password(save_as_path: Option<&Path>, password: &str) -> SaveDocumentRequest {
+    SaveDocumentRequest {
+        save_as_path: save_as_path.map(path_string),
+        confirm_unencrypted_output: false,
+        password: Some(password.to_owned()),
     }
 }
 
@@ -113,6 +123,29 @@ fn saved_temp_files(dir: &Path) -> Vec<PathBuf> {
             name.contains(".pdfx-save-") || name.contains(".pdfx-backup-")
         })
         .collect()
+}
+
+/// Every regular file below `directory`, recursively.
+fn files_under(directory: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    let Ok(entries) = fs::read_dir(directory) else {
+        return files;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        if path.is_dir() {
+            files.extend(files_under(&path));
+        } else {
+            files.push(path);
+        }
+    }
+    files
+}
+
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
 }
 
 /// The process-wide logger can only be installed once. Every logging
@@ -161,7 +194,9 @@ fn a_successful_save_is_logged_without_document_content() {
     );
 
     close_document(document.document_id).expect("close source");
-    let _ = fs::remove_dir_all(logs);
+    // The log directory is shared by every logging assertion in this binary
+    // (the process-wide logger can only be installed once), so it must outlive
+    // this test. Deleting it would silently break concurrent tests.
 }
 
 #[test]
@@ -209,6 +244,411 @@ fn save_as_writes_a_new_output_and_leaves_the_source_untouched() {
         saved_temp_files(dir.path()).is_empty(),
         "the temp file must be renamed or cleaned up"
     );
+}
+
+const OUTPUT_PASSWORD: &str = "pdfx-output-secret-40";
+
+#[test]
+fn saving_with_a_password_encrypts_the_output_and_requires_it_to_open() {
+    let dir = TempDir::new("output-password");
+    let source = copy_fixture("text", &dir, "source.pdf");
+    let output = dir.path().join("protected.pdf");
+    let source_before = file_state(&source);
+
+    let document = open(&source);
+    create_box(&document.document_id, 72.0, 72.0, "Protected content");
+
+    let (result, _) = save(
+        &document.document_id,
+        save_request_with_password(Some(&output), OUTPUT_PASSWORD),
+    );
+    assert!(result.encrypted, "the save result reports the protection");
+    assert_eq!(
+        result.bytes_written,
+        fs::metadata(&output).expect("output metadata").len()
+    );
+
+    let bytes = fs::read(&output).expect("read output");
+    assert!(
+        !bytes
+            .windows(OUTPUT_PASSWORD.len())
+            .any(|window| window == OUTPUT_PASSWORD.as_bytes()),
+        "the User Password must not be stored in the file"
+    );
+    // Encryption touches every string and stream, so an incremental append
+    // cannot be used: the output is one complete revision.
+    assert_eq!(
+        startxref_count(&bytes),
+        1,
+        "encryption rewrites the object graph as one complete revision"
+    );
+
+    // Independent structure check: lopdf reads the security handler without
+    // the password and authenticates the two passwords differently. V5/R6 is
+    // AES-256 (PDF 2.0).
+    let parsed = lopdf::Document::load(&output).expect("lopdf parses the output");
+    assert!(parsed.is_encrypted(), "the output must carry /Encrypt");
+    let encrypt = parsed
+        .trailer
+        .get(b"Encrypt")
+        .expect("trailer /Encrypt")
+        .as_reference()
+        .expect("/Encrypt is a reference");
+    let dictionary = parsed
+        .get_object(encrypt)
+        .expect("encryption dictionary")
+        .as_dict()
+        .expect("encryption dictionary is a dictionary");
+    assert_eq!(dictionary.get(b"V").expect("/V").as_i64().expect("V"), 5);
+    assert_eq!(dictionary.get(b"R").expect("/R").as_i64().expect("R"), 6);
+    assert_eq!(
+        dictionary
+            .get(b"Filter")
+            .expect("/Filter")
+            .as_name()
+            .expect("Filter"),
+        b"Standard"
+    );
+
+    assert!(
+        lopdf::Document::load_with_password(&output, "not-the-output-password").is_err(),
+        "a wrong password must not decrypt the output"
+    );
+    let decrypted = lopdf::Document::load_with_password(&output, OUTPUT_PASSWORD)
+        .expect("the User Password decrypts the output");
+    let text = decrypted
+        .extract_text(&[1])
+        .expect("extract the decrypted text");
+    assert!(
+        text.contains("Protected content"),
+        "decrypted text {text:?}"
+    );
+
+    // PDFium through the command boundary: a missing or wrong password is
+    // refused, the right one opens the document.
+    let missing = open_document(path_string(&output), None).expect_err("no password supplied");
+    assert_eq!(
+        missing.code,
+        pdfx_lib::commands::CommandErrorCode::PasswordRequired
+    );
+    let refused = open_document(
+        path_string(&output),
+        Some("not-the-output-password".to_owned()),
+    )
+    .expect_err("wrong password supplied");
+    assert_eq!(
+        refused.code,
+        pdfx_lib::commands::CommandErrorCode::InvalidPassword
+    );
+    let reopened = open_document(path_string(&output), Some(OUTPUT_PASSWORD.to_owned()))
+        .expect("open with the output password");
+    assert!(reopened.encrypted);
+    let reopened_text = extract_text(reopened.document_id.clone(), 0)
+        .expect("extract the saved text")
+        .text;
+    assert!(
+        reopened_text.contains("Protected content"),
+        "got {reopened_text:?}"
+    );
+    close_document(reopened.document_id).expect("close reopened");
+
+    assert_eq!(file_state(&source), source_before, "source stays untouched");
+    close_document(document.document_id).expect("close source");
+}
+
+/// The User Password lives only in the save request. Logs, diagnostic
+/// exports and Recovery Files are all local artifacts the user may share, so
+/// none of them may contain it.
+#[test]
+fn the_output_password_never_reaches_logs_diagnostics_or_recovery_files() {
+    let logs = log_directory();
+    let dir = TempDir::new("password-secrecy");
+    let source = copy_fixture("text", &dir, "source.pdf");
+    let output = dir.path().join("protected.pdf");
+
+    let document = open(&source);
+    create_box(&document.document_id, 72.0, 72.0, "Secret work");
+
+    // A Recovery File is written while the edit is unsaved. It is produced by
+    // the same serializer the save pipeline uses, before a password exists,
+    // and must stay password-free together with its JSON sidecar.
+    let app_data = dir.path().join("appdata");
+    let store = pdfx_lib::recovery::RecoveryStore::new(&app_data);
+    pdfx_lib::recovery::maybe_snapshot_in(&store, &document.document_id, 0)
+        .expect("snapshot tick starts the quiet period");
+    let snapshot = pdfx_lib::recovery::maybe_snapshot_in(&store, &document.document_id, 2_000)
+        .expect("snapshot tick");
+    assert!(
+        snapshot.written,
+        "the dirty document writes a Recovery File"
+    );
+    assert!(
+        !files_under(store.directory()).is_empty(),
+        "the Recovery File and its sidecar exist"
+    );
+
+    let (result, _) = save(
+        &document.document_id,
+        save_request_with_password(Some(&output), OUTPUT_PASSWORD),
+    );
+    assert!(result.encrypted);
+
+    let diagnostics = dir.path().join("diagnostics.txt");
+    pdfx_lib::commands::export_diagnostics(path_string(&diagnostics))
+        .expect("diagnostics export succeeds");
+
+    let log_files = files_under(logs);
+    assert!(
+        log_files
+            .iter()
+            .any(|file| file.file_name().is_some_and(|name| name == "pdfx.log")),
+        "the save pipeline wrote to the installed logger"
+    );
+    assert!(diagnostics.exists(), "the diagnostic report exists");
+
+    for file in files_under(dir.path()).into_iter().chain(log_files) {
+        let bytes = fs::read(&file).expect("read persisted artifact");
+        assert!(
+            !contains_bytes(&bytes, OUTPUT_PASSWORD.as_bytes()),
+            "the User Password leaked into {}",
+            file.display()
+        );
+    }
+
+    // The protected output itself never stores the password in plaintext.
+    assert!(!contains_bytes(
+        &fs::read(&output).expect("read output"),
+        OUTPUT_PASSWORD.as_bytes()
+    ));
+
+    close_document(document.document_id).expect("close source");
+}
+
+/// A blank password is not "no password": the UI requires a value to set one,
+/// and treating an empty string as protection would produce a file whose
+/// "password" nobody chose. The save is retryable with a real password.
+#[test]
+fn an_empty_output_password_is_rejected_and_the_save_can_be_retried() {
+    let dir = TempDir::new("empty-output-password");
+    let source = copy_fixture("text", &dir, "source.pdf");
+    let output = dir.path().join("output.pdf");
+    let source_before = file_state(&source);
+
+    let document = open(&source);
+    create_box(&document.document_id, 72.0, 72.0, "Retry with a password");
+
+    let error = save_error(
+        &document.document_id,
+        save_request_with_password(Some(&output), ""),
+    );
+    assert_eq!(
+        error.code,
+        pdfx_lib::commands::CommandErrorCode::InvalidArgument
+    );
+    assert!(
+        !output.exists(),
+        "nothing may be written for an empty password"
+    );
+    assert_eq!(file_state(&source), source_before);
+    let history = pdfx_lib::text_edit::edit_history(document.document_id.clone())
+        .expect("history after rejected password");
+    assert!(history.dirty, "the rejected save keeps the document dirty");
+
+    let (result, _) = save(
+        &document.document_id,
+        save_request_with_password(Some(&output), OUTPUT_PASSWORD),
+    );
+    assert!(result.encrypted);
+    let reopened = open_document(path_string(&output), Some(OUTPUT_PASSWORD.to_owned()))
+        .expect("the retried save protects the output");
+    assert!(reopened.encrypted);
+    close_document(reopened.document_id).expect("close reopened");
+    close_document(document.document_id).expect("close source");
+}
+
+/// The default save stays exactly as ticket 10 defined it: no password means
+/// no encryption, and an unencrypted source needs no confirmation.
+#[test]
+fn saving_without_a_password_still_writes_an_unencrypted_output() {
+    let dir = TempDir::new("default-unencrypted");
+    let source = copy_fixture("text", &dir, "source.pdf");
+    let output = dir.path().join("plain.pdf");
+
+    let document = open(&source);
+    create_box(&document.document_id, 72.0, 72.0, "Plain save");
+    let (result, _) = save(&document.document_id, save_request(Some(&output)));
+
+    assert!(!result.encrypted);
+    let parsed = lopdf::Document::load(&output).expect("lopdf parses the output");
+    assert!(!parsed.is_encrypted());
+    open_document(path_string(&output), None).expect("the output opens without a password");
+    close_document(document.document_id).expect("close source");
+}
+
+/// Once the Output Document is protected, Save Changes must never write an
+/// unprotected replacement without an explicit decision (ADR-0007's principle
+/// applied to the output side; the User Password itself is never stored).
+#[test]
+fn save_changes_refuses_to_silently_remove_output_encryption() {
+    let dir = TempDir::new("protected-save-changes");
+    let source = copy_fixture("text", &dir, "source.pdf");
+    let output = dir.path().join("protected.pdf");
+    let source_before = file_state(&source);
+
+    let document = open(&source);
+    create_box(&document.document_id, 72.0, 72.0, "First protected version");
+    save(
+        &document.document_id,
+        save_request_with_password(Some(&output), OUTPUT_PASSWORD),
+    );
+    let protected_before = file_state(&output);
+
+    create_box(&document.document_id, 72.0, 200.0, "Second edition");
+    let error = save_error(&document.document_id, save_request(None));
+    assert_eq!(
+        error.code,
+        pdfx_lib::commands::CommandErrorCode::EncryptedOutputConfirmationRequired,
+        "Save Changes cannot silently drop the Output Document's protection"
+    );
+    assert_eq!(
+        file_state(&output),
+        protected_before,
+        "a refused save leaves the protected output untouched"
+    );
+    let history = pdfx_lib::text_edit::edit_history(document.document_id.clone())
+        .expect("history after refused Save Changes");
+    assert!(
+        history.dirty,
+        "refusing to save must keep the document dirty"
+    );
+
+    // The explicit unencrypted-output decision resumes the save. The backup
+    // keeps the previous protected version, still requiring its password.
+    let (result, _) = save(&document.document_id, save_request_confirmed(None, true));
+    assert_eq!(result.kind, SaveKind::SaveChanges);
+    assert!(!result.encrypted);
+    let backup = result
+        .backup_path
+        .expect("Save Changes backs up the output");
+    assert_eq!(
+        fs::read(&backup).expect("read backup"),
+        protected_before.0,
+        "the backup is the protected Output Document byte for byte"
+    );
+
+    let parsed = lopdf::Document::load(&output).expect("lopdf parses the output");
+    assert!(
+        !parsed.is_encrypted(),
+        "the confirmed save writes an unencrypted output"
+    );
+    let reopened = open_document(path_string(&output), None).expect("open unencrypted output");
+    assert!(!reopened.encrypted);
+    let text = extract_text(reopened.document_id.clone(), 0)
+        .expect("extract saved text")
+        .text;
+    assert!(text.contains("Second edition"), "got {text:?}");
+    close_document(reopened.document_id).expect("close reopened");
+
+    let backup_view = open_document(backup.clone(), Some(OUTPUT_PASSWORD.to_owned()))
+        .expect("the backup still opens with the old password");
+    assert!(backup_view.encrypted);
+    close_document(backup_view.document_id).expect("close backup");
+
+    assert_eq!(file_state(&source), source_before, "source stays untouched");
+    close_document(document.document_id).expect("close source");
+}
+
+/// Save Changes with a password is an explicit decision: the output stays
+/// protected and a new password replaces the old one. The backup of the old
+/// output keeps the old password, so both versions remain readable by their
+/// owners during the transition.
+#[test]
+fn save_changes_can_keep_or_replace_the_output_password() {
+    let dir = TempDir::new("change-output-password");
+    let source = copy_fixture("text", &dir, "source.pdf");
+    let output = dir.path().join("protected.pdf");
+
+    let document = open(&source);
+    create_box(&document.document_id, 72.0, 72.0, "First protected version");
+    save(
+        &document.document_id,
+        save_request_with_password(Some(&output), OUTPUT_PASSWORD),
+    );
+
+    // Keeping the same password needs no confirmation.
+    create_box(
+        &document.document_id,
+        72.0,
+        200.0,
+        "Second protected version",
+    );
+    let (kept, _) = save(
+        &document.document_id,
+        save_request_with_password(None, OUTPUT_PASSWORD),
+    );
+    assert_eq!(kept.kind, SaveKind::SaveChanges);
+    assert!(kept.encrypted);
+    let kept_view = open_document(path_string(&output), Some(OUTPUT_PASSWORD.to_owned()))
+        .expect("the output still opens with its password");
+    assert!(kept_view.encrypted);
+    let kept_text = extract_text(kept_view.document_id.clone(), 0)
+        .expect("extract text")
+        .text;
+    assert!(
+        kept_text.contains("Second protected version"),
+        "got {kept_text:?}"
+    );
+    close_document(kept_view.document_id).expect("close kept view");
+    let previous_protected = file_state(&output);
+
+    // A new password replaces the old one; the old password no longer opens
+    // the output, and the backup keeps the old password's version.
+    create_box(
+        &document.document_id,
+        72.0,
+        320.0,
+        "Third protected version",
+    );
+    let new_password = "pdfx-output-secret-40-replaced";
+    let (replaced, _) = save(
+        &document.document_id,
+        save_request_with_password(None, new_password),
+    );
+    assert!(replaced.encrypted);
+    assert_eq!(
+        replaced.backup_path,
+        Some(path_string(&pdfx_lib::save::backup_path_for(&output)))
+    );
+
+    let error = open_document(path_string(&output), Some(OUTPUT_PASSWORD.to_owned()))
+        .expect_err("the replaced password must no longer open the output");
+    assert_eq!(
+        error.code,
+        pdfx_lib::commands::CommandErrorCode::InvalidPassword
+    );
+    let replaced_view = open_document(path_string(&output), Some(new_password.to_owned()))
+        .expect("the new password opens the output");
+    let replaced_text = extract_text(replaced_view.document_id.clone(), 0)
+        .expect("extract text")
+        .text;
+    assert!(
+        replaced_text.contains("Third protected version"),
+        "got {replaced_text:?}"
+    );
+    close_document(replaced_view.document_id).expect("close replaced view");
+
+    let backup = pdfx_lib::save::backup_path_for(&output);
+    assert_eq!(
+        fs::read(&backup).expect("read backup"),
+        previous_protected.0,
+        "the backup is the previous protected output"
+    );
+    let backup_view = open_document(path_string(&backup), Some(OUTPUT_PASSWORD.to_owned()))
+        .expect("the backup still opens with the previous password");
+    assert!(backup_view.encrypted);
+    close_document(backup_view.document_id).expect("close backup view");
+
+    close_document(document.document_id).expect("close source");
 }
 
 fn create_box(document_id: &str, x: f32, y: f32, text: &str) {
@@ -440,6 +880,84 @@ fn save_changes_into_a_read_only_directory_preserves_both_files() {
     close_document(document.document_id).expect("close source");
 }
 
+#[cfg(unix)]
+#[test]
+fn a_failed_protected_save_changes_preserves_the_previous_encrypted_output() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = TempDir::new("protected-write-failure");
+    let source = copy_fixture("text", &dir, "source.pdf");
+    let target_dir = dir.path().join("locked");
+    fs::create_dir(&target_dir).expect("create target dir");
+    let output = target_dir.join("protected.pdf");
+    let source_before = file_state(&source);
+
+    let document = open(&source);
+    create_box(&document.document_id, 72.0, 72.0, "First protected version");
+    save(
+        &document.document_id,
+        save_request_with_password(Some(&output), OUTPUT_PASSWORD),
+    );
+    let protected_before = file_state(&output);
+
+    create_box(
+        &document.document_id,
+        72.0,
+        200.0,
+        "Second protected version",
+    );
+    fs::set_permissions(&target_dir, fs::Permissions::from_mode(0o555))
+        .expect("make target directory read-only");
+
+    let new_password = "pdfx-output-secret-40-after-failure";
+    let error = save_error(
+        &document.document_id,
+        save_request_with_password(None, new_password),
+    );
+    assert_eq!(error.code, pdfx_lib::commands::CommandErrorCode::SaveFailed);
+    assert!(
+        !error.message.contains(OUTPUT_PASSWORD) && !error.message.contains(new_password),
+        "error text must not leak the password, got {:?}",
+        error.message
+    );
+
+    fs::set_permissions(&target_dir, fs::Permissions::from_mode(0o755))
+        .expect("restore target directory permissions");
+
+    assert_eq!(
+        file_state(&output),
+        protected_before,
+        "the previous protected output is byte-for-byte intact"
+    );
+    let still_protected = open_document(path_string(&output), Some(OUTPUT_PASSWORD.to_owned()))
+        .expect("the previous output still opens with its password");
+    close_document(still_protected.document_id).expect("close previous output");
+    assert_eq!(file_state(&source), source_before);
+    assert!(
+        saved_temp_files(dir.path()).is_empty(),
+        "no temp files remain"
+    );
+    let history = pdfx_lib::text_edit::edit_history(document.document_id.clone())
+        .expect("history after failed protected save");
+    assert!(history.dirty);
+
+    // Retryable with a new password.
+    let (result, _) = save(
+        &document.document_id,
+        save_request_with_password(None, new_password),
+    );
+    assert!(result.kind == SaveKind::SaveChanges);
+    assert!(result.encrypted);
+    let reopened = open_document(path_string(&output), Some(new_password.to_owned()))
+        .expect("the retry writes the new password's output");
+    let text = extract_text(reopened.document_id.clone(), 0)
+        .expect("extract text")
+        .text;
+    assert!(text.contains("Second protected version"), "got {text:?}");
+    close_document(reopened.document_id).expect("close reopened");
+    close_document(document.document_id).expect("close source");
+}
+
 #[test]
 fn a_write_failure_keeps_the_previous_output_and_reports_a_retryable_error() {
     let dir = TempDir::new("write-failure");
@@ -592,6 +1110,60 @@ fn encrypted_source_requires_confirmation_and_writes_an_unencrypted_output() {
         .expect("extract saved text")
         .text;
     assert!(text.contains("Kept after decrypting"), "got {text:?}");
+    close_document(reopened.document_id).expect("close reopened");
+
+    assert_eq!(
+        file_state(&source),
+        source_before,
+        "source must stay encrypted and untouched"
+    );
+    close_document(document.document_id).expect("close source");
+}
+
+/// An encrypted source saved with a password keeps protection, so the
+/// ADR-0007 unencrypted-output confirmation does not apply. The output needs
+/// the new password, not the source's.
+#[test]
+fn an_encrypted_source_saved_with_a_new_password_skips_the_unencrypted_confirmation() {
+    let dir = TempDir::new("encrypted-reprotected");
+    let manifest = support::fixtures::load_manifest();
+    let fixture = support::fixtures::fixture(&manifest, "encrypted").expect("encrypted fixture");
+    let source_password = fixture.password.clone().expect("user password");
+    let source = dir.path().join("source.pdf");
+    fs::copy(support::fixtures::fixture_path(fixture), &source).expect("copy encrypted fixture");
+    let source_before = file_state(&source);
+    let output = dir.path().join("reprotected.pdf");
+    let new_password = "pdfx-output-secret-40-new";
+
+    let document =
+        open_document(path_string(&source), Some(source_password.clone())).expect("open source");
+    create_box(&document.document_id, 72.0, 72.0, "Still protected");
+
+    // `confirm_unencrypted_output` stays false: the output is not unencrypted.
+    let (result, _) = save(
+        &document.document_id,
+        save_request_with_password(Some(&output), new_password),
+    );
+    assert!(result.encrypted);
+
+    let missing = open_document(path_string(&output), None).expect_err("output is protected");
+    assert_eq!(
+        missing.code,
+        pdfx_lib::commands::CommandErrorCode::PasswordRequired
+    );
+    let old_password = open_document(path_string(&output), Some(source_password))
+        .expect_err("the source password is not the output password");
+    assert_eq!(
+        old_password.code,
+        pdfx_lib::commands::CommandErrorCode::InvalidPassword
+    );
+    let reopened = open_document(path_string(&output), Some(new_password.to_owned()))
+        .expect("open with the new output password");
+    assert!(reopened.encrypted);
+    let text = extract_text(reopened.document_id.clone(), 0)
+        .expect("extract saved text")
+        .text;
+    assert!(text.contains("Still protected"), "got {text:?}");
     close_document(reopened.document_id).expect("close reopened");
 
     assert_eq!(
@@ -1082,6 +1654,172 @@ fn save_as_preserves_existing_acroform_fields() {
     );
 
     let reopened = open(&output);
+    let text = extract_text(reopened.document_id.clone(), 0)
+        .expect("extract text")
+        .text;
+    assert!(text.contains("Form kept"), "got {text:?}");
+    assert!(text.contains("Ada Lovelace"), "got {text:?}");
+    close_document(reopened.document_id).expect("close reopened");
+
+    assert_eq!(file_state(&source), source_before);
+    close_document(document.document_id).expect("close source");
+}
+
+/// Encryption is a full rewrite of the object graph, so the acceptance check
+/// is that everything outside the edited page survives it: bookmarks, link
+/// annotations, Info/XMP metadata and the embedded attachment.
+#[test]
+fn saving_with_a_password_preserves_bookmarks_links_metadata_and_attachments() {
+    let dir = TempDir::new("encrypted-structure");
+    let source = copy_fixture("structure", &dir, "source.pdf");
+    let output = dir.path().join("protected.pdf");
+    let source_before = file_state(&source);
+
+    let document = open(&source);
+    create_box(&document.document_id, 72.0, 200.0, "Structure kept");
+    save(
+        &document.document_id,
+        save_request_with_password(Some(&output), OUTPUT_PASSWORD),
+    );
+
+    let parsed = lopdf::Document::load_with_password(&output, OUTPUT_PASSWORD)
+        .expect("the output decrypts with its password");
+    assert_eq!(outline_titles(&parsed), vec!["Introduction", "Details"]);
+
+    let first_page = page_dictionary(&parsed, 1);
+    let annotations = first_page
+        .get(b"Annots")
+        .expect("/Annots")
+        .as_array()
+        .expect("/Annots array");
+    let uris: Vec<String> = annotations
+        .iter()
+        .filter_map(|annotation| {
+            let annotation = dict_of(&parsed, annotation);
+            let action = annotation.get(b"A").ok()?;
+            let action = dict_of(&parsed, action);
+            action.get(b"URI").ok().map(text_of)
+        })
+        .collect();
+    assert_eq!(uris, vec!["https://example.com/pdfx"]);
+
+    let info = parsed
+        .trailer
+        .get(b"Info")
+        .expect("trailer Info")
+        .as_reference()
+        .expect("Info reference");
+    let info = parsed
+        .get_object(info)
+        .expect("Info object")
+        .as_dict()
+        .unwrap();
+    assert_eq!(
+        text_of(info.get(b"Title").unwrap()),
+        "PDFX structure fixture"
+    );
+    assert_eq!(text_of(info.get(b"Author").unwrap()), "PDFX QA");
+
+    let metadata = catalog(&parsed).get(b"Metadata").expect("/Metadata");
+    let metadata = parsed
+        .get_object(metadata.as_reference().unwrap())
+        .expect("metadata stream")
+        .as_stream()
+        .expect("metadata stream object");
+    let xmp_bytes = metadata.decompressed_content().expect("XMP content");
+    assert!(
+        String::from_utf8_lossy(&xmp_bytes).contains("PDFX structure fixture"),
+        "XMP must survive encryption"
+    );
+
+    let names = catalog(&parsed).get(b"Names").expect("/Names");
+    let names = dict_of(&parsed, names);
+    let embedded = dict_of(
+        &parsed,
+        names.get(b"EmbeddedFiles").expect("/EmbeddedFiles"),
+    );
+    let pairs = embedded.get(b"Names").expect("/Names").as_array().unwrap();
+    assert_eq!(text_of(&pairs[0]), "notes.txt");
+    let filespec = dict_of(&parsed, &pairs[1]);
+    let ef = dict_of(&parsed, filespec.get(b"EF").expect("/EF"));
+    let file = parsed
+        .get_object(ef.get(b"F").unwrap().as_reference().unwrap())
+        .expect("embedded file stream")
+        .as_stream()
+        .expect("embedded file stream object");
+    assert_eq!(
+        file.decompressed_content().expect("embedded file content"),
+        b"PDFX fixture attachment.\n"
+    );
+
+    let reopened = open_document(path_string(&output), Some(OUTPUT_PASSWORD.to_owned()))
+        .expect("reopen the protected output");
+    let text = extract_text(reopened.document_id.clone(), 0)
+        .expect("extract text")
+        .text;
+    assert!(text.contains("PDFX structure fixture"), "got {text:?}");
+    assert!(text.contains("Structure kept"), "got {text:?}");
+    close_document(reopened.document_id).expect("close reopened");
+
+    assert_eq!(file_state(&source), source_before);
+    close_document(document.document_id).expect("close source");
+}
+
+#[test]
+fn saving_with_a_password_preserves_existing_acroform_fields() {
+    let dir = TempDir::new("encrypted-form");
+    let source = copy_fixture("form", &dir, "source.pdf");
+    let output = dir.path().join("protected.pdf");
+    let source_before = file_state(&source);
+
+    let document = open(&source);
+    create_box(&document.document_id, 72.0, 200.0, "Form kept");
+    save(
+        &document.document_id,
+        save_request_with_password(Some(&output), OUTPUT_PASSWORD),
+    );
+
+    let parsed = lopdf::Document::load_with_password(&output, OUTPUT_PASSWORD)
+        .expect("the output decrypts with its password");
+    let acro_form = catalog(&parsed).get(b"AcroForm").expect("/AcroForm");
+    let acro_form = dict_of(&parsed, acro_form);
+    let fields = acro_form
+        .get(b"Fields")
+        .expect("/Fields")
+        .as_array()
+        .expect("field array");
+    let values: Vec<(String, String)> = fields
+        .iter()
+        .map(|field| {
+            let field = dict_of(&parsed, field);
+            (
+                text_of(field.get(b"T").expect("field name")),
+                field
+                    .get(b"V")
+                    .map(name_or_text)
+                    .unwrap_or_else(|_| "<missing>".to_owned()),
+            )
+        })
+        .collect();
+    assert_eq!(
+        values,
+        vec![
+            ("full_name".to_owned(), "Ada Lovelace".to_owned()),
+            ("subscribe".to_owned(), "Off".to_owned()),
+            ("email".to_owned(), "<missing>".to_owned()),
+            ("gender".to_owned(), "Off".to_owned()),
+            ("country".to_owned(), "Japan".to_owned()),
+            ("department".to_owned(), "<missing>".to_owned()),
+            ("notes".to_owned(), "<missing>".to_owned()),
+            ("agree".to_owned(), "Off".to_owned()),
+            ("js_guard".to_owned(), "<missing>".to_owned()),
+            ("readonly_note".to_owned(), "Read only".to_owned()),
+        ],
+        "form fields, values and types survive encryption"
+    );
+
+    let reopened = open_document(path_string(&output), Some(OUTPUT_PASSWORD.to_owned()))
+        .expect("reopen the protected output");
     let text = extract_text(reopened.document_id.clone(), 0)
         .expect("extract text")
         .text;

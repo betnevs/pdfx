@@ -129,10 +129,24 @@ fn save_as(document_id: &str, target: &Path) -> SaveResultView {
         SaveDocumentRequest {
             save_as_path: Some(path_string(target)),
             confirm_unencrypted_output: false,
+            password: None,
         },
         &mut |_| {},
     )
     .expect("save as should succeed")
+}
+
+fn save_as_with_password(document_id: &str, target: &Path, password: &str) -> SaveResultView {
+    save_document_with_progress(
+        document_id,
+        SaveDocumentRequest {
+            save_as_path: Some(path_string(target)),
+            confirm_unencrypted_output: false,
+            password: Some(password.to_owned()),
+        },
+        &mut |_| {},
+    )
+    .expect("protected save as should succeed")
 }
 
 #[test]
@@ -368,6 +382,7 @@ fn restoring_opens_unsaved_edits_and_saves_through_the_normal_pipeline() {
         SaveDocumentRequest {
             save_as_path: None,
             confirm_unencrypted_output: false,
+            password: None,
         },
         &mut |update| progress.push(update),
     )
@@ -427,6 +442,115 @@ fn restoring_opens_unsaved_edits_and_saves_through_the_normal_pipeline() {
 
     close_document(restored.document_id).expect("close restored");
     close_document(document.document_id).expect("close original");
+}
+
+#[test]
+fn a_restored_protected_output_is_not_silently_saved_unencrypted() {
+    let _serial = serial();
+    let _app = app_data();
+    let store = global_store();
+    let dir = TempDir::new("recovery-protected-output");
+    let source = copy_fixture("text", &dir, "source.pdf");
+    let output = dir.path().join("protected.pdf");
+    let password = "pdfx-recovery-output-secret";
+    let source_before = file_state(&source);
+
+    let document = open(&source);
+    create_box(&document.document_id, "Saved with a password");
+    let saved = save_as_with_password(&document.document_id, &output, password);
+    assert!(saved.encrypted);
+
+    create_box(&document.document_id, "Unsaved before the crash");
+    assert!(
+        !maybe_snapshot_at(&document.document_id, 0)
+            .expect("tick")
+            .written
+    );
+    let written = maybe_snapshot_at(&document.document_id, 2_000).expect("tick");
+    assert!(written.written);
+    let session = written.session_id.expect("session id");
+
+    // The next start has no password in memory: restore learns the output was
+    // protected by inspecting the file, never from a stored secret.
+    let restored = restore_recovery(session.clone()).expect("restore recovery file");
+    assert!(restored.recovered);
+    assert_eq!(
+        restored.output_path.as_deref(),
+        Some(path_string(&output).as_str())
+    );
+    assert!(
+        restored.output_encrypted,
+        "restore detects the protected Output Document from the file"
+    );
+    let protected_before = file_state(&output);
+
+    let error = save_document_with_progress(
+        &restored.document_id,
+        SaveDocumentRequest {
+            save_as_path: None,
+            confirm_unencrypted_output: false,
+            password: None,
+        },
+        &mut |_| {},
+    )
+    .expect_err("Save Changes must not silently remove the protection");
+    assert_eq!(
+        error.code,
+        CommandErrorCode::EncryptedOutputConfirmationRequired
+    );
+    assert_eq!(
+        file_state(&output),
+        protected_before,
+        "the refused save leaves the protected output untouched"
+    );
+    assert!(
+        edit_history(restored.document_id.clone())
+            .expect("history")
+            .dirty,
+        "the restored edit is still unsaved"
+    );
+
+    // Re-entering the password keeps the protection through Save Changes.
+    let result = save_document_with_progress(
+        &restored.document_id,
+        SaveDocumentRequest {
+            save_as_path: None,
+            confirm_unencrypted_output: false,
+            password: Some(password.to_owned()),
+        },
+        &mut |_| {},
+    )
+    .expect("Save Changes with the re-entered password");
+    assert_eq!(result.kind, pdfx_lib::save::SaveKind::SaveChanges);
+    assert!(result.encrypted);
+    assert!(
+        store
+            .read_snapshot(&session)
+            .expect("read snapshot")
+            .is_none(),
+        "a successful save removes the Recovery File"
+    );
+
+    let missing = open_document(path_string(&output), None).expect_err("the output is protected");
+    assert_eq!(missing.code, CommandErrorCode::PasswordRequired);
+    let reopened = open_document(path_string(&output), Some(password.to_owned()))
+        .expect("the output opens with its password");
+    assert!(
+        extract_text(reopened.document_id.clone(), 0)
+            .expect("extract output text")
+            .text
+            .contains("Unsaved before the crash"),
+        "the restored edit survives the re-encrypted save"
+    );
+    close_document(reopened.document_id).expect("close reopened");
+    close_document(restored.document_id).expect("close restored");
+    close_document(document.document_id).expect("close original");
+
+    assert_eq!(
+        file_state(&source),
+        source_before,
+        "the Source Document stays untouched through restore and save"
+    );
 }
 
 #[test]
@@ -626,6 +750,7 @@ fn restoring_reuses_the_previous_output_only_while_it_is_valid() {
         SaveDocumentRequest {
             save_as_path: None,
             confirm_unencrypted_output: false,
+            password: None,
         },
         &mut |_| {},
     )
@@ -832,6 +957,7 @@ fn restoring_an_encrypted_source_keeps_the_unencrypted_output_warning() {
         SaveDocumentRequest {
             save_as_path: Some(path_string(&output)),
             confirm_unencrypted_output: false,
+            password: None,
         },
         &mut |_| {},
     )
@@ -850,6 +976,7 @@ fn restoring_an_encrypted_source_keeps_the_unencrypted_output_warning() {
         SaveDocumentRequest {
             save_as_path: Some(path_string(&output)),
             confirm_unencrypted_output: true,
+            password: None,
         },
         &mut |_| {},
     )

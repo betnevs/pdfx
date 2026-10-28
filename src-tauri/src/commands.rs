@@ -100,6 +100,10 @@ pub enum CommandErrorCode {
     /// The Source Document is encrypted and the caller did not confirm that the
     /// output is written unencrypted (ADR-0007).
     UnencryptedOutputConfirmationRequired,
+    /// The current Output Document was written with a User Password and the
+    /// caller supplied neither a new password nor confirmation that the
+    /// replacement is unencrypted. Protection is never dropped silently.
+    EncryptedOutputConfirmationRequired,
     /// Permission Restrictions forbid saving changes to this document.
     ReadOnlyDocument,
     /// The chosen attachment file exceeds the size limit.
@@ -216,6 +220,11 @@ pub struct DocumentView {
     /// exists and is not the Source Document.
     #[serde(default)]
     pub output_path: Option<String>,
+    /// True when the Output Document at `output_path` was written with a User
+    /// Password. Save Changes must not replace it with an unencrypted file
+    /// without an explicit decision; the password itself is never persisted.
+    #[serde(default)]
+    pub output_encrypted: bool,
     /// True when the Document was opened from a Recovery File. `path` is then
     /// the original Source Document (provenance) and is never written.
     #[serde(default)]
@@ -456,6 +465,7 @@ fn open_document_impl(
         NewDocument {
             display_name,
             output_path: None,
+            output_encrypted: None,
             recovered: false,
             encrypted: None,
             read_only: None,
@@ -472,6 +482,7 @@ fn open_document_impl(
 struct NewDocument {
     display_name: String,
     output_path: Option<String>,
+    output_encrypted: Option<bool>,
     recovered: bool,
     encrypted: Option<bool>,
     read_only: Option<bool>,
@@ -525,6 +536,7 @@ fn insert_document(
 
     registry.next_id += 1;
     let document_id = format!("doc-{}", registry.next_id);
+    let output_encrypted = options.output_encrypted.unwrap_or(false);
     let view = DocumentView {
         document_id: document_id.clone(),
         name: options.display_name,
@@ -536,10 +548,12 @@ fn insert_document(
         read_only,
         permissions,
         output_path: options.output_path.clone(),
+        output_encrypted,
         recovered: options.recovered,
     };
     let save = crate::save::SaveState {
         output_path: options.output_path.map(PathBuf::from),
+        output_encrypted,
         ..Default::default()
     };
     let attachments = crate::attachments::AttachmentStore::from_document(&document);
@@ -608,6 +622,17 @@ pub(crate) fn document_permissions(
     (encrypted, read_only, flags)
 }
 
+/// Reports whether the file at `path` is an encrypted PDF.
+///
+/// The User Password is never persisted, so a restored session can only learn
+/// that its Output Document was written with one by inspecting the file. The
+/// encryption dictionary is metadata, so this reads it without the password.
+fn output_is_encrypted(path: &std::path::Path) -> bool {
+    lopdf::Document::load(path)
+        .map(|document| document.is_encrypted())
+        .unwrap_or(false)
+}
+
 /// The `close_document` command. Closing an unknown document is a no-op so a
 /// window teardown is always safe.
 ///
@@ -673,6 +698,12 @@ pub fn restore_recovery(session_id: String) -> Result<DocumentView, CommandError
             target.is_file() && !crate::target_path::same_file(target, &snapshot.source_path)
         })
         .map(|target| target.to_string_lossy().into_owned());
+    // The password is never stored in the Recovery File, but the Output
+    // Document still carries its protection. Inspect the file so Save Changes
+    // asks for a decision instead of silently replacing it.
+    let output_encrypted = output_path
+        .as_deref()
+        .is_some_and(|target| output_is_encrypted(std::path::Path::new(target)));
 
     // Start the restored history above the crashed revision and mark it dirty:
     // the snapshot contains edits the last save never wrote. The undo/redo
@@ -698,6 +729,7 @@ pub fn restore_recovery(session_id: String) -> Result<DocumentView, CommandError
         NewDocument {
             display_name,
             output_path,
+            output_encrypted: Some(output_encrypted),
             recovered: true,
             encrypted: Some(snapshot.source_encrypted),
             read_only: Some(snapshot.source_read_only),
