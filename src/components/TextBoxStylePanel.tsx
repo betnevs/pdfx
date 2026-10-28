@@ -43,8 +43,16 @@ export function TextBoxStylePanel({
     return result;
   }, [fonts]);
 
+  // A legacy Text Object can carry a font family outside the built-in list
+  // (an embedded font, ArialMT, Helvetica-Bold...). The backend only accepts
+  // the advertised families for a whole-box restyle, so start from an offered
+  // family instead of sending one the panel cannot show.
+  const selectedFamily = families.includes(target.fontFamily)
+    ? target.fontFamily
+    : (families[0] ?? target.fontFamily);
+
   const style: TextBoxStyleView = {
-    fontFamily: target.fontFamily,
+    fontFamily: selectedFamily,
     fontSize: target.fontSize,
     bold: target.bold,
     italic: target.italic,
@@ -74,7 +82,7 @@ export function TextBoxStylePanel({
         <span>字体</span>
         <select
           aria-label="字体"
-          value={target.fontFamily}
+          value={selectedFamily}
           disabled={busy}
           onChange={(event) => update({ fontFamily: event.target.value })}
         >
