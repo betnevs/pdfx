@@ -62,6 +62,7 @@ const note: AnnotationView = {
   text: "记得回来",
   strokes: [],
   rects: [{ x: 80, y: 90, width: 30, height: 30 }],
+  shape: null,
 };
 
 function mockCommands(

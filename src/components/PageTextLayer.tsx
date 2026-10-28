@@ -398,6 +398,11 @@ export function PageTextLayer({
   const [history, setHistory] = useState<EditHistoryView | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
+  // External overlays (shapes, the annotation list) change the same document
+  // and share this undo stack, so their events re-fetch the history. This
+  // layer's own commands already return the new history, and re-fetching it
+  // here could overwrite that with a slower, stale response.
+  const [historyRefreshKey, setHistoryRefreshKey] = useState(0);
   const surfaceRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const dragAnchor = useRef<number | null>(null);
@@ -467,7 +472,7 @@ export function PageTextLayer({
     return () => {
       cancelled = true;
     };
-  }, [documentId]);
+  }, [documentId, historyRefreshKey]);
 
   useEffect(() => {
     if (!boxMode) {
@@ -530,14 +535,12 @@ export function PageTextLayer({
         if (detail.pageIndex === pageIndex) {
           setReloadKey((key) => key + 1);
         }
-        // The undo stack is document-wide: a form fill, an image edit or
-        // another tool's change alters the availability of this toolbar's
+        // The undo stack is document-wide: a form fill, an image edit, a shape
+        // or another tool's change alters the availability of this toolbar's
         // undo/redo buttons. This layer's own commands already returned the
         // new history, so their notification is only for the page content.
         if (detail.source !== "text") {
-          editHistory(documentId)
-            .then((next) => setHistory(next))
-            .catch(() => {});
+          setHistoryRefreshKey((key) => key + 1);
         }
       }),
     [documentId, pageIndex],

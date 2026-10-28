@@ -50,7 +50,7 @@ safe wrapper lives in `src-tauri/src/pdfium_adapter.rs`.
 
 ## Patch scope
 
-Eleven files change. Each hunk is additive; no upstream behaviour changes.
+Twelve files change. Each hunk is additive; no upstream behaviour changes.
 
 ### `src/pdf/document.rs`
 
@@ -74,6 +74,12 @@ Eleven files change. Each hunk is additive; no upstream behaviour changes.
   `FPDFPage_CloseAnnot()`. Upstream annotation types do not implement `Drop`,
   so Pdfium's requirement to close handles returned by `FPDFPage_CreateAnnot()`
   has no other safe outlet.
+
+### `src/pdf/document/page/annotation/square.rs`
+
+- Added `PdfPageSquareAnnotation::close(self)` calling
+  `FPDFPage_CloseAnnot()`, mirroring the circle patch. Rectangle shapes use it
+  through the adapter's free `create_shape_annotation()` function.
 
 ### `src/pdf/document/page/annotation/ink.rs`
 
@@ -199,9 +205,9 @@ cargo test --test cjk_fonts
    sha256 here.
 2. Replace everything in this directory with the new crate contents plus
    `LICENSE.md`, keeping `PDFX-PATCH.md`.
-3. Re-apply the hunks above (eleven files). `diff -u` against the pristine crate
-   source (cargo registry unpack directory or a fresh extract of the `.crate`)
-   is the authoritative patch; keep the diff to those eleven files.
+3. Re-apply the hunks above (twelve files). `diff -u` against the pristine
+   crate source (cargo registry unpack directory or a fresh extract of the
+   `.crate`) is the authoritative patch; keep the diff to those twelve files.
 4. Update `src-tauri/Cargo.toml` version if the patched range changes, then
    build. `pdfium-render` tracks the PDFium API, so re-run the adapter tests
    against the pinned PDFium build first.
@@ -213,9 +219,10 @@ cargo test --test cjk_fonts
 
 - Upstream concrete annotation types (e.g. `PdfPageCircleAnnotation`) have no
   `Drop`; only the `PdfPageAnnotation` enum closes its annotation handle. The
-  patch adds `close(self)` to the six types PDFX creates (circle, ink,
-  highlight, underline, strikeout, text), and the adapter calls it immediately
-  after setting bounds. Other concrete annotation types keep upstream behaviour, so
+  patch adds `close(self)` to the seven types PDFX creates (circle, square,
+  ink, highlight, underline, strikeout, text), and the adapter calls it
+  immediately after setting bounds. Other concrete annotation types keep
+  upstream behaviour, so
   callers creating them directly must close them explicitly if the patch is
   extended to expose them. Later adapter operations fetch the annotation
   through the enum, which does close the handle.
