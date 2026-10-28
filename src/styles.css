@@ -1977,6 +1977,13 @@ button {
   cursor: default;
 }
 
+.text-box-selection-note {
+  margin: 0;
+  color: var(--pdfx-blue-text);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
 .text-box-font-note {
   margin: 0;
   color: var(--pdfx-muted);
