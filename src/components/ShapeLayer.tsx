@@ -389,7 +389,11 @@ export function ShapeLayer({
         geometry: { ...rect, rotation: 0 },
         style: pendingStyle,
       });
-      notifyDocumentChanged({ documentId, pageIndex });
+      notifyDocumentChanged({
+        documentId,
+        pageIndex,
+        source: "shape",
+      });
       onSelectAnnotation?.(result.annotation);
       setTool(null);
     } catch (error) {
@@ -416,7 +420,11 @@ export function ShapeLayer({
         annotation.name,
         geometry,
       );
-      notifyDocumentChanged({ documentId, pageIndex });
+      notifyDocumentChanged({
+        documentId,
+        pageIndex,
+        source: "shape",
+      });
       onSelectAnnotation?.(result.annotation);
     } catch (error) {
       setNotice({ kind: "error", text: toCommandError(error).message });

@@ -174,6 +174,7 @@ export function AnnotationPanel({
       notifyDocumentChanged({
         documentId,
         pageIndex: selected.pageIndex,
+        source: "annotation",
       });
     } catch (error) {
       setActionError(toCommandError(error).message);
@@ -195,6 +196,7 @@ export function AnnotationPanel({
       notifyDocumentChanged({
         documentId,
         pageIndex: selected.pageIndex,
+        source: "annotation",
       });
     } catch (error) {
       setActionError(toCommandError(error).message);

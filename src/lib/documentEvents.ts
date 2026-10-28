@@ -16,6 +16,12 @@ export const DOCUMENT_CHANGED_EVENT = "pdfx://document-changed";
 export interface DocumentChangedDetail {
   documentId: string;
   pageIndex: number;
+  /**
+   * The tool that made the change, when another overlay needs to refresh
+   * tool-specific state such as the shared undo availability. Omitted by
+   * callers whose command results already carry that state.
+   */
+  source?: "text" | "image" | "shape" | "annotation";
 }
 
 export function notifyDocumentChanged(detail: DocumentChangedDetail): void {
@@ -40,7 +46,19 @@ export function onDocumentChanged(
       typeof detail.documentId === "string" &&
       typeof detail.pageIndex === "number"
     ) {
-      handler({ documentId: detail.documentId, pageIndex: detail.pageIndex });
+      const message: DocumentChangedDetail = {
+        documentId: detail.documentId,
+        pageIndex: detail.pageIndex,
+      };
+      if (
+        detail.source === "text" ||
+        detail.source === "image" ||
+        detail.source === "shape" ||
+        detail.source === "annotation"
+      ) {
+        message.source = detail.source;
+      }
+      handler(message);
     }
   };
   window.addEventListener(DOCUMENT_CHANGED_EVENT, listener);

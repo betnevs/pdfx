@@ -240,7 +240,7 @@ describe("PageTextLayer", () => {
       savedRevision: 0,
       dirty: true,
     };
-    notifyDocumentChanged({ documentId: "doc-1", pageIndex: 2 });
+    notifyDocumentChanged({ documentId: "doc-1", pageIndex: 2, source: "shape" });
     await waitFor(() => expect(undo).toBeEnabled());
   });
 });

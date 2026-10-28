@@ -239,7 +239,11 @@ describe("ShapeLayer drawing", () => {
       },
     });
     expect(onSelect).toHaveBeenCalledWith(createdRectangle);
-    expect(received.at(-1)?.detail).toEqual({ documentId: "doc-1", pageIndex: 2 });
+    expect(received.at(-1)?.detail).toEqual({
+      documentId: "doc-1",
+      pageIndex: 2,
+      source: "shape",
+    });
     await waitFor(() =>
       expect(screen.queryByTestId("shape-create-preview")).toBeNull(),
     );
@@ -379,7 +383,11 @@ describe("ShapeLayer selection and transforms", () => {
       name: "pdfx-8",
       geometry: { x: 120, y: 110, width: 200, height: 100, rotation: 0 },
     });
-    expect(received.at(-1)?.detail).toEqual({ documentId: "doc-1", pageIndex: 2 });
+    expect(received.at(-1)?.detail).toEqual({
+      documentId: "doc-1",
+      pageIndex: 2,
+      source: "shape",
+    });
   });
 
   it("resizes a rotated shape along its own axes", async () => {
