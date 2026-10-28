@@ -1,0 +1,70 @@
+%PDF-1.7
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [6 0 R 7 0 R] /DA (/Helv 0 Tf 0 g) /DR << /Font << /Helv 4 0 R >> >> /NeedAppearances true >> >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R /Annots [6 0 R 7 0 R] >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>
+endobj
+5 0 obj
+<<  /Length 127 >>
+stream
+BT /F1 16 Tf 72 720 Td (PDFX AcroForm fixture) Tj 0 -26 Td (Full name:  Ada Lovelace) Tj 0 -26 Td (Subscribe to updates) Tj ET
+
+endstream
+endobj
+6 0 obj
+<< /Type /Annot /Subtype /Widget /FT /Tx /T (full_name) /V (Ada Lovelace) /Rect [72 620 320 644] /P 3 0 R /F 4 /DA (/Helv 12 Tf 0 g) /AP << /N 8 0 R >> >>
+endobj
+7 0 obj
+<< /Type /Annot /Subtype /Widget /FT /Btn /T (subscribe) /V /Off /AS /Off /Rect [72 580 88 596] /P 3 0 R /F 4 /AP << /N << /Off 9 0 R /Yes 10 0 R >> >> >>
+endobj
+8 0 obj
+<< /Type /XObject /Subtype /Form /BBox [0 0 248 24] /Resources << /Font << /Helv 4 0 R >> >> /Length 43 >>
+stream
+BT /Helv 12 Tf 4 7 Td (Ada Lovelace) Tj ET
+
+endstream
+endobj
+9 0 obj
+<< /Type /XObject /Subtype /Form /BBox [0 0 16 16] /Length 28 >>
+stream
+q 0 0 0 rg 1 1 14 14 re S Q
+
+endstream
+endobj
+10 0 obj
+<< /Type /XObject /Subtype /Form /BBox [0 0 16 16] /Length 50 >>
+stream
+q 0 0 0 rg 1 1 14 14 re S 3 8 m 6 4 l 12 12 l S Q
+
+endstream
+endobj
+11 0 obj
+<< /Title (PDFX form fixture) /Author (PDFX QA) >>
+endobj
+xref
+0 12
+0000000000 65535 f 
+0000000015 00000 n 
+0000000179 00000 n 
+0000000236 00000 n 
+0000000384 00000 n 
+0000000481 00000 n 
+0000000660 00000 n 
+0000000830 00000 n 
+0000001000 00000 n 
+0000001183 00000 n 
+0000001309 00000 n 
+0000001458 00000 n 
+trailer
+<< /Size 12 /Root 1 0 R /Info 11 0 R >>
+startxref
+1525
+%%EOF
