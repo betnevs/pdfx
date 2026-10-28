@@ -8,6 +8,7 @@ import {
   type Settings,
   type SettingsUpdateResult,
 } from "./settings";
+import { appliedTheme, refreshResolvedTheme, watchSystemTheme } from "./theme";
 
 export interface SettingsController {
   /** The last settings the backend returned, or defaults while unavailable. */
@@ -53,6 +54,20 @@ export function useSettings(): SettingsController {
       cancelled = true;
     };
   }, []);
+
+  // Following the system is a CSS media-query decision; this keeps the
+  // concrete resolved theme in sync so the rest of the app can observe the
+  // live light/dark state without restarting. Re-resolve from the theme that
+  // is actually applied: settings may not have loaded while a cached pinned
+  // theme is already on screen.
+  useEffect(() => {
+    if (settings.theme !== "system") {
+      return;
+    }
+    return watchSystemTheme(() => {
+      refreshResolvedTheme(appliedTheme());
+    });
+  }, [settings.theme]);
 
   const update = useCallback(async (next: Settings): Promise<SettingsUpdateResult> => {
     const result = await updateSettings(next);

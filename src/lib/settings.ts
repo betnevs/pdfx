@@ -1,6 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 
+import { applyTheme } from "./theme";
+
 /** Interface language options offered by the settings page. */
 export type InterfaceLanguage = "zh-CN" | "en-US";
 
@@ -88,15 +90,11 @@ export async function chooseDiagnosticsDestination(): Promise<string | null> {
 /**
  * Applies the theme to the document. `system` removes the attribute so the
  * `prefers-color-scheme` styles take over.
+ *
+ * Re-exported from `theme.ts`, which also caches the choice before paint and
+ * tracks the concrete resolved theme.
  */
-export function applyTheme(theme: Theme): void {
-  const root = document.documentElement;
-  if (theme === "light" || theme === "dark") {
-    root.dataset.theme = theme;
-  } else {
-    delete root.dataset.theme;
-  }
-}
+export { applyTheme };
 
 /** Records the interface language for assistive tech and future copy. */
 export function applyLanguage(language: InterfaceLanguage): void {
