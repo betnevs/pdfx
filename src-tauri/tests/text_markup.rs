@@ -998,3 +998,222 @@ fn invalid_annotation_requests_are_rejected_without_dirtying_the_document() {
     assert!(!history.can_undo);
     close_document(document_id).expect("close document");
 }
+
+#[test]
+fn squiggly_is_a_native_annotation_with_zigzag_appearance_that_round_trips() {
+    let dir = TempDir::new("text-markup-squiggly");
+    let pdf = synthetic::single_line_pdf();
+    let document_id = open_synthetic(&pdf);
+
+    let created = create_text_markup_with_author(
+        document_id.clone(),
+        "作者".to_owned(),
+        CreateTextMarkupRequest {
+            page_index: 0,
+            kind: TextMarkupKind::Squiggly,
+            color: "#008000".to_owned(),
+            opacity: 70,
+            rects: vec![
+                TextMarkupRect {
+                    x: 100.0,
+                    y: 300.0,
+                    width: 120.0,
+                    height: 30.0,
+                },
+                TextMarkupRect {
+                    x: 100.0,
+                    y: 350.0,
+                    width: 120.0,
+                    height: 30.0,
+                },
+            ],
+        },
+    )
+    .expect("create squiggly");
+    let view = created.annotation.expect("squiggly view");
+    assert_eq!(view.kind, AnnotationKind::Squiggly);
+    assert_eq!(view.rects.len(), 2);
+    assert_eq!(view.color, "#008000");
+
+    let listed = list_annotations(document_id.clone()).expect("list annotations");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].kind, AnnotationKind::Squiggly);
+
+    let output = dir.path().join("squiggly.pdf");
+    save_as(&document_id, &output);
+    close_document(document_id).expect("close source");
+
+    let parsed = lopdf::Document::load(&output).expect("lopdf parses the output");
+    let annotations = page_annotations(&parsed, 1);
+    let squiggly = find_annotation(&annotations, b"Squiggly");
+    assert_normal_appearance_is_stream(&parsed, squiggly);
+    assert_eq!(
+        squiggly
+            .get(b"QuadPoints")
+            .expect("/QuadPoints")
+            .as_array()
+            .expect("QuadPoints array")
+            .len(),
+        16,
+        "two lines means two quadrilaterals"
+    );
+    let components = colour_components(squiggly);
+    assert_eq!(components.len(), 3);
+    assert!((components[0]).abs() < 0.001);
+    assert!((components[1] - 128.0 / 255.0).abs() < 0.001);
+    assert!((components[2]).abs() < 0.001);
+    let alpha = squiggly
+        .get(b"CA")
+        .expect("/CA opacity")
+        .as_float()
+        .expect("numeric /CA");
+    assert!((alpha - 0.7).abs() < 0.01);
+    assert_eq!(text_of(squiggly.get(b"T").expect("/T author")), "作者");
+
+    let reopened = open_document(output.to_string_lossy().into_owned(), None)
+        .expect("reopen the saved output");
+    let pixels = render_pixels(&reopened.document_id, 0, 1.0);
+    let green = |pixel: (u8, u8, u8)| pixel.1 > 90 && pixel.0 < 90 && pixel.2 < 90;
+    let mut green_pixels = 0;
+    for y in 323..333 {
+        for x in 100..221 {
+            if green(pixels.pixel(x, y)) {
+                green_pixels += 1;
+            }
+        }
+    }
+    assert!(
+        green_pixels > 20,
+        "the squiggly stroke should zigzag along the bottom of its rectangle, saw {green_pixels} coloured pixels"
+    );
+    let views = list_annotations(reopened.document_id.clone()).expect("list reopened");
+    assert_eq!(views.len(), 1);
+    assert_eq!(views[0].kind, AnnotationKind::Squiggly);
+    assert_eq!(views[0].rects.len(), 2);
+    assert_eq!(views[0].opacity, 70);
+
+    // A second save must not duplicate the annotation or its appearance.
+    let second = dir.path().join("squiggly-again.pdf");
+    save_as(&reopened.document_id, &second);
+    let reparsed = lopdf::Document::load(&second).expect("lopdf parses the second output");
+    assert_eq!(page_annotations(&reparsed, 1).len(), 1);
+    close_document(reopened.document_id).expect("close reopened");
+}
+
+#[test]
+fn squiggly_style_delete_and_undo_share_the_annotation_history() {
+    let pdf = synthetic::single_line_pdf();
+    let document_id = open_synthetic(&pdf);
+    let created = create_text_markup_with_author(
+        document_id.clone(),
+        "作者".to_owned(),
+        CreateTextMarkupRequest {
+            page_index: 0,
+            kind: TextMarkupKind::Squiggly,
+            color: "#ff0000".to_owned(),
+            opacity: 100,
+            rects: vec![TextMarkupRect {
+                x: 100.0,
+                y: 400.0,
+                width: 120.0,
+                height: 30.0,
+            }],
+        },
+    )
+    .expect("create squiggly");
+    let name = created.annotation.expect("squiggly view").name;
+
+    update_annotation_style(
+        document_id.clone(),
+        name.clone(),
+        "#0000ff".to_owned(),
+        40,
+        None,
+    )
+    .expect("restyle squiggly");
+    let styled = list_annotations(document_id.clone()).expect("list styled");
+    assert_eq!(styled[0].color, "#0000ff");
+    assert_eq!(styled[0].opacity, 40);
+
+    undo_text_edit(document_id.clone()).expect("undo style");
+    let undone = list_annotations(document_id.clone()).expect("list undone");
+    assert_eq!(undone[0].color, "#ff0000");
+    assert_eq!(undone[0].opacity, 100);
+
+    delete_annotation(document_id.clone(), name.clone()).expect("delete squiggly");
+    assert!(list_annotations(document_id.clone())
+        .expect("list after delete")
+        .is_empty());
+    undo_text_edit(document_id.clone()).expect("undo delete");
+    let restored = list_annotations(document_id.clone()).expect("list after undo");
+    assert_eq!(restored.len(), 1);
+    assert_eq!(restored[0].kind, AnnotationKind::Squiggly);
+    assert_eq!(restored[0].rects.len(), 1);
+
+    redo_text_edit(document_id).expect("redo delete");
+}
+
+#[test]
+fn squiggly_geometry_follows_page_rotation_and_crop_boxes() {
+    let dir = TempDir::new("text-markup-squiggly-rotated");
+    let pdf = synthetic::rotated_crop_pdf();
+    let document_id = open_synthetic(&pdf);
+    let rect = TextMarkupRect {
+        x: 24.0,
+        y: 40.0,
+        width: 90.0,
+        height: 24.0,
+    };
+    let created = create_text_markup_with_author(
+        document_id.clone(),
+        "作者".to_owned(),
+        CreateTextMarkupRequest {
+            page_index: 1,
+            kind: TextMarkupKind::Squiggly,
+            color: "#cc0000".to_owned(),
+            opacity: 100,
+            rects: vec![rect],
+        },
+    )
+    .expect("create rotated squiggly");
+    let view = created.annotation.expect("squiggly view");
+    assert_eq!(view.page_index, 1);
+    assert_eq!(view.rects.len(), 1);
+    let stored = view.rects[0];
+    assert!((stored.x - rect.x).abs() < 0.01);
+    assert!((stored.y - rect.y).abs() < 0.01);
+    assert!((stored.width - rect.width).abs() < 0.01);
+    assert!((stored.height - rect.height).abs() < 0.01);
+
+    let output = dir.path().join("rotated-squiggly.pdf");
+    save_as(&document_id, &output);
+    close_document(document_id).expect("close source");
+
+    let reopened =
+        open_document(output.to_string_lossy().into_owned(), None).expect("reopen rotated output");
+    let views = list_annotations(reopened.document_id.clone()).expect("list reopened");
+    assert_eq!(views.len(), 1);
+    assert_eq!(views[0].kind, AnnotationKind::Squiggly);
+    let after = views[0].rects[0];
+    assert!((after.x - rect.x).abs() < 0.01, "x: {after:?}");
+    assert!((after.y - rect.y).abs() < 0.01, "y: {after:?}");
+    assert!((after.width - rect.width).abs() < 0.01);
+    assert!((after.height - rect.height).abs() < 0.01);
+
+    let pixels = render_pixels(&reopened.document_id, 1, 1.0);
+    let red = |pixel: (u8, u8, u8)| pixel.0 > 150 && pixel.1 < 100 && pixel.2 < 100;
+    let mut red_pixels = 0;
+    let top = rect.y as u32 + rect.height as u32 - 5;
+    for y in top..=(rect.y as u32 + rect.height as u32 + 1) {
+        for x in rect.x as u32..(rect.x + rect.width) as u32 {
+            if red(pixels.pixel(x, y)) {
+                red_pixels += 1;
+            }
+        }
+    }
+    assert!(
+        red_pixels > 15,
+        "the rotated page should render the zigzag, saw {red_pixels} coloured pixels"
+    );
+    close_document(reopened.document_id).expect("close reopened");
+}

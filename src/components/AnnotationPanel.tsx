@@ -4,9 +4,11 @@ import {
   deleteAnnotation,
   toCommandError,
   updateAnnotationStyle,
+  updateFreeText,
   updateNoteText,
   updateShapeStyle,
   type AnnotationView,
+  type FreeTextAlign,
   type ShapeStyle,
 } from "../lib/backend";
 import { notifyDocumentChanged } from "../lib/documentEvents";
@@ -16,6 +18,15 @@ const DEFAULT_SHAPE_FILL = "#3366cc";
 const DEFAULT_SHAPE_STROKE = "#000000";
 const SHAPE_LINE_WIDTH_MIN = 0.5;
 const SHAPE_LINE_WIDTH_MAX = 100;
+const FREETEXT_FONT_SIZE_MIN = 6;
+const FREETEXT_FONT_SIZE_MAX = 72;
+
+/** Chinese labels for the `/Q` alignment values. */
+const FREETEXT_ALIGN_LABELS: Record<FreeTextAlign, string> = {
+  left: "左对齐",
+  center: "居中",
+  right: "右对齐",
+};
 
 /** Formats the backend's PDF date into the list's readable UTC label. */
 export function formatAnnotationTime(value: string | null): string | null {
@@ -73,6 +84,12 @@ export function AnnotationPanel({
     selected?.lineWidth ?? 3,
   );
   const [textDraft, setTextDraft] = useState(selected?.text ?? "");
+  const [fontSizeDraft, setFontSizeDraft] = useState(
+    selected?.freeText?.fontSize ?? 12,
+  );
+  const [alignDraft, setAlignDraft] = useState<FreeTextAlign>(
+    selected?.freeText?.align ?? "left",
+  );
   const [shapeFillEnabled, setShapeFillEnabled] = useState(
     selected?.shape ? selected.shape.style.fillColor !== null : true,
   );
@@ -98,6 +115,8 @@ export function AnnotationPanel({
     setOpacityDraft(selected?.opacity ?? 50);
     setLineWidthDraft(selected?.lineWidth ?? 3);
     setTextDraft(selected?.text ?? "");
+    setFontSizeDraft(selected?.freeText?.fontSize ?? 12);
+    setAlignDraft(selected?.freeText?.align ?? "left");
     setShapeFillEnabled(shapeStyle ? shapeStyle.fillColor !== null : true);
     setShapeFillColor(shapeStyle?.fillColor ?? DEFAULT_SHAPE_FILL);
     setShapeStrokeEnabled(shapeStyle ? shapeStyle.strokeColor !== null : true);
@@ -110,6 +129,8 @@ export function AnnotationPanel({
     selected?.opacity,
     selected?.lineWidth,
     selected?.text,
+    selected?.freeText?.fontSize,
+    selected?.freeText?.align,
     shapeStyle?.fillColor,
     shapeStyle?.strokeColor,
     shapeStyle?.lineWidth,
@@ -156,12 +177,23 @@ export function AnnotationPanel({
       shapeDraft.strokeColor !== shapeStyle.strokeColor ||
       shapeDraft.opacity !== shapeStyle.opacity ||
       shapeDraft.lineWidth !== shapeStyle.lineWidth);
+  const freeTextView = selected?.freeText ?? null;
+  const freeTextChanged =
+    selected !== null &&
+    freeTextView !== null &&
+    (textDraft !== (selected.text ?? "") ||
+      fontSizeDraft !== freeTextView.fontSize ||
+      alignDraft !== freeTextView.align ||
+      colorDraft !== selected.color ||
+      opacityDraft !== selected.opacity);
   const canApply =
     selected === null
       ? false
       : selected.shape !== null
         ? shapeStyleChanged && shapeDraftValid
-        : styleChanged;
+        : freeTextView !== null
+          ? freeTextChanged
+          : styleChanged;
 
   async function applyStyle() {
     if (!selected || !canApply || busy) {
@@ -172,6 +204,15 @@ export function AnnotationPanel({
     try {
       if (shapeDraft) {
         await updateShapeStyle(documentId, selected.name, shapeDraft);
+      } else if (freeTextView !== null) {
+        await updateFreeText(documentId, {
+          name: selected.name,
+          text: textDraft,
+          fontSize: fontSizeDraft,
+          align: alignDraft,
+          color: colorDraft,
+          opacity: opacityDraft,
+        });
       } else {
         await updateAnnotationStyle(
           documentId,
@@ -261,7 +302,7 @@ export function AnnotationPanel({
         <div className="annotation-empty">
           <p>还没有注释</p>
           <p>
-            选择页面文字即可添加高亮、下划线或删除线；使用页面上的形状工具绘制矩形或椭圆，也可以放置便签、手绘或图章。
+            选择页面文字即可添加高亮、下划线、删除线或波浪线；使用页面上的形状工具绘制矩形、椭圆、自由文本或标注框，也可以放置便签、手绘或图章。
           </p>
         </div>
       ) : (
@@ -308,6 +349,18 @@ export function AnnotationPanel({
                                 {annotation.text.trim() || "（空白便签）"}
                               </span>
                             )}
+                          {(annotation.kind === "freetext" ||
+                            annotation.kind === "callout") && (
+                            <span className="annotation-preview">
+                              {annotation.text?.trim() || "（空白文本框）"} ·{" "}
+                              {annotation.freeText?.fontSize ?? 12} pt ·{" "}
+                              {
+                                FREETEXT_ALIGN_LABELS[
+                                  annotation.freeText?.align ?? "left"
+                                ]
+                              }
+                            </span>
+                          )}
                           {annotation.kind === "ink" && (
                             <span className="annotation-preview">
                               {annotation.strokes.length} 笔 ·{" "}
@@ -343,7 +396,92 @@ export function AnnotationPanel({
               />
             </label>
           )}
-          {selected.kind === "stamp" ? (
+          {freeTextView !== null ? (
+            <>
+              <label className="annotation-control annotation-note-text">
+                <span>文本内容</span>
+                <textarea
+                  aria-label="自由文本内容"
+                  value={textDraft}
+                  maxLength={5000}
+                  rows={4}
+                  disabled={busy !== null}
+                  onChange={(event) => setTextDraft(event.target.value)}
+                />
+              </label>
+              <label className="annotation-control">
+                <span>字号</span>
+                <input
+                  type="number"
+                  aria-label="自由文本字号"
+                  min={FREETEXT_FONT_SIZE_MIN}
+                  max={FREETEXT_FONT_SIZE_MAX}
+                  step={1}
+                  value={fontSizeDraft}
+                  disabled={busy !== null}
+                  onChange={(event) => {
+                    const next = Number.parseFloat(event.target.value);
+                    if (Number.isFinite(next)) {
+                      setFontSizeDraft(
+                        Math.min(
+                          Math.max(next, FREETEXT_FONT_SIZE_MIN),
+                          FREETEXT_FONT_SIZE_MAX,
+                        ),
+                      );
+                    }
+                  }}
+                />
+              </label>
+              <label className="annotation-control">
+                <span>对齐</span>
+                <select
+                  aria-label="自由文本对齐"
+                  value={alignDraft}
+                  disabled={busy !== null}
+                  onChange={(event) =>
+                    setAlignDraft(event.target.value as FreeTextAlign)
+                  }
+                >
+                  {(
+                    Object.entries(FREETEXT_ALIGN_LABELS) as [
+                      FreeTextAlign,
+                      string,
+                    ][]
+                  ).map(([value, label]) => (
+                    <option key={value} value={value}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="annotation-control">
+                <span>颜色</span>
+                <input
+                  type="color"
+                  aria-label="自由文本颜色"
+                  value={colorDraft}
+                  disabled={busy !== null}
+                  onChange={(event) => setColorDraft(event.target.value)}
+                />
+              </label>
+              <label className="annotation-control">
+                <span>透明度</span>
+                <input
+                  type="range"
+                  aria-label="自由文本透明度"
+                  min={0}
+                  max={100}
+                  step={1}
+                  value={opacityDraft}
+                  disabled={busy !== null}
+                  onChange={(event) =>
+                    setOpacityDraft(Number.parseInt(event.target.value, 10))
+                  }
+                />
+                <span>{opacityDraft}%</span>
+              </label>
+            </>
+          ) : selected.kind === "stamp" ? (
             <>
               <p className="annotation-stamp-summary">
                 图章：
@@ -520,7 +658,7 @@ export function AnnotationPanel({
               disabled={!canApply || busy !== null}
               onClick={() => void applyStyle()}
             >
-              应用样式
+              {freeTextView !== null ? "应用文本与样式" : "应用样式"}
             </button>
             <button
               type="button"

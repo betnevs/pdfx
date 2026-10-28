@@ -25,6 +25,15 @@ pub struct PdfPageFreeTextAnnotation<'a> {
 }
 
 impl<'a> PdfPageFreeTextAnnotation<'a> {
+    /// Closes the underlying Pdfium annotation handle, releasing the resource
+    /// acquired when the annotation was created or looked up.
+    #[inline]
+    pub fn close(self) {
+        unsafe {
+            self.bindings().FPDFPage_CloseAnnot(self.handle)
+        }
+    }
+
     pub(crate) fn from_pdfium(
         document_handle: FPDF_DOCUMENT,
         page_handle: FPDF_PAGE,

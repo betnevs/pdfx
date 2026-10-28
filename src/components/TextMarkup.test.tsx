@@ -81,6 +81,7 @@ const created: AnnotationView = {
   rects: [{ x: 100, y: 100, width: 12, height: 20 }],
   shape: null,
   stamp: null,
+  freeText: null,
 };
 
 function mockCommands(overrides: Record<string, (args: Record<string, unknown>) => unknown> = {}) {
@@ -159,6 +160,7 @@ describe("PageTextLayer text markup", () => {
     expect(screen.getByRole("button", { name: "高亮" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "下划线" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "删除线" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "波浪线" })).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText("注释颜色"), {
       target: { value: "#00ff00" },
@@ -189,6 +191,7 @@ describe("PageTextLayer text markup", () => {
   it.each([
     ["下划线", "underline"],
     ["删除线", "strikeout"],
+    ["波浪线", "squiggly"],
   ])("creates a %s annotation", async (label, kind) => {
     mockCommands();
     await renderLayer();

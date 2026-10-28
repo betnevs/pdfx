@@ -403,13 +403,29 @@ export interface FormFieldEditResultView {
 }
 
 /** The text markup annotation kinds PDFX creates. */
-export type TextMarkupKind = "highlight" | "underline" | "strikeout";
+export type TextMarkupKind = "highlight" | "underline" | "strikeout" | "squiggly";
 
 /** The geometric shape kinds PDFX creates. */
 export type ShapeKind = "square" | "circle";
 
+/**
+ * The two free text layouts. Both are native `/FreeText` annotations; a
+ * callout additionally paints a bordered, tinted box. Neither is a comment
+ * thread.
+ */
+export type FreeTextKind = "freetext" | "callout";
+
+/** Horizontal alignment of free text inside its box (`/Q`). */
+export type FreeTextAlign = "left" | "center" | "right";
+
 /** Every annotation kind the list, overlays and style panel manage. */
-export type AnnotationKind = TextMarkupKind | ShapeKind | "note" | "ink" | "stamp";
+export type AnnotationKind =
+  | TextMarkupKind
+  | ShapeKind
+  | FreeTextKind
+  | "note"
+  | "ink"
+  | "stamp";
 
 /** A display-space rectangle of a markup selection, note icon or ink bounds. */
 export interface TextMarkupRect {
@@ -466,6 +482,39 @@ export interface CreateStampRequest {
   opacity: number;
   /** Display-space frame. */
   frame: StampFrameView;
+}
+
+/** The editable body and typography of a free text or callout annotation. */
+export interface FreeTextView {
+  kind: FreeTextKind;
+  /** Font size in page points. */
+  fontSize: number;
+  align: FreeTextAlign;
+}
+
+/** Places a native free text box or callout box in display space. */
+export interface CreateFreeTextRequest {
+  pageIndex: number;
+  kind: FreeTextKind;
+  /** Display-space box; text wraps inside it. */
+  rect: TextMarkupRect;
+  /** Text and callout border colour as `#rrggbb`. */
+  color: string;
+  /** Constant opacity in percent (0-100). */
+  opacity: number;
+  text: string;
+  fontSize: number;
+  align: FreeTextAlign;
+}
+
+/** Replaces a free text body, alignment, size, colour and opacity at once. */
+export interface UpdateFreeTextRequest {
+  name: string;
+  text: string;
+  fontSize: number;
+  align: FreeTextAlign;
+  color: string;
+  opacity: number;
 }
 
 /** Moves, resizes or rotates a stamp as one undoable action. */
@@ -525,6 +574,8 @@ export interface AnnotationView {
   shape: ShapeView | null;
   /** Set only for stamp annotations. */
   stamp: StampView | null;
+  /** Set only for free text and callout annotations. */
+  freeText: FreeTextView | null;
 }
 
 /** A shape's unrotated display-space geometry plus clockwise rotation. */
@@ -1062,7 +1113,8 @@ export async function markDocumentSaved(
 }
 
 /**
- * Creates a native highlight, underline or strikeout over a text selection.
+ * Creates a native highlight, underline, strikeout or squiggly over a text
+ * selection.
  * The author comes from the persisted settings on the Rust side; the frontend
  * never supplies or sees it as an input.
  */
@@ -1150,6 +1202,44 @@ export async function createInkAnnotation(
   });
 }
 
+/**
+ * Places a native free text box or callout box. The author comes from the
+ * persisted settings on the Rust side, exactly like text markup.
+ */
+export async function createFreeTextAnnotation(
+  documentId: string,
+  request: CreateFreeTextRequest,
+): Promise<AnnotationMutationView> {
+  return invoke<AnnotationMutationView>("create_free_text_annotation", {
+    documentId,
+    request,
+  });
+}
+
+/** Replaces a free text body, alignment, font size, colour and opacity. */
+export async function updateFreeText(
+  documentId: string,
+  request: UpdateFreeTextRequest,
+): Promise<AnnotationMutationView> {
+  return invoke<AnnotationMutationView>("update_free_text", {
+    documentId,
+    request,
+  });
+}
+
+/** Moves or resizes a free text or callout box as one undoable action. */
+export async function transformFreeTextAnnotation(
+  documentId: string,
+  name: string,
+  rect: TextMarkupRect,
+): Promise<AnnotationMutationView> {
+  return invoke<AnnotationMutationView>("transform_free_text_annotation", {
+    documentId,
+    name,
+    rect,
+  });
+}
+
 /** Replaces a sticky note's body as one undoable action. */
 export async function updateNoteText(
   documentId: string,
@@ -1233,6 +1323,23 @@ export async function deleteAnnotation(
   return invoke<AnnotationMutationView>("delete_annotation", {
     documentId,
     name,
+  });
+}
+
+/**
+ * Removes one stroke from an ink annotation and rebuilds its `/InkList`,
+ * bounds and appearance. Erasing the last stroke deletes the annotation.
+ * Either outcome is one undoable annotation-history action.
+ */
+export async function eraseInkStroke(
+  documentId: string,
+  name: string,
+  strokeIndex: number,
+): Promise<AnnotationMutationView> {
+  return invoke<AnnotationMutationView>("erase_ink_stroke", {
+    documentId,
+    name,
+    strokeIndex,
   });
 }
 
