@@ -22,6 +22,7 @@ Rust 测试通过 `src-tauri/tests/support/fixtures.rs` 读取 `manifest.json`�
 | scanned | `scanned-image-only.pdf` | 纯 DeviceGray 图像页，无文本层 | — |
 | encrypted | `encrypted-user-password.pdf` | 必须输入用户密码才能打开 | 用户 `pdfx-user` / 所有者 `pdfx-owner` |
 | encrypted | `encrypted-owner-restrictions.pdf` | 用户密码为空；所有者限制修改、复制与注释，允许打印 | 用户（空）/ 所有者 `pdfx-owner` |
+| encrypted | `encrypted-print-denied.pdf` | 用户密码为空；所有者仅禁止打印，编辑、复制与注释仍允许 | 用户（空）/ 所有者 `pdfx-owner` |
 | form | `form-acroform.pdf` | 已填写的文本字段 + 复选框（`/Off`、`/Yes` 外观流） | — |
 | structure | `structure-metadata.pdf` | 两级书签、URI 链接、Info/XMP 元数据、内嵌附件 | — |
 | large | `large-500-pages.pdf` | 500 页最小“大文件”样例（约 146KB） | — |

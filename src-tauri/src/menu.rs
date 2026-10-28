@@ -17,14 +17,29 @@ pub fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     let open = MenuItemBuilder::with_id("file.open", "打开…")
         .accelerator("CmdOrCtrl+O")
         .build(app)?;
+    let print = MenuItemBuilder::with_id("file.print", "打印…")
+        .accelerator("CmdOrCtrl+P")
+        .build(app)?;
+    let export_page = MenuItemBuilder::with_id("file.export_page", "导出当前页…")
+        .accelerator("CmdOrCtrl+Shift+E")
+        .build(app)?;
     let settings = MenuItemBuilder::with_id("app.settings", "设置…")
         .accelerator("CmdOrCtrl+,")
         .build(app)?;
 
     #[cfg(target_os = "macos")]
-    let file_builder = SubmenuBuilder::new(app, "文件").item(&open);
+    let file_builder = SubmenuBuilder::new(app, "文件")
+        .item(&open)
+        .separator()
+        .item(&print)
+        .item(&export_page);
     #[cfg(not(target_os = "macos"))]
-    let file_builder = SubmenuBuilder::new(app, "文件").item(&open).item(&settings);
+    let file_builder = SubmenuBuilder::new(app, "文件")
+        .item(&open)
+        .item(&settings)
+        .separator()
+        .item(&print)
+        .item(&export_page);
     let file = file_builder
         .separator()
         .close_window_with_text("关闭窗口")

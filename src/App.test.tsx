@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -1177,5 +1177,66 @@ describe("PDFX workspace", () => {
     await waitFor(() => expect(menuHandler).toBeDefined());
     act(() => menuHandler?.({ payload: "app.settings" }));
     expect(await screen.findByRole("dialog", { name: "设置" })).toBeInTheDocument();
+  });
+
+  it("opens print and export from the toolbar and the native menu", async () => {
+    installDocumentBackend();
+    openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("report.pdf");
+
+    await user.click(screen.getByRole("button", { name: "打印…" }));
+    const printDialog = await screen.findByRole("dialog", { name: "打印" });
+    await user.click(
+      within(printDialog).getByRole("button", { name: "取消" }),
+    );
+    expect(screen.queryByRole("dialog", { name: "打印" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "导出当前页…" }));
+    const exportDialog = await screen.findByRole("dialog", { name: "导出当前页" });
+    await user.click(
+      within(exportDialog).getByRole("button", { name: "取消" }),
+    );
+    expect(
+      screen.queryByRole("dialog", { name: "导出当前页" }),
+    ).not.toBeInTheDocument();
+
+    await waitFor(() => expect(menuHandler).toBeDefined());
+    act(() => menuHandler?.({ payload: "file.print" }));
+    const menuPrintDialog = await screen.findByRole("dialog", { name: "打印" });
+    await user.click(
+      within(menuPrintDialog).getByRole("button", { name: "取消" }),
+    );
+
+    act(() => menuHandler?.({ payload: "file.export_page" }));
+    expect(
+      await screen.findByRole("dialog", { name: "导出当前页" }),
+    ).toBeInTheDocument();
+  });
+
+  it("disables printing and explains why when permission restrictions deny it", async () => {
+    installDocumentBackend({
+      open_document: () => ({
+        ...documentView,
+        permissions: { ...allGrantedPermissions, canPrint: false },
+      }),
+    });
+    openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("report.pdf");
+
+    expect(screen.getByRole("button", { name: "打印…" })).toBeDisabled();
+    expect(screen.getByText("文档所有者限制了打印权限。")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "导出当前页…" })).toBeEnabled();
+
+    await waitFor(() => expect(menuHandler).toBeDefined());
+    act(() => menuHandler?.({ payload: "file.print" }));
+    expect(screen.queryByRole("dialog", { name: "打印" })).not.toBeInTheDocument();
   });
 });

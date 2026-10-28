@@ -116,6 +116,11 @@ do {
                 expect(!document.allowsCopying, "owner restrictions deny copying")
                 expect(document.allowsPrinting, "owner restrictions still allow printing")
             }
+            if fixture.id.contains("print-denied") {
+                expect(!document.allowsPrinting, "print restriction denies printing")
+                expect(document.allowsDocumentChanges, "print-only restriction still allows changes")
+                expect(document.allowsCopying, "print-only restriction still allows copying")
+            }
 
         case "form":
             let annotations = document.page(at: 0)?.annotations ?? []

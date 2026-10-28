@@ -7,6 +7,9 @@ export const READ_ONLY_REASON =
 /** Save Changes must stay disabled for a read-only document. */
 export const SAVE_CHANGES_READ_ONLY = "只读文档不能保存更改。";
 
+/** Visible explanation when Permission Restrictions deny printing. */
+export const PRINT_DISABLED_REASON = "文档所有者限制了打印权限。";
+
 /**
  * ADR-0007: saving an encrypted Source Document writes an unencrypted Output
  * Document. Ticket 10 must show this warning before Save Changes or Save As;
@@ -24,6 +27,8 @@ export interface DocumentPolicy {
   saveChangesDisabledReason: string | null;
   /** Warning to show before any save, or null when no warning is needed. */
   unencryptedOutputWarning: string | null;
+  /** Why printing is unavailable, or null when the document may print. */
+  printDisabledReason: string | null;
 }
 
 /**
@@ -40,5 +45,6 @@ export function documentPolicy(document: DocumentView): DocumentPolicy {
     editingDisabledReason: document.readOnly ? READ_ONLY_REASON : null,
     saveChangesDisabledReason: document.readOnly ? SAVE_CHANGES_READ_ONLY : null,
     unencryptedOutputWarning: document.encrypted ? UNENCRYPTED_OUTPUT_WARNING : null,
+    printDisabledReason: document.permissions.canPrint ? null : PRINT_DISABLED_REASON,
   };
 }

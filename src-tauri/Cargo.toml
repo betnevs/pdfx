@@ -25,6 +25,8 @@ base64 = "0.22"
 pdfium-render = { version = "=0.9.4", default-features = false, features = ["pdfium_7881", "thread_safe"] }
 percent-encoding = "2"
 png = "0.18"
+# JPEG export: only the encoder codec is compiled in. MIT/Apache-2.0.
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
 # Glyph coverage checks before rewriting text with an embedded font.
 ttf-parser = "0.25"
 

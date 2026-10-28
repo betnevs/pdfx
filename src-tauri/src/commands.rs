@@ -22,7 +22,7 @@ use crate::settings::{self, Settings, SettingsStore, SettingsUpdateResult};
 /// tiling) at high zoom.
 const MIN_SCALE: f32 = 0.1;
 const MAX_SCALE: f32 = 40.0;
-const MAX_RENDER_PIXELS: i64 = 64_000_000;
+pub(crate) const MAX_RENDER_PIXELS: i64 = 64_000_000;
 
 /// Thumbnail rendering bounds. `max_edge` is the long edge in pixels.
 const MIN_THUMBNAIL_EDGE: u32 = 16;
@@ -68,6 +68,10 @@ pub enum CommandErrorCode {
     /// replacement text without emitting missing glyphs.
     UnsupportedFont,
     RenderFailed,
+    /// The exported page image could not be written to disk.
+    FileWriteFailed,
+    /// The platform print operation could not be started.
+    PrintFailed,
     WindowFailed,
     Internal,
 }
@@ -234,6 +238,9 @@ pub struct TextLayerView {
 }
 
 pub(crate) struct OpenDocument {
+    /// Where the Source Document was read from. Export and print use it to
+    /// refuse overwriting the file the Document was opened from.
+    pub(crate) source_path: PathBuf,
     /// The unmodified bytes read from disk, kept for the incremental-save
     /// pipeline. PDFium owns its own copy of the input buffer.
     #[allow(dead_code)]
@@ -372,6 +379,7 @@ fn open_document_impl(
     registry.documents.insert(
         document_id,
         OpenDocument {
+            source_path: path,
             source_bytes: bytes,
             edit: crate::text_edit::EditSession::default(),
             document,
@@ -737,7 +745,7 @@ pub(crate) fn load_page(
 
 /// Display pixel dimensions for a page at a scale, enforcing the full-page
 /// bitmap budget.
-fn checked_page_pixels(
+pub(crate) fn checked_page_pixels(
     page: &PdfPage<'_>,
     page_index: u32,
     scale: f32,
@@ -755,13 +763,16 @@ fn checked_page_pixels(
     Ok((width, height))
 }
 
-fn page_pixel_size(page: &PdfPage<'_>, scale: f32) -> (u32, u32) {
+pub(crate) fn page_pixel_size(page: &PdfPage<'_>, scale: f32) -> (u32, u32) {
     let width = (page.width().value * scale).round().max(1.0);
     let height = (page.height().value * scale).round().max(1.0);
     (width as u32, height as u32)
 }
 
-fn render_full_page_png(
+/// Renders a full page into straight RGBA bytes, the bitmap the page viewer
+/// and every export share. Keeping one rendering path guarantees an exported
+/// page and the on-screen canvas agree pixel for pixel.
+pub(crate) fn render_page_rgba(
     page: &PdfPage<'_>,
     page_index: u32,
     pixel_width: u32,
@@ -788,6 +799,16 @@ fn render_full_page_png(
         ));
     }
 
+    Ok(rgba)
+}
+
+fn render_full_page_png(
+    page: &PdfPage<'_>,
+    page_index: u32,
+    pixel_width: u32,
+    pixel_height: u32,
+) -> Result<Vec<u8>, CommandError> {
+    let rgba = render_page_rgba(page, page_index, pixel_width, pixel_height)?;
     encode_png(&rgba, pixel_width, pixel_height)
 }
 
@@ -1221,7 +1242,7 @@ fn union_boxes(
     }
 }
 
-fn encode_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, CommandError> {
+pub(crate) fn encode_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, CommandError> {
     let mut output = Vec::new();
     {
         let mut encoder = png::Encoder::new(&mut output, width, height);
