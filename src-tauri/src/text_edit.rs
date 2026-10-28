@@ -18,6 +18,10 @@ use pdfium_render::prelude::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::annotations::{
+    ensure_annotation_editable, remove_annotation_named, restore_annotation_snapshot,
+    AnnotationSnapshot,
+};
 use crate::commands::{
     build_text_layer_with_raw_indices, load_page, with_open_document, CommandError,
     CommandErrorCode, DisplayGeometry, OpenDocument,
@@ -506,6 +510,7 @@ impl BoxEditAction {
 pub(crate) enum EditAction {
     Box(BoxEditAction),
     Field(FieldEditAction),
+    Annotation(AnnotationEditAction),
 }
 
 /// The value a field edit restores during undo or redo.
@@ -531,6 +536,22 @@ pub(crate) struct FieldEditAction {
     pub(crate) after_state: u64,
     pub(crate) before: FieldValueSnapshot,
     pub(crate) after: FieldValueSnapshot,
+}
+
+/// One committed annotation change.
+///
+/// Unlike a Text Box action, both snapshots stay on the action while it moves
+/// between the undo and redo stacks: applying a snapshot always removes the
+/// current annotation with the same name and recreates it from the snapshot.
+pub(crate) struct AnnotationEditAction {
+    pub(crate) page_index: u32,
+    pub(crate) name: String,
+    pub(crate) before_state: u64,
+    pub(crate) after_state: u64,
+    /// State before the change; `None` when the change created the annotation.
+    pub(crate) before: Option<AnnotationSnapshot>,
+    /// State after the change; `None` when the change deleted the annotation.
+    pub(crate) after: Option<AnnotationSnapshot>,
 }
 
 /// One editable Text Box on a page.
@@ -1811,31 +1832,132 @@ fn push_action(
     entry.edit.current_state = after_state;
 }
 
+/// Appends a committed annotation change to the unified undo stack.
+pub(crate) fn push_annotation_action(
+    entry: &mut OpenDocument,
+    page_index: u32,
+    name: String,
+    before: Option<AnnotationSnapshot>,
+    after: Option<AnnotationSnapshot>,
+) -> EditHistoryView {
+    let before_state = entry.edit.current_state;
+    let after_state = entry.edit.next_state + 1;
+    entry.edit.next_state = after_state;
+    entry
+        .edit
+        .undo_stack
+        .push(EditAction::Annotation(AnnotationEditAction {
+            page_index,
+            name,
+            before_state,
+            after_state,
+            before,
+            after,
+        }));
+    entry.edit.redo_stack.clear();
+    entry.edit.current_state = after_state;
+    entry.edit.history_view()
+}
+
+/// Applies one side of an annotation action. `None` means the side has no
+/// annotation, so the current annotation is removed.
+fn apply_annotation_target(
+    document: &PdfDocument<'static>,
+    target: Option<&AnnotationSnapshot>,
+    name: &str,
+) -> Result<(), CommandError> {
+    match target {
+        Some(snapshot) => restore_annotation_snapshot(document, snapshot),
+        None => remove_annotation_named(document, name),
+    }
+}
+
+fn undo_annotation(
+    entry: &mut OpenDocument,
+    action: AnnotationEditAction,
+) -> Result<EditStepView, CommandError> {
+    apply_annotation_target(&entry.document, action.before.as_ref(), &action.name)?;
+    let page_index = action.page_index;
+    entry.edit.current_state = action.before_state;
+    entry.edit.redo_stack.push(EditAction::Annotation(action));
+    Ok(EditStepView {
+        page_index,
+        history: entry.edit.history_view(),
+    })
+}
+
+fn redo_annotation(
+    entry: &mut OpenDocument,
+    action: AnnotationEditAction,
+) -> Result<EditStepView, CommandError> {
+    apply_annotation_target(&entry.document, action.after.as_ref(), &action.name)?;
+    let page_index = action.page_index;
+    entry.edit.current_state = action.after_state;
+    entry.edit.undo_stack.push(EditAction::Annotation(action));
+    Ok(EditStepView {
+        page_index,
+        history: entry.edit.history_view(),
+    })
+}
+
+fn redo_field(
+    entry: &mut OpenDocument,
+    action: FieldEditAction,
+) -> Result<EditStepView, CommandError> {
+    crate::form::apply_field_snapshot(&entry.document, &action.field_id, &action.after)?;
+    let page_index = action.page_index;
+    entry.edit.current_state = action.after_state;
+    entry.edit.undo_stack.push(EditAction::Field(action));
+    Ok(EditStepView {
+        page_index,
+        history: entry.edit.history_view(),
+    })
+}
+
 fn undo_for(entry: &mut OpenDocument) -> Result<EditStepView, CommandError> {
+    // Check the permission of the action that is about to be applied without
+    // popping it: a Box action needs content permission, a Field action needs
+    // form-filling permission, an annotation action needs annotation
+    // permission.
     match entry.edit.undo_stack.last() {
+        Some(EditAction::Box(_)) => ensure_content_editable(&entry.document)?,
         Some(EditAction::Field(_)) => crate::form::ensure_forms_editable(&entry.document)?,
-        _ => ensure_content_editable(&entry.document)?,
+        Some(EditAction::Annotation(_)) => ensure_annotation_editable(&entry.document)?,
+        None => {
+            return Err(CommandError::new(
+                CommandErrorCode::InvalidArgument,
+                "there is nothing to undo",
+            ))
+        }
     }
     let Some(action) = entry.edit.undo_stack.pop() else {
-        return Err(CommandError::new(
-            CommandErrorCode::InvalidArgument,
-            "there is nothing to undo",
-        ));
+        unreachable!("the undo stack was checked immediately above");
     };
-    let mut action = match action {
-        EditAction::Field(action) => {
-            crate::form::apply_field_snapshot(&entry.document, &action.field_id, &action.before)?;
-            entry.edit.current_state = action.before_state;
-            let page_index = action.page_index;
-            entry.edit.redo_stack.push(EditAction::Field(action));
-            return Ok(EditStepView {
-                page_index,
-                history: entry.edit.history_view(),
-            });
-        }
-        EditAction::Box(action) => action,
-    };
+    match action {
+        EditAction::Box(action) => undo_box(entry, action),
+        EditAction::Field(action) => undo_field(entry, action),
+        EditAction::Annotation(action) => undo_annotation(entry, action),
+    }
+}
 
+fn undo_field(
+    entry: &mut OpenDocument,
+    action: FieldEditAction,
+) -> Result<EditStepView, CommandError> {
+    crate::form::apply_field_snapshot(&entry.document, &action.field_id, &action.before)?;
+    let page_index = action.page_index;
+    entry.edit.current_state = action.before_state;
+    entry.edit.redo_stack.push(EditAction::Field(action));
+    Ok(EditStepView {
+        page_index,
+        history: entry.edit.history_view(),
+    })
+}
+
+fn undo_box(
+    entry: &mut OpenDocument,
+    mut action: BoxEditAction,
+) -> Result<EditStepView, CommandError> {
     let before_count = action.before_count();
     let after_count = action.after_count();
     let restore = action.before_objects.take().unwrap_or_default();
@@ -1893,30 +2015,35 @@ fn undo_for(entry: &mut OpenDocument) -> Result<EditStepView, CommandError> {
 }
 
 fn redo_for(entry: &mut OpenDocument) -> Result<EditStepView, CommandError> {
+    // Check the permission of the action that is about to be applied without
+    // popping it: a Box action needs content permission, a Field action needs
+    // form-filling permission, an annotation action needs annotation
+    // permission.
     match entry.edit.redo_stack.last() {
+        Some(EditAction::Box(_)) => ensure_content_editable(&entry.document)?,
         Some(EditAction::Field(_)) => crate::form::ensure_forms_editable(&entry.document)?,
-        _ => ensure_content_editable(&entry.document)?,
+        Some(EditAction::Annotation(_)) => ensure_annotation_editable(&entry.document)?,
+        None => {
+            return Err(CommandError::new(
+                CommandErrorCode::InvalidArgument,
+                "there is nothing to redo",
+            ))
+        }
     }
     let Some(action) = entry.edit.redo_stack.pop() else {
-        return Err(CommandError::new(
-            CommandErrorCode::InvalidArgument,
-            "there is nothing to redo",
-        ));
+        unreachable!("the redo stack was checked immediately above");
     };
-    let mut action = match action {
-        EditAction::Field(action) => {
-            crate::form::apply_field_snapshot(&entry.document, &action.field_id, &action.after)?;
-            entry.edit.current_state = action.after_state;
-            let page_index = action.page_index;
-            entry.edit.undo_stack.push(EditAction::Field(action));
-            return Ok(EditStepView {
-                page_index,
-                history: entry.edit.history_view(),
-            });
-        }
-        EditAction::Box(action) => action,
-    };
+    match action {
+        EditAction::Box(action) => redo_box(entry, action),
+        EditAction::Field(action) => redo_field(entry, action),
+        EditAction::Annotation(action) => redo_annotation(entry, action),
+    }
+}
 
+fn redo_box(
+    entry: &mut OpenDocument,
+    mut action: BoxEditAction,
+) -> Result<EditStepView, CommandError> {
     let before_count = action.before_count();
     let after_count = action.after_count();
     let restore = action.after_objects.take().unwrap_or_default();

@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { DocumentAccess } from "./components/DocumentAccess";
+import { AnnotationPanel } from "./components/AnnotationPanel";
 import { DocumentToolbar, PageSurface, ThumbnailRail } from "./components/PageViewer";
+import {
+  PrintExport,
+  type PrintExportHandle,
+} from "./components/PrintExport";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { PasswordPrompt } from "./components/PasswordPrompt";
 import { SaveConfirmDialog } from "./components/SaveConfirmDialog";
@@ -18,6 +23,7 @@ import {
   setWindowTitle,
   toCommandError,
   ZOOM_STEP,
+  type AnnotationView,
   type AppInfo,
   type CommandError,
   type CommandErrorCode,
@@ -25,6 +31,7 @@ import {
   type FormFieldView,
 } from "./lib/backend";
 import { scaleToPercent } from "./lib/pageGeometry";
+import { useAnnotations } from "./lib/useAnnotations";
 import { useDocumentSave } from "./lib/useDocumentSave";
 import { useDocumentViewer } from "./lib/useDocumentViewer";
 import { useSettings } from "./lib/useSettings";
@@ -98,6 +105,7 @@ export function App() {
   const dirtyRef = useRef(dirty);
   dirtyRef.current = dirty;
   const openingRef = useRef(false);
+  const printExportRef = useRef<PrintExportHandle>(null);
 
   const handleViewerError = useCallback((error: CommandError) => {
     const current = editorRef.current;
@@ -117,6 +125,33 @@ export function App() {
   const viewer = useDocumentViewer(openDocumentView, handleViewerError);
   const viewerRef = useRef(viewer);
   viewerRef.current = viewer;
+
+  const annotations = useAnnotations(openDocumentView?.documentId ?? null);
+  const [selectedAnnotation, setSelectedAnnotation] =
+    useState<AnnotationView | null>(null);
+
+  // A list refresh can remove the selected annotation (delete, undo). Drop the
+  // outline with it; the panel clears its property controls the same way.
+  useEffect(() => {
+    setSelectedAnnotation((current) =>
+      current === null
+        ? null
+        : (annotations.annotations.find(
+            (annotation) => annotation.name === current.name,
+          ) ?? null),
+    );
+  }, [annotations.annotations]);
+
+  useEffect(() => {
+    setSelectedAnnotation(null);
+  }, [openDocumentView?.documentId]);
+
+  function selectAnnotation(annotation: AnnotationView | null) {
+    setSelectedAnnotation(annotation);
+    if (annotation) {
+      viewer.goToPage(annotation.pageIndex);
+    }
+  }
 
   // Required-field validation navigates to the page of the first empty widget
   // and asks the form overlay to focus it.
@@ -266,6 +301,12 @@ export function App() {
     switch (menuId) {
       case "file.open":
         promptOpen();
+        break;
+      case "file.print":
+        printExportRef.current?.openPrintDialog();
+        break;
+      case "file.export_page":
+        printExportRef.current?.openExportDialog();
         break;
       case "file.save":
         saveRef.current.saveChanges();
@@ -502,6 +543,11 @@ export function App() {
               onActualSize={viewer.actualSize}
               onToggleFullscreen={viewer.toggleFullscreen}
             />
+            <PrintExport
+              ref={printExportRef}
+              document={open.document}
+              pageIndex={viewer.pageIndex}
+            />
             <DocumentAccess document={open.document} save={save} />
             <div className="document-body">
               <ThumbnailRail
@@ -527,6 +573,8 @@ export function App() {
                     scale={viewer.scale}
                     render={viewer.render}
                     readOnly={open.document.readOnly}
+                    canAnnotate={open.document.permissions.canAnnotate}
+                    selectedAnnotation={selectedAnnotation}
                     surfaceRef={viewer.surfaceRef}
                     canFillForms={
                       open.document.permissions.canFillForms &&
@@ -539,6 +587,17 @@ export function App() {
                   />
                 </div>
               </div>
+              <AnnotationPanel
+                documentId={open.document.documentId}
+                annotations={annotations.annotations}
+                selectedName={selectedAnnotation?.name ?? null}
+                loading={annotations.status === "loading"}
+                error={annotations.error?.message ?? null}
+                canAnnotate={open.document.permissions.canAnnotate}
+                readOnly={open.document.readOnly}
+                onSelect={selectAnnotation}
+                onChanged={() => void annotations.reload()}
+              />
             </div>
           </section>
         )}

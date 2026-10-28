@@ -28,6 +28,8 @@ export type CommandErrorCode =
   | "no_editable_text"
   | "unsupported_font"
   | "render_failed"
+  | "file_write_failed"
+  | "print_failed"
   | "window_failed"
   | "save_failed"
   | "save_target_is_source"
@@ -356,6 +358,55 @@ export interface FormFieldEditResultView {
   history: EditHistoryView;
 }
 
+/** The text markup annotation kinds PDFX creates. */
+export type TextMarkupKind = "highlight" | "underline" | "strikeout";
+
+/** A display-space rectangle of a markup selection. */
+export interface TextMarkupRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** Creates a native text markup annotation over the selected rectangles. */
+export interface CreateTextMarkupRequest {
+  pageIndex: number;
+  kind: TextMarkupKind;
+  /** Fill or stroke colour as `#rrggbb`. */
+  color: string;
+  /** Constant opacity in percent (0-100). */
+  opacity: number;
+  /** Display-space rectangles; one per selected line. */
+  rects: TextMarkupRect[];
+}
+
+/**
+ * A native text markup annotation read back from the in-memory document.
+ *
+ * `name` is the stable `/NM` identity used by locate, restyle and delete.
+ * `author` and `createdAt` are copied into the PDF at creation time; `createdAt`
+ * is the PDF date string (`D:YYYYMMDDHHmmSSZ`).
+ */
+export interface AnnotationView {
+  name: string;
+  pageIndex: number;
+  kind: TextMarkupKind;
+  author: string | null;
+  createdAt: string | null;
+  color: string;
+  opacity: number;
+  rects: TextMarkupRect[];
+}
+
+/** The outcome of creating, restyling or deleting one annotation. */
+export interface AnnotationMutationView {
+  /** Null after a deletion. */
+  annotation: AnnotationView | null;
+  pageIndex: number;
+  history: EditHistoryView;
+}
+
 /** The two save entry points. */
 export type SaveKind = "save_as" | "save_changes";
 
@@ -418,6 +469,8 @@ const COMMAND_ERROR_CODES: ReadonlySet<string> = new Set<CommandErrorCode>([
   "no_editable_text",
   "unsupported_font",
   "render_failed",
+  "file_write_failed",
+  "print_failed",
   "window_failed",
   "save_failed",
   "save_target_is_source",
@@ -447,6 +500,64 @@ export async function choosePdfFile(): Promise<string | null> {
     multiple: false,
     directory: false,
     filters: [{ name: "PDF", extensions: ["pdf"] }],
+  });
+  return typeof selection === "string" ? selection : null;
+}
+
+/** Image format of an exported Page. */
+export type PageImageFormat = "png" | "jpg";
+
+/** Confirmation metadata for a written page image. */
+export interface PageExportView {
+  path: string;
+  format: PageImageFormat;
+  dpi: number;
+  width: number;
+  height: number;
+  bytes: number;
+}
+
+/**
+ * Writes one Page as a PNG or JPEG image at `dpi` (72 = actual size).
+ * Export is read-only: it never changes the Document or its unsaved state.
+ */
+export async function exportPage(
+  documentId: string,
+  pageIndex: number,
+  format: PageImageFormat,
+  dpi: number,
+  destination: string,
+): Promise<PageExportView> {
+  return invoke<PageExportView>("export_page", {
+    documentId,
+    pageIndex,
+    format,
+    dpi,
+    destination,
+  });
+}
+
+/**
+ * Opens the platform print dialog for the print-only surface the caller built.
+ * The backend re-checks the Document's Permission Restrictions first.
+ */
+export async function printDocument(documentId: string): Promise<void> {
+  return invoke<void>("print_document", { documentId });
+}
+
+/** Native save dialog for a page image. Returns null when cancelled. */
+export async function choosePageImageDestination(
+  defaultPath: string,
+  format: PageImageFormat,
+): Promise<string | null> {
+  const selection = await saveDialog({
+    defaultPath,
+    filters: [
+      {
+        name: format === "png" ? "PNG" : "JPG",
+        extensions: [format === "png" ? "png" : "jpg"],
+      },
+    ],
   });
   return typeof selection === "string" ? selection : null;
 }
@@ -713,6 +824,54 @@ export async function markDocumentSaved(
   documentId: string,
 ): Promise<EditHistoryView> {
   return invoke<EditHistoryView>("mark_document_saved", { documentId });
+}
+
+/**
+ * Creates a native highlight, underline or strikeout over a text selection.
+ * The author comes from the persisted settings on the Rust side; the frontend
+ * never supplies or sees it as an input.
+ */
+export async function createTextMarkupAnnotation(
+  documentId: string,
+  request: CreateTextMarkupRequest,
+): Promise<AnnotationMutationView> {
+  return invoke<AnnotationMutationView>("create_text_markup_annotation", {
+    documentId,
+    request,
+  });
+}
+
+/** Lists every text markup annotation in the document, in page order. */
+export async function listAnnotations(
+  documentId: string,
+): Promise<AnnotationView[]> {
+  return invoke<AnnotationView[]>("list_annotations", { documentId });
+}
+
+/** Changes an existing annotation's colour and opacity as one undoable action. */
+export async function updateAnnotationStyle(
+  documentId: string,
+  name: string,
+  color: string,
+  opacity: number,
+): Promise<AnnotationMutationView> {
+  return invoke<AnnotationMutationView>("update_annotation_style", {
+    documentId,
+    name,
+    color,
+    opacity,
+  });
+}
+
+/** Removes an annotation from the in-memory document; undo can bring it back. */
+export async function deleteAnnotation(
+  documentId: string,
+  name: string,
+): Promise<AnnotationMutationView> {
+  return invoke<AnnotationMutationView>("delete_annotation", {
+    documentId,
+    name,
+  });
 }
 
 /**

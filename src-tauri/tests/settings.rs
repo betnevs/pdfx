@@ -10,8 +10,8 @@ use std::sync::Mutex;
 
 use pdfx_lib::file_association::{AssociationResult, AssociationStatus, FileAssociationPlatform};
 use pdfx_lib::settings::{
-    apply_update, InterfaceLanguage, Settings, SettingsError, SettingsStore, Theme,
-    DEFAULT_ANNOTATION_AUTHOR, SETTINGS_FILE_NAME,
+    apply_update, default_annotation_author, InterfaceLanguage, Settings, SettingsError,
+    SettingsStore, Theme, SETTINGS_FILE_NAME,
 };
 use support::temp::TempDir;
 
@@ -87,7 +87,7 @@ fn settings_default_to_chinese_system_theme_and_file_association_off() {
 
     assert_eq!(settings.language, InterfaceLanguage::ZhCn);
     assert_eq!(settings.theme, Theme::System);
-    assert_eq!(settings.annotation_author, DEFAULT_ANNOTATION_AUTHOR);
+    assert_eq!(settings.annotation_author, default_annotation_author());
     assert!(!settings.file_association_enabled);
     assert_eq!(settings.update_manifest_url, "");
 }
@@ -237,7 +237,7 @@ fn partial_settings_files_fill_missing_fields_from_defaults() {
     let loaded = store.load();
     assert_eq!(loaded.theme, Theme::Light);
     assert_eq!(loaded.language, InterfaceLanguage::ZhCn);
-    assert_eq!(loaded.annotation_author, DEFAULT_ANNOTATION_AUTHOR);
+    assert_eq!(loaded.annotation_author, default_annotation_author());
     assert!(!loaded.file_association_enabled);
 }
 

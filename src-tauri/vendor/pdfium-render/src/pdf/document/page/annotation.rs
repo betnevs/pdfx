@@ -481,6 +481,47 @@ impl<'a> PdfPageAnnotation<'a> {
         }
     }
 
+    /// Returns the annotation name (`/NM`), if any.
+    ///
+    /// The name uniquely identifies the annotation among the annotations on
+    /// its page. PDFX uses it as the stable identity of a text markup
+    /// annotation across edits and undo/redo.
+    pub fn name(&self) -> Option<String> {
+        self.unwrap_as_trait().get_string_value("NM")
+    }
+
+    /// Sets the annotation name (`/NM`).
+    pub fn set_name(&mut self, name: &str) -> Result<(), PdfiumError> {
+        self.unwrap_as_trait_mut().set_string_value("NM", name)
+    }
+
+    /// Returns the raw PDF date string in `/CreationDate`, if present.
+    pub fn creation_date(&self) -> Option<String> {
+        self.unwrap_as_trait().get_string_value("CreationDate")
+    }
+
+    /// Sets `/CreationDate` from a raw PDF date string.
+    ///
+    /// PDFX stores the creation time it read from the annotation so undo can
+    /// restore a deleted annotation without inventing a new timestamp; unlike
+    /// [PdfPageAnnotationCommon::set_creation_date()] this takes the PDF date
+    /// representation directly and does not require a date-time type in the
+    /// caller.
+    pub fn set_creation_date_string(&mut self, date: &str) -> Result<(), PdfiumError> {
+        self.unwrap_as_trait_mut()
+            .set_string_value("CreationDate", date)
+    }
+
+    /// Returns an arbitrary string value from the annotation dictionary.
+    pub fn string_value(&self, key: &str) -> Option<String> {
+        self.unwrap_as_trait().get_string_value(key)
+    }
+
+    /// Sets an arbitrary string value in the annotation dictionary.
+    pub fn set_string_value(&mut self, key: &str, value: &str) -> Result<(), PdfiumError> {
+        self.unwrap_as_trait_mut().set_string_value(key, value)
+    }
+
     /// The type of this [PdfPageAnnotation].
     ///
     /// Not all PDF annotation types are supported by Pdfium. For example, Pdfium does not

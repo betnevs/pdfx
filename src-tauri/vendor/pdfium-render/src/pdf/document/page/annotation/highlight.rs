@@ -43,6 +43,18 @@ impl<'a> PdfPageHighlightAnnotation<'a> {
         }
     }
 
+    /// Consumes this annotation and releases the underlying Pdfium annotation
+    /// handle with `FPDFPage_CloseAnnot()`.
+    ///
+    /// Pdfium requires the caller to close every handle returned by
+    /// `FPDFPage_CreateAnnot()`, but `pdfium-render` annotation types do not
+    /// implement `Drop`. Use this method once the annotation is no longer needed.
+    pub fn close(self) {
+        unsafe {
+            self.bindings().FPDFPage_CloseAnnot(self.handle);
+        }
+    }
+
     /// Returns a mutable collection of all the attachment points in this [PdfPageHighlightAnnotation].
     #[inline]
     pub fn attachment_points_mut(&mut self) -> &mut PdfPageAnnotationAttachmentPoints<'a> {

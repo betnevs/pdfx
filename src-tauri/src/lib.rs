@@ -1,3 +1,4 @@
+pub mod annotations;
 pub mod commands;
 pub mod engine;
 pub mod file_association;
@@ -5,6 +6,7 @@ pub mod form;
 pub mod logging;
 mod menu;
 pub mod pdfium_adapter;
+pub mod print_export;
 pub mod save;
 pub mod settings;
 pub mod text_edit;
@@ -64,6 +66,12 @@ pub fn run() {
             form::form_fields,
             form::missing_required_fields,
             form::fill_form_field,
+            annotations::create_text_markup_annotation,
+            annotations::list_annotations,
+            annotations::update_annotation_style,
+            annotations::delete_annotation,
+            print_export::export_page,
+            print_export::print_document,
             save::save_document,
             commands::get_settings,
             commands::update_settings,

@@ -613,6 +613,12 @@ def build_all(large_pages: int) -> Tuple[Dict[str, bytes], List[FixtureSpec]]:
             permissions=-3900,  # printing allowed; modification, copying, annotation denied
             title="PDFX encrypted fixture (owner restrictions)",
         ),
+        "encrypted-print-denied.pdf": encrypted_text_pdf(
+            user_password="",
+            owner_password="pdfx-owner",
+            permissions=-8,  # printing denied; editing, copying and annotation allowed
+            title="PDFX encrypted fixture (print denied)",
+        ),
         "form-acroform.pdf": form_pdf(),
         "structure-metadata.pdf": structure_pdf(),
         f"large-{large_pages}-pages.pdf": large_pdf(large_pages),
@@ -648,6 +654,15 @@ def build_all(large_pages: int) -> Tuple[Dict[str, bytes], List[FixtureSpec]]:
             "encrypted-owner-restrictions.pdf",
             "encrypted",
             "用户密码为空可直接打开；所有者密码 pdfx-owner 限制修改、复制与注释。",
+            1,
+            True,
+            password="",
+            owner_password="pdfx-owner",
+        ),
+        FixtureSpec(
+            "encrypted-print-denied.pdf",
+            "encrypted",
+            "用户密码为空可直接打开；所有者密码 pdfx-owner 仅禁止打印，编辑仍允许。",
             1,
             True,
             password="",

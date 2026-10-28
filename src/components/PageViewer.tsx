@@ -9,6 +9,7 @@ import {
 
 import {
   renderThumbnail,
+  type AnnotationView,
   type PageImageView,
   type PageInfo,
   type PageRegionView,
@@ -388,6 +389,8 @@ export function PageSurface({
   scale,
   render,
   readOnly,
+  canAnnotate,
+  selectedAnnotation,
   surfaceRef,
   canFillForms = false,
   formFocusFieldId = null,
@@ -401,6 +404,8 @@ export function PageSurface({
   scale: number;
   render: PageRender;
   readOnly: boolean;
+  canAnnotate: boolean;
+  selectedAnnotation: AnnotationView | null;
   surfaceRef: RefObject<HTMLDivElement | null>;
   /** Permission Restrictions allow filling existing form fields. */
   canFillForms?: boolean;
@@ -467,6 +472,8 @@ export function PageSurface({
         documentId={documentId}
         pageIndex={pageIndex}
         readOnly={readOnly}
+        canAnnotate={canAnnotate}
+        selectedAnnotation={selectedAnnotation}
         scale={scale}
       />
       {info && (
