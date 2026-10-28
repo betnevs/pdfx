@@ -4,10 +4,40 @@
 
 **Blocked by:** 10 (Save As / Save Changes 管线)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] 保存对话框中可启用“设置打开密码”，输入并确认密码。
-- [ ] 设置密码后输出文件需要密码才能打开；密码错误无法打开。
-- [ ] 不设置密码时，加密源保存仍提示“输出将不加密”。
-- [ ] 密码不写入日志、Recovery File 或诊断包。
+- [x] 保存对话框中可启用“设置打开密码”，输入并确认密码。
+- [x] 设置密码后输出文件需要密码才能打开；密码错误无法打开。
+- [x] 不设置密码时，加密源保存仍提示“输出将不加密”。
+- [x] 密码不写入日志、Recovery File 或诊断包。
 - [ ] 保存结果在 Preview、Adobe Acrobat Reader、Chrome 中按密码行为验证。
+
+## Verification notes
+
+Merge commit `18d0c8e` (`ticket/40-output-password` merged with `--no-ff` into `integration/pdfx` at `b546e09`). In the ticket worktree, `b546e09` was merged first as `7aa42c0` with no textual conflicts. The gate then found one post-merge compile break: the watermark tests' `SaveDocumentRequest` literal had auto-merged without the new `password` field; fixed in `1e15708`. Audit fixes are in `057bcaf`. Close commit: `chore: close ticket 40` (the last change to this file).
+
+Independently verified behavior:
+
+- Save flow and UI: every Save As opens the Chinese Save Options dialog, and Save Changes opens it whenever the Source Document or current Output Document is protected. The dialog offers `设置打开密码` with `打开密码` / `确认密码`, validates empty (`请输入打开密码`), mismatch (`两次输入的密码不一致`) and over-long values (`密码过长：UTF-8 编码后最多 127 字节。`) without invoking `save_document`, clears both fields before handing the password to the flow, disables both actions and ignores Escape while a save is in flight, and closes on Escape otherwise. Save As with a password establishes protected-output state, which the UI uses to ask again before a later Save Changes; choosing `继续保存（不加密）` writes the backup and then the unencrypted output, while `加密保存` keeps or replaces protection. The error map now covers `encrypted_output_confirmation_required` and `invalid_argument` in Chinese. Existing encrypted-source confirmation, required-field blocking, dirty/menu state and close guard are unchanged.
+- Encryption contract: setting a password rewrites the object graph as one complete revision (one `startxref`; an incremental append cannot introduce encryption) using AES-256 `/V 5 /R 6` with the `StdCF` `AESV3` crypt filter and `EncryptMetadata=true`, `/P` granting every permission. Each save generates a fresh 32-byte file key, a random owner password (base64 of 32 random bytes) and a fresh two-element 16-byte `/ID` from the OS generator, so the user password is never stored and two saves differ. No password means no `/Encrypt`: unencrypted saves keep the incremental/verbatim-copy path and the source bytes and mtime stay untouched. The audit found and fixed the missing trailer `/ID` in the encrypted rewrite.
+- Entropy: `random_bytes` reads `/dev/urandom` on Unix and calls `BCryptGenRandom` with `BCRYPT_USE_SYSTEM_PREFERRED_RNG` on Windows, with no deterministic fallback; any read/generation failure returns a clean `internal` error before a file is written. The Windows branch is code-reviewed only on this macOS host.
+- Opening behavior: PDFium through the command boundary returns `password_required` for a missing password and `invalid_password` for a wrong one, and opens the text with the right password; independent lopdf `load_with_password` agrees and refuses the wrong password. Unicode (SASLprep-normalised UTF-8) passwords round-trip; a 127-byte password is accepted, while 128 bytes is rejected by both backend and UI with no output written. A rejected empty/over-long password and a failed protected write leave the target absent or the previous protected output byte-for-byte intact, with no temp files and the edit still dirty and retryable.
+- Save Changes semantics: ADR-0007 still requires confirmation when an encrypted Source Document is saved as an unencrypted output, and an unencrypted source saved without a password writes no encrypted warning. Once the current Output Document is protected, Save Changes without a password is refused with `EncryptedOutputConfirmationRequired` and never silently decrypts; the explicit unencrypted decision backs up the protected output first, re-entering the password keeps protection, and a new password replaces it. Recovery restore re-detects protection from the file's encryption dictionary and never stores the password; a restored protected output is likewise refused without an explicit decision. Retry after a failed password save reopens the dialog with empty fields (`SaveFailure.usedPassword` only marks that the failed attempt used one), so the previous password is neither shown nor silently reused.
+- Permissions (audit defect): PDFX's own AES-256 R6 output with `/P = Permissions::all()` reopened read-only because the vendored `pdfium-render` named only revisions 2–4 and `security_handler_revision()` failed for 5/6. `permissions.rs` now maps revisions 5 and 6 to the V4 `/P` bit semantics; `PDFX-PATCH.md` records sixteen patched files. Tests prove an unrestricted R6 output opens editable, can take edits and Save Changes with its password, a restricted R5 and R6 document with only print granted stays read-only (`can_modify_content` denied, `create_text_box` returns `permission_denied`), and the owner password still lifts restrictions. Restricted documents are not weakened.
+- Full-rewrite fidelity: encrypted saves of the structure fixture preserve bookmark titles, link `/Annots` with their URI actions, trailer `/Info` Title/Author, the XMP metadata stream and the embedded `notes.txt` attachment content byte for byte; the form fixture preserves all ten AcroForm fields, their types and values; session-created text and native annotation dictionaries (`/Text`, `/Contents`, `/T`, `/AP`) survive and PDFium lists them after reopening. The edited page text renders after reopen, repeat saves stay stable, and everything outside encryption remains on the existing atomic write/backup/source-protection path.
+- Secrecy: `the_output_password_never_reaches_logs_diagnostics_or_recovery_files` performs its own save after installing the logger, writes a Recovery File and JSON sidecar, exports diagnostics, and scans every file under the temp root, every log file and the output bytes for the password; the save log line carries `encrypted=bool` only, and error text from a failed protected write names neither password. The save-log test no longer deletes the shared process-wide log directory (deletion raced concurrent tests); the secrecy test does not depend on sibling test order because it creates its own save and scans the whole retained directory.
+- Integration: no new dependencies (`Cargo.toml` and `package.json` unchanged), no network/telemetry, no spec, ADR, packaging or capability changes. Watermark, annotations, forms, links, attachments, page operations, flatten, recovery and menu behavior remain green in the merged suite.
+
+Key tests: `src-tauri/tests/save_document.rs` (38 tests; new/strengthened: core encryption and password-open contract, editable unrestricted R6, restricted R5/R6, `/ID` freshness, Unicode, 127/128-byte boundary, secrecy scan, annotation fidelity, bookmarks/links/Info/XMP/attachments fidelity, AcroForm fidelity, output-protection confirmation, failed-write preservation, Save Changes password keep/replace), `src-tauri/tests/recovery.rs` (13 tests, including restored protected output), `src/App.test.tsx` (Save Options, unencrypted choice, protected-output re-prompt, password retry with empty fields, 128-byte rejection), plus the remaining 47-file frontend suite.
+
+Gate on the merged main repo: `npm run typecheck` passed; `npm test` 47 files / 573 tests passed; `npm run build` passed; `npm run test:e2e` 12 passed; `cargo fmt --check` passed; `cargo clippy -- -D warnings` passed with only the 4 vendored `pdfium-render` warnings; `cargo test` 443 passed / 3 ignored / 0 failed (save_document suite 38).
+
+Limitations / manual items:
+
+- Box 5 (real-reader matrix) is not checked: Preview, Adobe Acrobat Reader and Chrome were not available in this environment. PDFium reopens (editable, permissions and rendering) and independent lopdf decryption were used instead; a manual open-with-password check in those readers remains.
+- AES-256 `/V 5 /R 6` is PDF 2.0; the manual matrix should include at least one older reader, since pre-2.0 readers may reject R6 even though modern PDFium, lopdf and the test fixtures handle it.
+- The Windows `BCryptGenRandom` branch and the entropy-failure error path were reviewed but not compiled or fault-injected on this macOS host.
+- The 127-byte limit is measured in UTF-8 bytes because that is what the handler hashes; a Chinese password therefore caps at about 42 characters. The limit is enforced in both the dialog and the backend rather than truncating silently.
+- R5 support is exercised only through a test document written by lopdf; PDFX itself always writes R6. The vendored permission mapping treats R5 like R6, matching the ISO 32000-2 `/P` bit layout.
+- The vendor tree now differs in sixteen files; the permissions hunk must be re-applied when `pdfium-render` is upgraded.
+
