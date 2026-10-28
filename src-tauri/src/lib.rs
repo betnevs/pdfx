@@ -1,18 +1,49 @@
 pub mod commands;
+pub mod engine;
 mod menu;
 
+use tauri::{Emitter, Manager};
+
 pub use commands::{app_info, AppInfo};
+
+/// Event emitted to the focused window when a native menu item is activated.
+/// Keyboard accelerators attached to those menu items trigger the same event.
+pub const MENU_EVENT: &str = "pdfx://menu";
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .menu(menu::build_menu)
-        .on_menu_event(|_app, event| {
-            // Placeholder wiring: later tickets route these ids to editor commands.
-            eprintln!("[pdfx] menu event: {}", event.id().as_ref());
+        .on_menu_event(|app, event| {
+            let id = event.id().as_ref();
+            match app
+                .webview_windows()
+                .values()
+                .find(|window| window.is_focused().unwrap_or(false))
+            {
+                Some(window) => {
+                    let _ = app.emit_to(window.label(), MENU_EVENT, id);
+                }
+                None => {
+                    let _ = app.emit(MENU_EVENT, id);
+                }
+            }
         })
-        .invoke_handler(tauri::generate_handler![commands::app_info])
-        .setup(|_app| {
+        .invoke_handler(tauri::generate_handler![
+            commands::app_info,
+            commands::open_document,
+            commands::open_document_window,
+            commands::render_page,
+            commands::extract_text,
+            commands::close_document,
+        ])
+        .setup(|app| {
+            // A missing library must not stop the shell from starting; opening a
+            // document reports the setup instructions through the command error.
+            if let Err(error) = engine::Engine::initialize(Some(app.handle())) {
+                eprintln!("[pdfx] PDF engine unavailable: {error}");
+            }
             eprintln!("[pdfx] workspace ready");
             Ok(())
         })
