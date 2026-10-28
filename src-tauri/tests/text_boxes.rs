@@ -6,6 +6,7 @@
 
 mod support;
 
+use support::fixtures;
 use support::synthetic;
 
 use pdfx_lib::commands::{
@@ -22,6 +23,15 @@ use pdfx_lib::text_edit::{
 fn open_synthetic(pdf: &synthetic::TempPdf) -> String {
     open_document(pdf.path_string(), None)
         .expect("open synthetic PDF")
+        .document_id
+}
+
+fn open_fixture(category: &str) -> String {
+    let manifest = fixtures::load_manifest();
+    let fixture = fixtures::fixture(&manifest, category).expect("fixture category");
+    let path = fixtures::fixture_path(fixture);
+    open_document(path.to_string_lossy().into_owned(), None)
+        .expect("open fixture")
         .document_id
 }
 
@@ -967,5 +977,681 @@ fn auto_height_grows_for_overflow_and_never_shrinks_automatically() {
         "enlarging must reveal the clipped lines: {ink_bottom}"
     );
 
+    close_document(document_id).expect("close");
+}
+
+#[test]
+fn clicking_existing_text_selects_a_listed_box_with_its_original_geometry() {
+    let pdf = synthetic::single_line_pdf();
+    let document_id = open_synthetic(&pdf);
+    let layer = extract_text_layer(document_id.clone(), 0).expect("text layer");
+
+    let target = text_edit_target(
+        document_id.clone(),
+        0,
+        char_index_of(&layer, "Original") as u32,
+    )
+    .expect("target on existing text");
+    assert!(!target.created, "existing text must not become a new box");
+    assert_eq!(target.text, "Original line.");
+    assert_eq!(target.font_family, "Helvetica");
+    assert!((target.font_size - 18.0).abs() < 0.01);
+    assert_eq!(target.color, "#000000");
+    assert!((target.x - 72.0).abs() < 0.01, "x was {}", target.x);
+    assert!((target.y - 55.71).abs() < 0.05, "y was {}", target.y);
+    assert!(
+        (target.width - 100.026).abs() < 0.05,
+        "width was {}",
+        target.width
+    );
+    assert!(
+        (target.height - 20.088).abs() < 0.05,
+        "height was {}",
+        target.height
+    );
+    assert!((target.rotation - 0.0).abs() < 0.01);
+    assert!(
+        target.auto_height,
+        "an existing Text Object sizes itself to its own text"
+    );
+
+    // The resolved legacy Text Box is listed, not only created ones, so the
+    // overlay survives a reload of the page.
+    let boxes = text_boxes(document_id.clone(), 0).expect("boxes");
+    assert_eq!(boxes.len(), 1, "the resolved legacy box must be listed");
+    assert_eq!(boxes[0].box_id, target.box_id);
+    assert_eq!(boxes[0], target);
+
+    // Clicking the same Text Object again resolves that record instead of
+    // registering a second Text Box.
+    let again = text_edit_target(document_id.clone(), 0, char_index_of(&layer, "line") as u32)
+        .expect("second target");
+    assert_eq!(again.box_id, target.box_id);
+    let boxes = text_boxes(document_id.clone(), 0).expect("boxes again");
+    assert_eq!(boxes.len(), 1);
+    assert_eq!(boxes[0], target);
+
+    close_document(document_id).expect("close");
+}
+
+#[test]
+fn moving_existing_text_leaves_one_copy_and_does_not_reflow_the_page() {
+    let document_id = open_fixture("text");
+    let layer = extract_text_layer(document_id.clone(), 0).expect("text layer");
+    let before_text = flattened(&layer.text);
+    let before_origins: Vec<(f32, f32)> = ["Latin text", "The quick brown fox"]
+        .iter()
+        .map(|needle| {
+            let character = &layer.chars[char_index_of(&layer, needle)];
+            (character.origin_x, character.origin_y)
+        })
+        .collect();
+
+    let target = text_edit_target(
+        document_id.clone(),
+        0,
+        char_index_of(&layer, "PDFX fixture") as u32,
+    )
+    .expect("target on existing text");
+    let box_id = target.box_id;
+    let old_region = (
+        target.x - 4.0,
+        target.y - 4.0,
+        target.x + target.width + 4.0,
+        target.y + target.height + 4.0,
+    );
+    let pixels = render_pixels(&document_id, 0, 2.0);
+    let before_ink = ink_bounds(&pixels, 2.0, old_region);
+    assert!(
+        before_ink.0.is_finite(),
+        "the original line must be painted before the move"
+    );
+
+    let moved = transform_text_box(
+        document_id.clone(),
+        0,
+        box_id,
+        transform(
+            120.0,
+            400.0,
+            target.width,
+            target.height,
+            target.auto_height,
+            0.0,
+        ),
+    )
+    .expect("move existing text");
+    assert!((moved.target.x - 120.0).abs() < 0.01);
+    assert!((moved.target.y - 400.0).abs() < 0.01);
+    assert!(moved.target.auto_height);
+
+    let after = extract_text_layer(document_id.clone(), 0).expect("moved layer");
+    assert_eq!(
+        flattened(&after.text),
+        before_text,
+        "moving must not change the page text"
+    );
+    assert_eq!(
+        after.text.matches("PDFX fixture").count(),
+        1,
+        "the moved line must exist exactly once: {:?}",
+        after.text
+    );
+    let moved_char = &after.chars[char_index_of(&after, "PDFX fixture")];
+    assert!(
+        (moved_char.origin_x - 120.0).abs() < 0.5,
+        "moved origin x was {}",
+        moved_char.origin_x
+    );
+    assert!(
+        (moved_char.origin_y - (400.0 + 18.0 * 0.8)).abs() < 0.6,
+        "moved baseline was {}",
+        moved_char.origin_y
+    );
+
+    // The untouched lines keep their exact origins, so removing and
+    // re-inserting the moved Text Object did not reflow the paragraph.
+    for (needle, before) in ["Latin text", "The quick brown fox"]
+        .iter()
+        .zip(before_origins)
+    {
+        let character = &after.chars[char_index_of(&after, needle)];
+        assert!((character.origin_x - before.0).abs() < 0.01);
+        assert!((character.origin_y - before.1).abs() < 0.01);
+    }
+
+    // The old position is blank and the new one is painted: the text was not
+    // copied to both places.
+    let pixels = render_pixels(&document_id, 0, 2.0);
+    let old_ink = ink_bounds(&pixels, 2.0, old_region);
+    assert!(
+        !old_ink.0.is_finite(),
+        "the old position still paints ink: {old_ink:?}"
+    );
+    let new_ink = ink_bounds(&pixels, 2.0, (112.0, 392.0, 260.0, 430.0));
+    assert!(
+        new_ink.0.is_finite(),
+        "the moved line must be painted at its new position"
+    );
+    assert!(
+        (new_ink.0 - 120.0).abs() < 2.0,
+        "moved ink starts at {}",
+        new_ink.0
+    );
+
+    // The listed overlay follows the moved record.
+    let boxes = text_boxes(document_id.clone(), 0).expect("boxes after move");
+    assert_eq!(boxes.len(), 1);
+    assert_eq!(boxes[0].box_id, box_id);
+    assert!((boxes[0].x - 120.0).abs() < 0.01);
+    assert!((boxes[0].y - 400.0).abs() < 0.01);
+
+    // The saved PDF reopens at the same visual position and style.
+    let bytes = save_document_bytes(&document_id).expect("save");
+    let saved = synthetic::pdf_bytes_file("moved-existing-text", bytes);
+    let reopened = open_synthetic(&saved);
+    let reopened_layer = extract_text_layer(reopened.clone(), 0).expect("reopened layer");
+    assert_eq!(flattened(&reopened_layer.text), before_text);
+    assert_eq!(reopened_layer.text.matches("PDFX fixture").count(), 1);
+    let reopened_char = &reopened_layer.chars[char_index_of(&reopened_layer, "PDFX fixture")];
+    assert!(
+        (reopened_char.origin_x - 120.0).abs() < 0.6,
+        "saved origin x was {}",
+        reopened_char.origin_x
+    );
+    assert!(
+        (reopened_char.origin_y - (400.0 + 18.0 * 0.8)).abs() < 0.6,
+        "saved baseline was {}",
+        reopened_char.origin_y
+    );
+    let reopened_target = text_edit_target(
+        reopened.clone(),
+        0,
+        char_index_of(&reopened_layer, "PDFX fixture") as u32,
+    )
+    .expect("saved target");
+    assert_eq!(reopened_target.text, "PDFX fixture: text layer.");
+    assert_eq!(reopened_target.font_family, "Helvetica");
+    assert!((reopened_target.font_size - 18.0).abs() < 0.01);
+
+    close_document(reopened).expect("close reopened");
+    close_document(document_id).expect("close");
+}
+
+#[test]
+fn resizing_existing_text_rewraps_without_duplicating_it() {
+    let pdf = synthetic::single_line_pdf();
+    let document_id = open_synthetic(&pdf);
+    let layer = extract_text_layer(document_id.clone(), 0).expect("text layer");
+    let before_text = flattened(&layer.text);
+    let target = text_edit_target(
+        document_id.clone(),
+        0,
+        char_index_of(&layer, "Original") as u32,
+    )
+    .expect("target");
+    let box_id = target.box_id;
+
+    let resized = transform_text_box(
+        document_id.clone(),
+        0,
+        box_id,
+        transform(target.x, target.y, 70.0, 60.0, false, 0.0),
+    )
+    .expect("resize existing text");
+    assert!((resized.target.width - 70.0).abs() < 0.01);
+    assert!((resized.target.height - 60.0).abs() < 0.01);
+    assert!(!resized.target.auto_height);
+    assert_eq!(resized.target.text, "Original line.");
+
+    let after = extract_text_layer(document_id.clone(), 0).expect("resized layer");
+    assert_eq!(flattened(&after.text), before_text);
+    assert_eq!(after.text.matches("Original").count(), 1);
+    let rows: std::collections::BTreeSet<i32> = after
+        .chars
+        .iter()
+        .filter(|character| character.width > 0.0)
+        .map(|character| (character.origin_y * 10.0).round() as i32)
+        .collect();
+    assert!(
+        rows.len() >= 2,
+        "a 70pt wide box must wrap the line, got baselines {rows:?}"
+    );
+
+    let boxes = text_boxes(document_id.clone(), 0).expect("boxes after resize");
+    assert_eq!(boxes.len(), 1);
+    assert_eq!(boxes[0].box_id, box_id);
+    assert!((boxes[0].width - 70.0).abs() < 0.01);
+    assert_eq!(boxes[0].text, target.text);
+
+    // The old, wider copy is gone: nothing paints in the right-hand tail the
+    // line used to occupy before it wrapped.
+    let pixels = render_pixels(&document_id, 0, 2.0);
+    let tail = ink_bounds(&pixels, 2.0, (148.0, 50.0, 180.0, 80.0));
+    assert!(
+        !tail.0.is_finite(),
+        "the pre-resize tail is still painted: {tail:?}"
+    );
+    let resized_ink = ink_bounds(&pixels, 2.0, (65.0, 50.0, 145.0, 115.0));
+    assert!(resized_ink.0.is_finite());
+    assert!(
+        resized_ink.2 <= target.x + 70.0 + 2.0,
+        "resized text overflows its width: right edge {}",
+        resized_ink.2
+    );
+
+    close_document(document_id).expect("close");
+}
+
+#[test]
+fn rotating_existing_text_turns_it_and_survives_saving() {
+    let pdf = synthetic::single_line_pdf();
+    let document_id = open_synthetic(&pdf);
+    let layer = extract_text_layer(document_id.clone(), 0).expect("text layer");
+    let before_text = flattened(&layer.text);
+    let target = text_edit_target(
+        document_id.clone(),
+        0,
+        char_index_of(&layer, "Original") as u32,
+    )
+    .expect("target");
+    let box_id = target.box_id;
+
+    let rotated = transform_text_box(
+        document_id.clone(),
+        0,
+        box_id,
+        transform(
+            target.x,
+            target.y,
+            target.width,
+            target.height,
+            target.auto_height,
+            90.0,
+        ),
+    )
+    .expect("rotate existing text");
+    assert!((rotated.target.rotation - 90.0).abs() < 0.01);
+
+    let after = extract_text_layer(document_id.clone(), 0).expect("rotated layer");
+    assert_eq!(flattened(&after.text), before_text);
+    assert_eq!(after.text.matches("Original").count(), 1);
+    let first_index = char_index_of(&after, "Original");
+    let first = &after.chars[first_index];
+    assert!(
+        (first.origin_x - (target.x - 18.0 * 0.8)).abs() < 0.8,
+        "rotated origin x was {}",
+        first.origin_x
+    );
+    assert!(
+        (first.origin_y - target.y).abs() < 0.8,
+        "rotated origin y was {}",
+        first.origin_y
+    );
+    let last = &after.chars[first_index + "Original line.".chars().count() - 1];
+    assert!(
+        last.origin_y > first.origin_y + 20.0,
+        "rotated text must run downward: first {first:?}, last {last:?}"
+    );
+
+    let boxes = text_boxes(document_id.clone(), 0).expect("boxes after rotate");
+    assert_eq!(boxes.len(), 1);
+    assert_eq!(boxes[0].box_id, box_id);
+    assert!((boxes[0].rotation - 90.0).abs() < 0.01);
+
+    let bytes = save_document_bytes(&document_id).expect("save");
+    let saved = synthetic::pdf_bytes_file("rotated-existing-text", bytes);
+    let reopened = open_synthetic(&saved);
+    let reopened_layer = extract_text_layer(reopened.clone(), 0).expect("reopened layer");
+    assert_eq!(flattened(&reopened_layer.text), before_text);
+    assert_eq!(reopened_layer.text.matches("Original").count(), 1);
+    let reopened_index = char_index_of(&reopened_layer, "Original");
+    let reopened_target =
+        text_edit_target(reopened.clone(), 0, reopened_index as u32).expect("saved target");
+    assert!(
+        (reopened_target.rotation - 90.0).abs() < 1.0,
+        "saved rotation was {}",
+        reopened_target.rotation
+    );
+    let reopened_last =
+        &reopened_layer.chars[reopened_index + "Original line.".chars().count() - 1];
+    assert!(
+        reopened_last.origin_y > reopened_layer.chars[reopened_index].origin_y + 20.0,
+        "saved text must still run downward"
+    );
+
+    close_document(reopened).expect("close reopened");
+    close_document(document_id).expect("close");
+}
+
+#[test]
+fn restyling_existing_text_updates_the_whole_box_and_saves_it() {
+    let pdf = synthetic::single_line_pdf();
+    let document_id = open_synthetic(&pdf);
+    let layer = extract_text_layer(document_id.clone(), 0).expect("text layer");
+    let before_text = flattened(&layer.text);
+    let target = text_edit_target(
+        document_id.clone(),
+        0,
+        char_index_of(&layer, "Original") as u32,
+    )
+    .expect("target");
+    let box_id = target.box_id;
+
+    let style = TextBoxStyleView {
+        font_family: "Times".to_owned(),
+        font_size: 16.0,
+        bold: true,
+        italic: false,
+        underline: true,
+        color: "#c0392b".to_owned(),
+        alignment: TextAlignment::Left,
+    };
+    let styled = apply_text_box_style(document_id.clone(), 0, box_id, style).expect("restyle");
+    assert_eq!(styled.target.font_family, "Times");
+    assert!((styled.target.font_size - 16.0).abs() < 0.01);
+    assert!(styled.target.bold);
+    assert!(!styled.target.italic);
+    assert!(styled.target.underline);
+    assert_eq!(styled.target.color, "#c0392b");
+    assert_eq!(styled.target.text, "Original line.");
+    // The style anchors the original baseline, so the text does not jump.
+    assert!((styled.target.x - 72.0).abs() < 0.01);
+    assert!((styled.target.y - (72.0 - 16.0 * 0.8)).abs() < 0.01);
+    assert!(styled.target.auto_height);
+
+    let after = extract_text_layer(document_id.clone(), 0).expect("styled layer");
+    assert_eq!(flattened(&after.text), before_text);
+    assert_eq!(after.text.matches("Original").count(), 1);
+    let character = &after.chars[char_index_of(&after, "Original")];
+    assert!(
+        (character.font_size - 16.0).abs() < 0.01,
+        "layer font size was {}",
+        character.font_size
+    );
+
+    let boxes = text_boxes(document_id.clone(), 0).expect("boxes after style");
+    assert_eq!(boxes.len(), 1);
+    assert_eq!(boxes[0], styled.target);
+
+    // The page paints the new size, colour and underline at the old baseline.
+    let pixels = render_pixels(&document_id, 0, 2.0);
+    let region = (65.0, 52.0, 220.0, 86.0);
+    let (ink_left, _, _, ink_bottom) = ink_bounds(&pixels, 2.0, region);
+    assert!((ink_left - 72.0).abs() < 2.0, "ink starts at {ink_left}");
+    let baseline = 72.0;
+    assert!(
+        ink_bottom > baseline + 2.0 && ink_bottom < baseline + 6.0,
+        "underline must paint below the baseline: {ink_bottom}"
+    );
+    let red_pixels = pixels
+        .rgba
+        .chunks_exact(4)
+        .filter(|pixel| pixel[0] > 150 && pixel[1] < 110 && pixel[2] < 110)
+        .count();
+    assert!(
+        red_pixels > 0,
+        "the red Text Box colour must reach the rendered page"
+    );
+
+    // Saving keeps the whole-box style.
+    let bytes = save_document_bytes(&document_id).expect("save");
+    let saved = synthetic::pdf_bytes_file("styled-existing-text", bytes);
+    let reopened = open_synthetic(&saved);
+    let reopened_layer = extract_text_layer(reopened.clone(), 0).expect("reopened layer");
+    assert_eq!(flattened(&reopened_layer.text), before_text);
+    assert_eq!(reopened_layer.text.matches("Original").count(), 1);
+    let reopened_index = char_index_of(&reopened_layer, "Original");
+    let reopened_character = &reopened_layer.chars[reopened_index];
+    assert!((reopened_character.font_size - 16.0).abs() < 0.01);
+    let reopened_target =
+        text_edit_target(reopened.clone(), 0, reopened_index as u32).expect("saved target");
+    assert!(
+        reopened_target.font_family.contains("Times"),
+        "saved family was {:?}",
+        reopened_target.font_family
+    );
+    assert!(reopened_target.bold);
+    assert_eq!(reopened_target.color, "#c0392b");
+    let reopened_pixels = render_pixels(&reopened, 0, 2.0);
+    let (_, _, _, reopened_bottom) = ink_bounds(&reopened_pixels, 2.0, region);
+    assert!(
+        reopened_bottom > baseline + 2.0,
+        "the saved underline must render: bottom {reopened_bottom}"
+    );
+
+    close_document(reopened).expect("close reopened");
+    close_document(document_id).expect("close");
+}
+
+#[test]
+fn undo_and_redo_existing_text_edits_reach_past_a_save() {
+    let pdf = synthetic::single_line_pdf();
+    let document_id = open_synthetic(&pdf);
+    let layer = extract_text_layer(document_id.clone(), 0).expect("text layer");
+    let before = text_edit_target(
+        document_id.clone(),
+        0,
+        char_index_of(&layer, "Original") as u32,
+    )
+    .expect("target");
+    let box_id = before.box_id;
+
+    let moved = transform_text_box(
+        document_id.clone(),
+        0,
+        box_id,
+        transform(
+            160.0,
+            300.0,
+            before.width,
+            before.height,
+            before.auto_height,
+            0.0,
+        ),
+    )
+    .expect("move")
+    .target;
+    let styled_target =
+        apply_text_box_style(document_id.clone(), 0, box_id, styled("Courier", 15.0))
+            .expect("style")
+            .target;
+
+    // Saving sets the clean baseline but keeps history usable.
+    let bytes = save_document_bytes(&document_id).expect("save");
+    assert!(!bytes.is_empty());
+    let saved = mark_document_saved(document_id.clone()).expect("mark saved");
+    assert!(!saved.dirty);
+    assert!(saved.can_undo);
+
+    undo_text_edit(document_id.clone()).expect("undo style");
+    let boxes = text_boxes(document_id.clone(), 0).expect("boxes after style undo");
+    assert_eq!(boxes.len(), 1);
+    assert_eq!(boxes[0], moved);
+
+    undo_text_edit(document_id.clone()).expect("undo move");
+    let boxes = text_boxes(document_id.clone(), 0).expect("boxes after move undo");
+    assert_eq!(boxes.len(), 1);
+    assert_eq!(boxes[0], before);
+    let restored = extract_text_layer(document_id.clone(), 0).expect("restored layer");
+    let restored_char = &restored.chars[char_index_of(&restored, "Original")];
+    assert!((restored_char.origin_x - 72.0).abs() < 0.5);
+    assert!((restored_char.origin_y - 72.0).abs() < 0.6);
+
+    redo_text_edit(document_id.clone()).expect("redo move");
+    let boxes = text_boxes(document_id.clone(), 0).expect("boxes after move redo");
+    assert_eq!(boxes[0], moved);
+    redo_text_edit(document_id.clone()).expect("redo style");
+    let boxes = text_boxes(document_id.clone(), 0).expect("boxes after style redo");
+    assert_eq!(boxes[0], styled_target);
+
+    // The saved snapshot still contains the styled state; later undos do not
+    // edit the file that was written.
+    let reopened = open_synthetic(&synthetic::pdf_bytes_file("undo-existing-text", bytes));
+    let reopened_layer = extract_text_layer(reopened.clone(), 0).expect("reopened layer");
+    assert_eq!(flattened(&reopened_layer.text), "Original line.");
+    let reopened_char = &reopened_layer.chars[char_index_of(&reopened_layer, "Original")];
+    assert!((reopened_char.font_size - 15.0).abs() < 0.01);
+    close_document(reopened).expect("close reopened");
+    close_document(document_id).expect("close");
+}
+
+#[test]
+fn text_boxes_lists_resolved_strings_in_stable_order_and_hides_deleted_ones() {
+    let document_id = open_fixture("text");
+    let layer = extract_text_layer(document_id.clone(), 0).expect("text layer");
+    let third = text_edit_target(
+        document_id.clone(),
+        0,
+        char_index_of(&layer, "The quick brown fox") as u32,
+    )
+    .expect("third line target");
+    let first = text_edit_target(
+        document_id.clone(),
+        0,
+        char_index_of(&layer, "PDFX fixture") as u32,
+    )
+    .expect("first line target");
+    let created = create_text_box(
+        document_id.clone(),
+        0,
+        create_request(320.0, 400.0, 150.0, 50.0),
+    )
+    .expect("create")
+    .target;
+
+    let expected = vec![third.box_id, first.box_id, created.box_id];
+    let listed: Vec<u64> = text_boxes(document_id.clone(), 0)
+        .expect("boxes")
+        .iter()
+        .map(|box_view| box_view.box_id)
+        .collect();
+    assert_eq!(
+        listed, expected,
+        "the list must follow registration order, not a hash order"
+    );
+    let again: Vec<u64> = text_boxes(document_id.clone(), 0)
+        .expect("boxes again")
+        .iter()
+        .map(|box_view| box_view.box_id)
+        .collect();
+    assert_eq!(again, expected, "listing twice must not reorder the boxes");
+
+    delete_text_box(document_id.clone(), 0, third.box_id).expect("delete third line");
+    let listed: Vec<u64> = text_boxes(document_id.clone(), 0)
+        .expect("boxes after delete")
+        .iter()
+        .map(|box_view| box_view.box_id)
+        .collect();
+    assert_eq!(
+        listed,
+        vec![first.box_id, created.box_id],
+        "a deleted Text Box must not stay in the list as a tombstone"
+    );
+    let after_delete = extract_text_layer(document_id.clone(), 0).expect("layer after delete");
+    assert!(!after_delete.text.contains("The quick brown fox"));
+    assert!(after_delete.text.contains("PDFX fixture: text layer."));
+    assert!(after_delete
+        .text
+        .contains("Latin text is extractable from this page."));
+
+    undo_text_edit(document_id.clone()).expect("undo delete");
+    let listed: Vec<u64> = text_boxes(document_id.clone(), 0)
+        .expect("boxes after undo")
+        .iter()
+        .map(|box_view| box_view.box_id)
+        .collect();
+    assert_eq!(listed, expected, "undo restores the box in its old slot");
+    let restored = extract_text_layer(document_id.clone(), 0).expect("restored layer");
+    assert!(restored.text.contains("The quick brown fox"));
+
+    close_document(document_id).expect("close");
+}
+
+#[test]
+fn moving_existing_text_on_a_rotated_page_keeps_its_orientation() {
+    let pdf = synthetic::rotated_crop_pdf();
+    let document_id = open_synthetic(&pdf);
+    let layer = extract_text_layer(document_id.clone(), 0).expect("rotated layer");
+    assert_eq!(layer.rotation, 90);
+    let target = text_edit_target(
+        document_id.clone(),
+        0,
+        char_index_of(&layer, "Rotate 90") as u32,
+    )
+    .expect("rotated target");
+    assert!(
+        (target.rotation - 90.0).abs() < 0.01,
+        "target rotation was {}",
+        target.rotation
+    );
+    let before_char = &layer.chars[char_index_of(&layer, "Rotate 90")];
+
+    let moved = transform_text_box(
+        document_id.clone(),
+        0,
+        target.box_id,
+        transform(
+            target.x + 40.0,
+            target.y + 30.0,
+            target.width,
+            target.height,
+            target.auto_height,
+            target.rotation,
+        ),
+    )
+    .expect("move on rotated page");
+    assert!((moved.target.rotation - 90.0).abs() < 0.01);
+
+    let after = extract_text_layer(document_id.clone(), 0).expect("moved rotated layer");
+    assert_eq!(flattened(&after.text), "Rotate 90");
+    assert_eq!(after.text.matches("Rotate 90").count(), 1);
+    let after_char = &after.chars[char_index_of(&after, "Rotate 90")];
+    assert!(
+        (after_char.origin_x - before_char.origin_x - 40.0).abs() < 2.0,
+        "rotated origin x moved from {} to {}, not by 40pt",
+        before_char.origin_x,
+        after_char.origin_x
+    );
+    assert!(
+        (after_char.origin_y - before_char.origin_y - 30.0).abs() < 2.0,
+        "rotated origin y moved from {} to {}, not by 30pt",
+        before_char.origin_y,
+        after_char.origin_y
+    );
+    // The text still starts inside the requested box and runs downward.
+    assert!(after_char.origin_x >= target.x + 40.0 - 16.0);
+    assert!(after_char.origin_x <= target.x + 40.0 + 1.0);
+    assert!(after_char.origin_y >= target.y + 30.0 - 1.0);
+    assert!(after_char.origin_y <= target.y + 30.0 + 2.0);
+    let last = &after.chars[after.chars.len() - 1];
+    assert!(
+        last.origin_y > after_char.origin_y + 20.0,
+        "rotated text must keep running downward: first {after_char:?}, last {last:?}"
+    );
+
+    let boxes = text_boxes(document_id.clone(), 0).expect("boxes");
+    assert_eq!(boxes.len(), 1);
+    assert!((boxes[0].rotation - 90.0).abs() < 0.01);
+
+    let bytes = save_document_bytes(&document_id).expect("save");
+    let saved = synthetic::pdf_bytes_file("moved-rotated-existing-text", bytes);
+    let reopened = open_synthetic(&saved);
+    let reopened_layer = extract_text_layer(reopened.clone(), 0).expect("reopened rotated layer");
+    assert_eq!(reopened_layer.rotation, 90);
+    assert_eq!(flattened(&reopened_layer.text), "Rotate 90");
+    let reopened_index = char_index_of(&reopened_layer, "Rotate 90");
+    let reopened_target =
+        text_edit_target(reopened.clone(), 0, reopened_index as u32).expect("saved target");
+    assert!(
+        (reopened_target.rotation - 90.0).abs() < 1.0,
+        "saved rotation was {}",
+        reopened_target.rotation
+    );
+    let reopened_char = &reopened_layer.chars[reopened_index];
+    assert!((reopened_char.origin_x - after_char.origin_x).abs() < 1.0);
+    assert!((reopened_char.origin_y - after_char.origin_y).abs() < 1.0);
+
+    close_document(reopened).expect("close reopened");
     close_document(document_id).expect("close");
 }
