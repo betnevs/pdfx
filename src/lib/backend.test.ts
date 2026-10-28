@@ -12,8 +12,10 @@ import {
   closeDocument,
   createFormField,
   createFormTextField,
+  createLink,
   deleteFormField,
   deleteFormTextField,
+  deleteLink,
   destroyWindow,
   exportFlattenedCopy,
   exportPage,
@@ -22,6 +24,7 @@ import {
   formFields,
   initialDocumentPath,
   isFullscreen,
+  listLinks,
   MENU_EVENT,
   missingRequiredFields,
   onFileDrop,
@@ -42,6 +45,7 @@ import {
   toCommandError,
   updateFormField,
   updateFormTextField,
+  updateLinkTarget,
 } from "./backend";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -485,6 +489,43 @@ describe("backend command seam", () => {
         message: "detail",
       });
     }
+  });
+
+  it("recognizes the unsupported link error code", () => {
+    expect(
+      toCommandError({ code: "unsupported_link", message: "detail" }),
+    ).toEqual({ code: "unsupported_link", message: "detail" });
+  });
+
+  it("maps link commands to their Tauri command names and camelCase arguments", async () => {
+    const rects = [{ x: 10, y: 20, width: 30, height: 12 }];
+    const urlTarget = { kind: "url" as const, url: "https://example.com/docs" };
+    const pageTarget = { kind: "page" as const, pageIndex: 2 };
+
+    invokeMock.mockResolvedValue([]);
+    await expect(listLinks("doc-1")).resolves.toEqual([]);
+    expect(invokeMock).toHaveBeenCalledWith("list_links", {
+      documentId: "doc-1",
+    });
+
+    invokeMock.mockResolvedValue(undefined);
+    await createLink("doc-1", { pageIndex: 1, rects, target: urlTarget });
+    expect(invokeMock).toHaveBeenCalledWith("create_link", {
+      documentId: "doc-1",
+      request: { pageIndex: 1, rects, target: urlTarget },
+    });
+
+    await updateLinkTarget("doc-1", { linkId: "1:0", target: pageTarget });
+    expect(invokeMock).toHaveBeenCalledWith("update_link_target", {
+      documentId: "doc-1",
+      request: { linkId: "1:0", target: pageTarget },
+    });
+
+    await deleteLink("doc-1", "1:0");
+    expect(invokeMock).toHaveBeenCalledWith("delete_link", {
+      documentId: "doc-1",
+      linkId: "1:0",
+    });
   });
 
   it("maps form commands to their Tauri command names and camelCase arguments", async () => {

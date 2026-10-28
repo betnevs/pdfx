@@ -11,6 +11,7 @@ import {
 import {
   renderThumbnail,
   type AnnotationView,
+  type LinkView,
   type PageImageView,
   type PageInfo,
   type PageRegionView,
@@ -29,6 +30,7 @@ import { EraserLayer } from "./EraserLayer";
 import { FormLayer } from "./FormLayer";
 import { FreeTextLayer } from "./FreeTextLayer";
 import { LineLayer } from "./LineLayer";
+import { LinkLayer } from "./LinkLayer";
 import { PageImageLayer } from "./PageImageLayer";
 import { PageTextLayer } from "./PageTextLayer";
 import { ShapeLayer } from "./ShapeLayer";
@@ -556,6 +558,9 @@ export function PageSurface({
   onFormFocusHandled,
   onSelectPage,
   onFormFocusField,
+  links = [],
+  onLinksChanged,
+  pageCount = 0,
 }: {
   documentId: string;
   pageIndex: number;
@@ -584,6 +589,11 @@ export function PageSurface({
   onFormFocusHandled?: () => void;
   onSelectPage?: (pageIndex: number) => void;
   onFormFocusField?: (fieldId: string) => void;
+  /** Every native link in the document; the LinkLayer filters this page. */
+  links?: LinkView[];
+  onLinksChanged?: () => void;
+  /** Number of pages an internal link may address. */
+  pageCount?: number;
 }) {
   const pixel = info ? pagePixelSize(info, scale) : null;
   const ready = pixel !== null && render.scale === scale;
@@ -647,6 +657,7 @@ export function PageSurface({
         selectedAnnotation={selectedAnnotation}
         onSelectAnnotation={onSelectAnnotation}
         scale={scale}
+        pageCount={pageCount}
       />
       {info && (
         <>
@@ -657,6 +668,8 @@ export function PageSurface({
             pageWidth={info.width}
             pageHeight={info.height}
             readOnly={readOnly}
+            canAnnotate={canAnnotate}
+            pageCount={pageCount}
           />
           <FormLayer
             documentId={documentId}
@@ -741,6 +754,19 @@ export function PageSurface({
           selectedName={selectedAnnotation?.name ?? null}
           onSelectAnnotation={onSelectAnnotation}
           onChanged={onAnnotationsChanged}
+        />
+      )}
+      {info && (
+        <LinkLayer
+          documentId={documentId}
+          pageIndex={pageIndex}
+          pageWidth={info.width}
+          pageHeight={info.height}
+          pageCount={pageCount}
+          readOnly={readOnly}
+          canAnnotate={canAnnotate}
+          links={links}
+          onLinksChanged={() => onLinksChanged?.()}
         />
       )}
     </div>

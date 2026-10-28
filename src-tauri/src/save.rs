@@ -346,7 +346,7 @@ fn finalize_lopdf_revision(
             error,
         )
     })?;
-    let (page_edits, referenced_edits) = free_text_dictionary_edits(&previous);
+    let (page_edits, referenced_edits) = annotation_dictionary_edits(&previous);
     let page_tree = page_tree_edit(&previous, pages)?;
     let form_fields_prune = form_fields_prune(&previous, pages)?;
     if edits.is_empty()
@@ -379,15 +379,14 @@ fn finalize_lopdf_revision(
     for edit in &referenced_edits {
         incremental
             .opt_clone_object_to_new_document(edit.id)
-            .map_err(|error| lopdf_error("could not clone a free text annotation", error))?;
+            .map_err(|error| {
+                lopdf_error("could not clone an annotation for dictionary edits", error)
+            })?;
         let dictionary = incremental
             .new_document
             .get_dictionary_mut(edit.id)
-            .map_err(|error| lopdf_error("could not edit a free text annotation", error))?;
-        if let Some(q) = edit.edit.q {
-            dictionary.set(b"Q".to_vec(), lopdf::Object::Integer(q));
-        }
-        dictionary.set(b"IT".to_vec(), lopdf::Object::Name(edit.edit.it.clone()));
+            .map_err(|error| lopdf_error("could not edit an annotation dictionary", error))?;
+        apply_dictionary_edit(dictionary, &edit.edit);
     }
     // Pruning comes before the object edits: created fields are appended to
     // this `/Fields` array by `CreateFormFields`, so an earlier prune is not
@@ -820,11 +819,17 @@ pub fn append_object_edits(base: Vec<u8>, edits: &[ObjectEdit]) -> Result<Vec<u8
     Ok(output)
 }
 
-/// The deferred standard entries for one PDFX free text annotation.
+/// A standard annotation entry PDFX keeps in a private key while the document
+/// lives in Pdfium, because Pdfium's public API cannot write it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct FreeTextDictionaryEdit {
-    q: Option<i64>,
-    it: Vec<u8>,
+enum AnnotationDictionaryEdit {
+    /// `/Q` and `/IT` for a PDFX free text annotation.
+    FreeText { q: Option<i64>, it: Vec<u8> },
+    /// The reserved placeholder URI of a PDFX page link, replaced by a real
+    /// in-document GoTo destination naming the target page object.
+    PageLink {
+        target_page: Option<lopdf::ObjectId>,
+    },
 }
 
 /// A page whose `/Annots` array is rewritten because Pdfium stores the
@@ -838,46 +843,107 @@ struct PageAnnotsEdit {
 /// A referenced annotation that can be edited by cloning its own object.
 struct ReferencedAnnotationEdit {
     id: lopdf::ObjectId,
-    edit: FreeTextDictionaryEdit,
+    edit: AnnotationDictionaryEdit,
 }
 
-/// Derives the standard `/Q` and `/IT` entries for every PDFX free text
+/// Builds `<< /S /GoTo /D [page /XYZ null null null] >>`.
+///
+/// The XYZ destination with null coordinates asks the reader to keep its
+/// current position and zoom, which is what users expect from an internal
+/// link.
+fn page_goto_action(page_id: lopdf::ObjectId) -> lopdf::Object {
+    let mut action = lopdf::Dictionary::new();
+    action.set(b"S".to_vec(), lopdf::Object::Name(b"GoTo".to_vec()));
+    action.set(
+        b"D".to_vec(),
+        lopdf::Object::Array(vec![
+            lopdf::Object::Reference(page_id),
+            lopdf::Object::Name(b"XYZ".to_vec()),
+            lopdf::Object::Null,
+            lopdf::Object::Null,
+            lopdf::Object::Null,
+        ]),
+    );
+    lopdf::Object::Dictionary(action)
+}
+
+/// Applies one deferred dictionary edit to an annotation dictionary.
+fn apply_dictionary_edit(dictionary: &mut lopdf::Dictionary, edit: &AnnotationDictionaryEdit) {
+    match edit {
+        AnnotationDictionaryEdit::FreeText { q, it } => {
+            if let Some(q) = q {
+                dictionary.set(b"Q".to_vec(), lopdf::Object::Integer(*q));
+            }
+            dictionary.set(b"IT".to_vec(), lopdf::Object::Name(it.clone()));
+        }
+        AnnotationDictionaryEdit::PageLink { target_page } => {
+            // A missing page object would only happen if the document lost
+            // pages while open, which PDFX cannot do; leave the annotation
+            // untouched rather than pointing it at the wrong page.
+            if let Some(page_id) = target_page {
+                dictionary.set(b"A".to_vec(), page_goto_action(*page_id));
+                dictionary.remove(b"Dest");
+                // The private page index is meaningful only inside the live
+                // Pdfium session, where page reordering can differ from the
+                // saved tree. Removing it makes a reopened output resolve the
+                // real destination instead of a stale session index.
+                dictionary.remove(crate::links::LINK_TARGET_KEY.as_bytes());
+            }
+        }
+    }
+}
+
+/// Derives the standard entries PDFX stores in private keys for every
 /// annotation in a PDFium revision.
 ///
 /// Pdfium writes annotation dictionaries inline in `/Annots`, so inline entries
 /// are rewritten through their page object while referenced entries are edited
-/// directly. Foreign free text annotations have no PDFX style state and are
-/// left untouched.
-fn free_text_dictionary_edits(
+/// directly. Foreign annotations have no PDFX private keys and are left
+/// untouched.
+fn annotation_dictionary_edits(
     document: &lopdf::Document,
 ) -> (Vec<PageAnnotsEdit>, Vec<ReferencedAnnotationEdit>) {
-    fn edit_for(dictionary: &lopdf::Dictionary) -> Option<FreeTextDictionaryEdit> {
-        if dictionary
+    fn edit_for(
+        dictionary: &lopdf::Dictionary,
+        document: &lopdf::Document,
+    ) -> Option<AnnotationDictionaryEdit> {
+        let subtype = dictionary
             .get(b"Subtype")
             .and_then(lopdf::Object::as_name)
-            .ok()
-            != Some(b"FreeText".as_slice())
-        {
-            return None;
+            .ok()?;
+        if subtype == b"FreeText".as_slice() {
+            let kind = dictionary
+                .get(b"PDFXFreeTextKind")
+                .ok()
+                .and_then(|object| object.as_str().ok())
+                .map(decode_pdf_text)?;
+            let q = dictionary
+                .get(b"PDFXFreeTextAlign")
+                .ok()
+                .and_then(|object| object.as_str().ok())
+                .map(decode_pdf_text)
+                .and_then(|value| crate::annotations::FreeTextAlign::parse(&value))
+                .map(crate::annotations::FreeTextAlign::pdf_q);
+            let it = if kind == "callout" {
+                b"FreeTextCallout".to_vec()
+            } else {
+                b"FreeText".to_vec()
+            };
+            return Some(AnnotationDictionaryEdit::FreeText { q, it });
         }
-        let kind = dictionary
-            .get(b"PDFXFreeTextKind")
-            .ok()
-            .and_then(|object| object.as_str().ok())
-            .map(decode_pdf_text)?;
-        let q = dictionary
-            .get(b"PDFXFreeTextAlign")
-            .ok()
-            .and_then(|object| object.as_str().ok())
-            .map(decode_pdf_text)
-            .and_then(|value| crate::annotations::FreeTextAlign::parse(&value))
-            .map(crate::annotations::FreeTextAlign::pdf_q);
-        let it = if kind == "callout" {
-            b"FreeTextCallout".to_vec()
-        } else {
-            b"FreeText".to_vec()
-        };
-        Some(FreeTextDictionaryEdit { q, it })
+        if subtype == b"Link".as_slice() {
+            let page = dictionary
+                .get(crate::links::LINK_TARGET_KEY.as_bytes())
+                .ok()
+                .and_then(|object| object.as_str().ok())
+                .map(decode_pdf_text)
+                .and_then(|value| value.strip_prefix("page:")?.parse::<u32>().ok())?;
+            // lopdf page numbers are one-based while PDFX page indices are
+            // zero-based.
+            let target_page = document.get_pages().get(&(page + 1)).copied();
+            return Some(AnnotationDictionaryEdit::PageLink { target_page });
+        }
+        None
     }
 
     let mut page_edits = Vec::new();
@@ -896,13 +962,10 @@ fn free_text_dictionary_edits(
         let mut changed = false;
         for object in array {
             match object {
-                lopdf::Object::Dictionary(dictionary) => match edit_for(dictionary) {
+                lopdf::Object::Dictionary(dictionary) => match edit_for(dictionary, document) {
                     Some(edit) => {
                         let mut updated = dictionary.clone();
-                        if let Some(q) = edit.q {
-                            updated.set(b"Q".to_vec(), lopdf::Object::Integer(q));
-                        }
-                        updated.set(b"IT".to_vec(), lopdf::Object::Name(edit.it));
+                        apply_dictionary_edit(&mut updated, &edit);
                         rewritten.push(lopdf::Object::Dictionary(updated));
                         changed = true;
                     }
@@ -910,7 +973,7 @@ fn free_text_dictionary_edits(
                 },
                 lopdf::Object::Reference(id) => {
                     if let Ok(dictionary) = document.get_dictionary(*id) {
-                        if let Some(edit) = edit_for(dictionary) {
+                        if let Some(edit) = edit_for(dictionary, document) {
                             referenced_edits.push(ReferencedAnnotationEdit { id: *id, edit });
                         }
                     }
@@ -927,62 +990,6 @@ fn free_text_dictionary_edits(
         }
     }
     (page_edits, referenced_edits)
-}
-
-/// Writes `/Q` and `/IT` for PDFX free text annotations into one appended
-/// revision.
-///
-/// PDFium's annotation API cannot set an integer dictionary entry, so the
-/// alignment is mirrored as a string while editing and translated here on every
-/// save. The pass is stateless: it reads the current PDFium output, so undo,
-/// redo and repeated saves all produce the same result and never accumulate
-/// duplicate annotations.
-pub fn apply_annotation_dictionary_edits(base: Vec<u8>) -> Result<Vec<u8>, CommandError> {
-    let previous = lopdf::Document::load_mem(&base).map_err(|error| {
-        lopdf_error(
-            "could not parse the PDFium revision for annotation dictionary edits",
-            error,
-        )
-    })?;
-    let edits = free_text_dictionary_edits(&previous);
-    let (page_edits, referenced_edits) = edits;
-    if page_edits.is_empty() && referenced_edits.is_empty() {
-        return Ok(base);
-    }
-
-    let mut incremental = lopdf::IncrementalDocument::create_from(base, previous);
-    for edit in &page_edits {
-        incremental
-            .opt_clone_object_to_new_document(edit.page_id)
-            .map_err(|error| lopdf_error("could not clone a page for annotation edits", error))?;
-        let page = incremental
-            .new_document
-            .get_dictionary_mut(edit.page_id)
-            .map_err(|error| lopdf_error("could not edit a page for annotation edits", error))?;
-        page.set(
-            b"Annots".to_vec(),
-            lopdf::Object::Array(edit.annots.clone()),
-        );
-    }
-    for edit in &referenced_edits {
-        incremental
-            .opt_clone_object_to_new_document(edit.id)
-            .map_err(|error| lopdf_error("could not clone a free text annotation", error))?;
-        let dictionary = incremental
-            .new_document
-            .get_dictionary_mut(edit.id)
-            .map_err(|error| lopdf_error("could not edit a free text annotation", error))?;
-        if let Some(q) = edit.edit.q {
-            dictionary.set(b"Q".to_vec(), lopdf::Object::Integer(q));
-        }
-        dictionary.set(b"IT".to_vec(), lopdf::Object::Name(edit.edit.it.clone()));
-    }
-
-    let mut output = Vec::new();
-    incremental
-        .save_to(&mut output)
-        .map_err(|error| lopdf_error("could not append the annotation revision", error))?;
-    Ok(output)
 }
 
 fn apply_object_edit(

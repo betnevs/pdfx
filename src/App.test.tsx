@@ -190,6 +190,7 @@ function installDocumentBackend(overrides: Record<string, CommandHandler> = {}) 
     page_line_objects: () => [],
     edit_history: () => idleHistory,
     list_annotations: () => [],
+    list_links: () => [],
     close_document: () => undefined,
     set_menu_state: () => undefined,
     ...overrides,
@@ -1148,6 +1149,73 @@ describe("PDFX workspace", () => {
       expect(state.get("edit.redo")).toBe(false);
     });
     expect(commandCalls("undo_text_edit")).toHaveLength(1);
+  });
+
+  it("dispatches menu undo after a link is created over selected text", async () => {
+    let linkCreated = false;
+    installDocumentBackend({
+      edit_history: () => (linkCreated ? dirtyHistory : idleHistory),
+      create_link: () => {
+        linkCreated = true;
+        return {
+          link: {
+            id: "0:0",
+            name: "pdfx-link-1",
+            pageIndex: 0,
+            target: { kind: "url", url: "https://example.com" },
+            unsupported: null,
+            rects: [{ x: 72, y: 55.71, width: 12.006, height: 20.088 }],
+          },
+          pageIndex: 0,
+          history: dirtyHistory,
+        };
+      },
+      undo_text_edit: () => ({ pageIndex: 0, history: idleHistory }),
+    });
+    openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("report.pdf");
+
+    const textLayer = await screen.findByRole("region", { name: "文本层" });
+    vi.spyOn(textLayer, "getBoundingClientRect").mockReturnValue({
+      x: 0,
+      y: 0,
+      left: 0,
+      top: 0,
+      right: 612,
+      bottom: 792,
+      width: 612,
+      height: 792,
+      toJSON: () => ({}),
+    } as DOMRect);
+    fireEvent.pointerDown(textLayer, {
+      clientX: 78,
+      clientY: 65,
+      button: 0,
+      pointerId: 1,
+    });
+    fireEvent.pointerUp(textLayer, {
+      clientX: 78,
+      clientY: 65,
+      pointerId: 1,
+    });
+
+    fireEvent.click(within(textLayer).getByRole("button", { name: "链接" }));
+    fireEvent.change(screen.getByLabelText("链接网址"), {
+      target: { value: "https://example.com" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "添加" }));
+
+    await waitFor(() => expect(commandCalls("create_link")).toHaveLength(1));
+    // The link mutation announces a document change, so the shared save state
+    // refreshes availability from the unified history.
+    await waitFor(() => expect(lastMenuState().get("edit.undo")).toBe(true));
+
+    act(() => menuHandler?.({ payload: "edit.undo" }));
+    await waitFor(() => expect(commandCalls("undo_text_edit")).toHaveLength(1));
   });
 
   it("keeps page and history shortcuts out of focused text controls", async () => {

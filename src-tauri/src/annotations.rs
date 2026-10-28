@@ -610,7 +610,7 @@ fn internal_error(message: impl Into<String>) -> CommandError {
     CommandError::new(CommandErrorCode::Internal, message)
 }
 
-fn map_adapter_error(error: crate::pdfium_adapter::AdapterError) -> CommandError {
+pub(crate) fn map_adapter_error(error: crate::pdfium_adapter::AdapterError) -> CommandError {
     internal_error(format!("PDFium annotation operation failed: {error}"))
 }
 
@@ -1082,7 +1082,7 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     (if month <= 2 { year + 1 } else { year }, month, day)
 }
 
-fn next_annotation_name() -> String {
+pub(crate) fn next_annotation_name() -> String {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis())
@@ -1097,7 +1097,7 @@ fn next_annotation_name() -> String {
 /// PDF user space): bottom-left, bottom-right, top-right, top-left of the
 /// *display* box. Keeping this order is what lets the appearance generator draw
 /// underlines on the visual bottom edge, including on rotated pages.
-fn quad_for_rect(geometry: &DisplayGeometry, rect: TextMarkupRect) -> [f32; 8] {
+pub(crate) fn quad_for_rect(geometry: &DisplayGeometry, rect: TextMarkupRect) -> [f32; 8] {
     let corners = [
         (rect.x, rect.y + rect.height),
         (rect.x + rect.width, rect.y + rect.height),
@@ -1113,7 +1113,7 @@ fn quad_for_rect(geometry: &DisplayGeometry, rect: TextMarkupRect) -> [f32; 8] {
     quad
 }
 
-fn bounds_of_quads(quads: &[[f32; 8]]) -> AnnotationRect {
+pub(crate) fn bounds_of_quads(quads: &[[f32; 8]]) -> AnnotationRect {
     let mut left = f32::INFINITY;
     let mut bottom = f32::INFINITY;
     let mut right = f32::NEG_INFINITY;
@@ -1173,7 +1173,7 @@ fn strokes_bounds(strokes: &[Vec<(f32, f32)>], padding: f32) -> AnnotationRect {
     )
 }
 
-fn display_rects(geometry: &DisplayGeometry, quads: &[[f32; 8]]) -> Vec<TextMarkupRect> {
+pub(crate) fn display_rects(geometry: &DisplayGeometry, quads: &[[f32; 8]]) -> Vec<TextMarkupRect> {
     quads
         .iter()
         .map(|quad| {
@@ -1196,7 +1196,7 @@ fn display_rects(geometry: &DisplayGeometry, quads: &[[f32; 8]]) -> Vec<TextMark
         .collect()
 }
 
-fn display_rect(geometry: &DisplayGeometry, rect: AnnotationRect) -> TextMarkupRect {
+pub(crate) fn display_rect(geometry: &DisplayGeometry, rect: AnnotationRect) -> TextMarkupRect {
     let (x, y, width, height) = geometry.rect(rect.left, rect.bottom, rect.right, rect.top);
     TextMarkupRect {
         x,
@@ -1735,7 +1735,7 @@ fn free_text_appearance_stream(
     Ok(stream)
 }
 
-fn page_geometry(
+pub(crate) fn page_geometry(
     document: &PdfDocument<'static>,
     page_index: u32,
 ) -> Result<DisplayGeometry, CommandError> {
@@ -1752,7 +1752,7 @@ fn page_geometry(
     DisplayGeometry::new(&page, rotation)
 }
 
-fn find_target(
+pub(crate) fn find_target(
     document: &PdfDocument<'static>,
     name: &str,
 ) -> Result<Option<AnnotationRef>, CommandError> {

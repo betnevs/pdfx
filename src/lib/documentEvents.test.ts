@@ -35,6 +35,20 @@ describe("document change events", () => {
     unsubscribe();
   });
 
+  it("passes the link source used by the link overlay", () => {
+    const handler = vi.fn();
+    const unsubscribe = onDocumentChanged(handler);
+
+    notifyDocumentChanged({ documentId: "doc-1", pageIndex: 0, source: "link" });
+
+    expect(handler).toHaveBeenCalledWith({
+      documentId: "doc-1",
+      pageIndex: 0,
+      source: "link",
+    });
+    unsubscribe();
+  });
+
   it("omits a missing or unknown source", () => {
     const handler = vi.fn();
     const unsubscribe = onDocumentChanged(handler);
