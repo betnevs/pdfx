@@ -335,10 +335,11 @@ impl RecoveryStore {
         let metadata_path = self.metadata_path(&snapshot.session_id)?;
 
         if crate::target_path::same_file(&pdf_path, &snapshot.source_path)
-            || snapshot
-                .output_path
-                .as_deref()
-                .is_some_and(|output| crate::target_path::same_file(&pdf_path, output))
+            || crate::target_path::same_file(&metadata_path, &snapshot.source_path)
+            || snapshot.output_path.as_deref().is_some_and(|output| {
+                crate::target_path::same_file(&pdf_path, output)
+                    || crate::target_path::same_file(&metadata_path, output)
+            })
         {
             return Err(RecoveryError::TargetConflict(pdf_path));
         }
@@ -1006,6 +1007,37 @@ mod tests {
         assert_eq!(
             fs::read(&output).expect("re-read output"),
             b"%PDF-1.7 output"
+        );
+
+        // The JSON sidecar is a recovery path too: neither it nor the PDF may
+        // resolve to the Source or Output Document.
+        let metadata_source = store.directory().join("m.pdfx-recovery.json");
+        fs::write(&metadata_source, b"%PDF-1.7 metadata-named source")
+            .expect("write source at the metadata path");
+        let error = store
+            .write_snapshot(&snapshot("m", &metadata_source), b"%PDF-1.7 snapshot")
+            .expect_err("writing over a Source at the metadata path must be refused");
+        assert!(matches!(error, RecoveryError::TargetConflict(_)));
+        assert_eq!(
+            fs::read(&metadata_source).expect("re-read metadata-named source"),
+            b"%PDF-1.7 metadata-named source"
+        );
+
+        let mut metadata_output = snapshot("n", &dir.join("source.pdf"));
+        metadata_output.output_path = Some(store.directory().join("n.pdfx-recovery.json"));
+        fs::write(
+            metadata_output.output_path.as_ref().expect("output path"),
+            b"%PDF-1.7 metadata-named output",
+        )
+        .expect("write output at the metadata path");
+        let error = store
+            .write_snapshot(&metadata_output, b"%PDF-1.7 snapshot")
+            .expect_err("writing over an Output at the metadata path must be refused");
+        assert!(matches!(error, RecoveryError::TargetConflict(_)));
+        assert_eq!(
+            fs::read(metadata_output.output_path.as_ref().expect("output path"))
+                .expect("re-read metadata-named output"),
+            b"%PDF-1.7 metadata-named output"
         );
         fs::remove_dir_all(&dir).ok();
     }

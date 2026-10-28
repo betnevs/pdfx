@@ -588,3 +588,86 @@ fn recent_files_persist_and_missing_entries_are_removed() {
         "forget removes the entry"
     );
 }
+
+#[test]
+fn restoring_an_encrypted_source_keeps_the_unencrypted_output_warning() {
+    let _serial = serial();
+    let _app = app_data();
+    let dir = TempDir::new("recovery-encrypted");
+    let source = copy_fixture("encrypted", &dir, "secret.pdf");
+    let source_before = file_state(&source);
+
+    let opened = open_document(path_string(&source), Some("pdfx-user".to_owned()))
+        .expect("open the encrypted fixture");
+    assert!(opened.encrypted);
+    create_box(&opened.document_id, "Encrypted recovery edit");
+
+    assert!(
+        !maybe_snapshot_at(&opened.document_id, 0)
+            .expect("first tick")
+            .written
+    );
+    let outcome = maybe_snapshot_at(&opened.document_id, 2_000).expect("snapshot tick");
+    assert!(outcome.written, "the dirty encrypted document is protected");
+    let session_id = outcome.session_id.expect("snapshot session id");
+    let store = global_store();
+
+    let restored = restore_recovery(session_id.clone()).expect("restore the snapshot");
+    assert!(restored.recovered);
+    assert!(
+        restored.encrypted,
+        "the Source Document's encryption state must survive restore"
+    );
+    assert!(!restored.read_only);
+
+    // The snapshot itself is unencrypted locally, but ADR-0007 still requires
+    // an explicit confirmation before writing an unencrypted Output Document.
+    let output = dir.path().join("output.pdf");
+    let error = save_document_with_progress(
+        &restored.document_id,
+        SaveDocumentRequest {
+            save_as_path: Some(path_string(&output)),
+            confirm_unencrypted_output: false,
+        },
+        &mut |_| {},
+    )
+    .expect_err("an encrypted Source still needs the ADR-0007 confirmation");
+    assert_eq!(
+        error.code,
+        pdfx_lib::commands::CommandErrorCode::UnencryptedOutputConfirmationRequired
+    );
+    assert!(
+        !output.exists(),
+        "no unencrypted Output Document is written before confirmation"
+    );
+
+    save_document_with_progress(
+        &restored.document_id,
+        SaveDocumentRequest {
+            save_as_path: Some(path_string(&output)),
+            confirm_unencrypted_output: true,
+        },
+        &mut |_| {},
+    )
+    .expect("the confirmed save succeeds");
+    assert_eq!(
+        file_state(&source),
+        source_before,
+        "restoring and saving never touches the Source Document"
+    );
+    assert!(
+        store
+            .read_snapshot(&session_id)
+            .expect("read the snapshot")
+            .is_none(),
+        "the successful save removes the Recovery File"
+    );
+
+    let reopened = open_document(path_string(&output), None)
+        .expect("the confirmed output opens without a password");
+    assert!(!reopened.encrypted);
+
+    close_document(reopened.document_id).expect("close the output");
+    close_document(restored.document_id).expect("close the restored document");
+    close_document(opened.document_id).expect("close the crashed session's document");
+}

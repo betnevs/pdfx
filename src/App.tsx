@@ -648,6 +648,8 @@ export function App() {
     setNotice(null);
     setPasswordPrompt(null);
     setEditor({ status: "open", document });
+    // Restoring records the original Source Document as recently opened.
+    void recent.refresh();
   }
 
   function cancelPasswordPrompt() {
