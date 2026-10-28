@@ -28,6 +28,8 @@ export type CommandErrorCode =
   | "no_editable_text"
   | "unsupported_font"
   | "render_failed"
+  | "file_write_failed"
+  | "print_failed"
   | "window_failed"
   | "save_failed"
   | "save_target_is_source"
@@ -350,6 +352,8 @@ const COMMAND_ERROR_CODES: ReadonlySet<string> = new Set<CommandErrorCode>([
   "no_editable_text",
   "unsupported_font",
   "render_failed",
+  "file_write_failed",
+  "print_failed",
   "window_failed",
   "save_failed",
   "save_target_is_source",
@@ -375,6 +379,64 @@ export async function choosePdfFile(): Promise<string | null> {
     multiple: false,
     directory: false,
     filters: [{ name: "PDF", extensions: ["pdf"] }],
+  });
+  return typeof selection === "string" ? selection : null;
+}
+
+/** Image format of an exported Page. */
+export type PageImageFormat = "png" | "jpg";
+
+/** Confirmation metadata for a written page image. */
+export interface PageExportView {
+  path: string;
+  format: PageImageFormat;
+  dpi: number;
+  width: number;
+  height: number;
+  bytes: number;
+}
+
+/**
+ * Writes one Page as a PNG or JPEG image at `dpi` (72 = actual size).
+ * Export is read-only: it never changes the Document or its unsaved state.
+ */
+export async function exportPage(
+  documentId: string,
+  pageIndex: number,
+  format: PageImageFormat,
+  dpi: number,
+  destination: string,
+): Promise<PageExportView> {
+  return invoke<PageExportView>("export_page", {
+    documentId,
+    pageIndex,
+    format,
+    dpi,
+    destination,
+  });
+}
+
+/**
+ * Opens the platform print dialog for the print-only surface the caller built.
+ * The backend re-checks the Document's Permission Restrictions first.
+ */
+export async function printDocument(documentId: string): Promise<void> {
+  return invoke<void>("print_document", { documentId });
+}
+
+/** Native save dialog for a page image. Returns null when cancelled. */
+export async function choosePageImageDestination(
+  defaultPath: string,
+  format: PageImageFormat,
+): Promise<string | null> {
+  const selection = await saveDialog({
+    defaultPath,
+    filters: [
+      {
+        name: format === "png" ? "PNG" : "JPG",
+        extensions: [format === "png" ? "png" : "jpg"],
+      },
+    ],
   });
   return typeof selection === "string" ? selection : null;
 }
