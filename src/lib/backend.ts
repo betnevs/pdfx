@@ -32,6 +32,16 @@ export interface CommandError {
   message: string;
 }
 
+/** Editing capabilities reported by the PDF security handler. */
+export interface DocumentPermissions {
+  canModifyContent: boolean;
+  canAnnotate: boolean;
+  canAssemble: boolean;
+  canFillForms: boolean;
+  canPrint: boolean;
+  canCopyContent: boolean;
+}
+
 export interface DocumentView {
   documentId: string;
   name: string;
@@ -39,6 +49,11 @@ export interface DocumentView {
   pageCount: number;
   pageWidth: number;
   pageHeight: number;
+  /** The Source Document is encrypted (User or Owner Password). */
+  encrypted: boolean;
+  /** Permission Restrictions deny every editing capability. */
+  readOnly: boolean;
+  permissions: DocumentPermissions;
 }
 
 export interface PageImageView {

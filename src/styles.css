@@ -288,3 +288,142 @@ button {
 .document-status {
   margin-left: auto;
 }
+
+/* Encrypted PDFs and permission restrictions */
+
+.document-access {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px 0;
+}
+
+.read-only-notice {
+  max-width: 720px;
+  margin: 0;
+  padding: 7px 12px;
+  border: 1px solid #d9b36a;
+  border-radius: 7px;
+  background: #fff8e8;
+  color: #6b4b12;
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: center;
+}
+
+.editing-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.editing-tools button {
+  padding: 5px 11px;
+  border: 1px solid #d4cec4;
+  border-radius: 6px;
+  background: #fff;
+  color: #1f2430;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.editing-tools button:disabled {
+  border-color: #e2ddd5;
+  background: #f6f4f0;
+  color: #9b968c;
+  cursor: not-allowed;
+}
+
+.save-warning {
+  margin: 0;
+  color: #8a5a16;
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: center;
+}
+
+.password-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(31, 36, 48, 0.38);
+}
+
+.password-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(380px, 100%);
+  padding: 22px 24px;
+  border-radius: 12px;
+  background: #fbfaf7;
+  box-shadow:
+    0 2px 6px rgba(31, 36, 48, 0.2),
+    0 18px 48px rgba(31, 36, 48, 0.28);
+}
+
+.password-dialog h2 {
+  margin: 0 0 2px;
+  font-size: 17px;
+}
+
+.password-file {
+  margin: 0;
+  overflow: hidden;
+  color: #4d5260;
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.password-hint {
+  margin: 0 0 4px;
+  color: #6b6f7a;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.password-error {
+  margin: 0;
+  padding: 7px 10px;
+  border: 1px solid #e3b4ae;
+  border-radius: 6px;
+  background: #fdf1ef;
+  color: #8a4a43;
+  font-size: 12px;
+}
+
+.password-label {
+  color: #4d5260;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.password-dialog input {
+  padding: 8px 10px;
+  border: 1px solid #ccc6bb;
+  border-radius: 7px;
+  background: #fff;
+  color: #1f2430;
+  font: inherit;
+  font-size: 14px;
+}
+
+.password-dialog input:focus {
+  border-color: #8f887c;
+  outline: 2px solid rgba(143, 136, 124, 0.35);
+  outline-offset: 0;
+}
+
+.password-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 6px;
+}

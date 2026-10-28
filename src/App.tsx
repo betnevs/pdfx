@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
+import { DocumentAccess } from "./components/DocumentAccess";
+import { PasswordPrompt } from "./components/PasswordPrompt";
 import {
   choosePdfFile,
   closeDocument,
@@ -34,6 +36,21 @@ type EditorState =
   | { status: "loading" }
   | { status: "open"; document: DocumentView; page: PageImageView; zoom: number }
   | { status: "error"; error: CommandError; retryPath: string | null };
+
+interface PasswordPromptState {
+  path: string;
+  fileName: string;
+  error: string | null;
+  busy: boolean;
+}
+
+const WRONG_PASSWORD_MESSAGE = "密码不正确，请重试。";
+
+/** Basenames the same way the backend names a Document. */
+function fileName(path: string): string {
+  const segments = path.split(/[\\/]/);
+  return segments[segments.length - 1] || path;
+}
 
 const ERROR_MESSAGES: Partial<Record<CommandErrorCode, string>> = {
   file_not_found: "找不到文件，它可能已被移动或删除。",
@@ -71,6 +88,7 @@ export function App() {
   const [appInfo, setAppInfo] = useState<AppInfoState>({ status: "loading" });
   const [editor, setEditor] = useState<EditorState>({ status: "empty" });
   const [notice, setNotice] = useState<CommandError | null>(null);
+  const [passwordPrompt, setPasswordPrompt] = useState<PasswordPromptState | null>(null);
 
   // Editing arrives in a later ticket; the scaffold tracks dirty state and the
   // close guard so nothing silently discards future unsaved changes.
@@ -101,12 +119,16 @@ export function App() {
     };
   }, []);
 
-  async function openPath(path: string) {
+  async function openPath(path: string, password: string | null = null) {
     if (openingRef.current) {
       return;
     }
     openingRef.current = true;
     let openedDocumentId: string | null = null;
+    // A password prompt leaves the workspace in the state it had before the
+    // open attempt, so cancelling never leaves a loading or empty document
+    // behind.
+    const previous = editorRef.current;
 
     try {
       // One window hosts one Document. Opening a second file from a window that
@@ -124,8 +146,9 @@ export function App() {
 
       setEditor({ status: "loading" });
       setNotice(null);
-      const document = await openDocument(path);
+      const document = await openDocument(path, password);
       openedDocumentId = document.documentId;
+      setPasswordPrompt(null);
 
       await setWindowTitle(`${document.name} — PDFX`).catch(() => {
         // The title is cosmetic; a missing window capability must not fail open.
@@ -137,15 +160,47 @@ export function App() {
       if (openedDocumentId) {
         await closeDocument(openedDocumentId).catch(() => {});
       }
+
+      const commandError = toCommandError(error);
+      if (
+        commandError.code === "password_required" ||
+        commandError.code === "invalid_password"
+      ) {
+        // Nothing is rendered before a successful open; the prompt is the only
+        // surface that survives a failed attempt.
+        setEditor(previous);
+        setPasswordPrompt({
+          path,
+          fileName: fileName(path),
+          error: commandError.code === "invalid_password" ? WRONG_PASSWORD_MESSAGE : null,
+          busy: false,
+        });
+        return;
+      }
+
+      setPasswordPrompt(null);
       setNotice(null);
       setEditor({
         status: "error",
-        error: toCommandError(error),
+        error: commandError,
         retryPath: path,
       });
     } finally {
       openingRef.current = false;
     }
+  }
+
+  function submitPassword(password: string) {
+    if (!passwordPrompt || passwordPrompt.busy) {
+      return;
+    }
+    const prompt = passwordPrompt;
+    setPasswordPrompt({ ...prompt, busy: true, error: null });
+    void openPath(prompt.path, password);
+  }
+
+  function cancelPasswordPrompt() {
+    setPasswordPrompt(null);
   }
 
   function promptOpen() {
@@ -315,6 +370,16 @@ export function App() {
         </div>
       )}
 
+      {passwordPrompt && (
+        <PasswordPrompt
+          fileName={passwordPrompt.fileName}
+          error={passwordPrompt.error}
+          busy={passwordPrompt.busy}
+          onSubmit={submitPassword}
+          onCancel={cancelPasswordPrompt}
+        />
+      )}
+
       <main className="workspace" aria-label="PDFX 工作区">
         {editor.status === "empty" && (
           <section className="empty-workspace">
@@ -366,6 +431,7 @@ export function App() {
                 实际大小
               </button>
             </div>
+            <DocumentAccess document={open.document} />
             <div className="page-stage">
               <PageCanvas page={open.page} />
             </div>

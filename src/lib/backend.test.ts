@@ -66,6 +66,16 @@ describe("backend command seam", () => {
       pageCount: 3,
       pageWidth: 612,
       pageHeight: 792,
+      encrypted: false,
+      readOnly: false,
+      permissions: {
+        canModifyContent: true,
+        canAnnotate: true,
+        canAssemble: true,
+        canFillForms: true,
+        canPrint: true,
+        canCopyContent: true,
+      },
     });
 
     const view = await openDocument("/tmp/report.pdf");
@@ -93,6 +103,34 @@ describe("backend command seam", () => {
 
     await closeDocument("doc-1");
     expect(invokeMock).toHaveBeenCalledWith("close_document", { documentId: "doc-1" });
+  });
+
+  it("forwards a supplied password to open_document", async () => {
+    invokeMock.mockResolvedValue({
+      documentId: "doc-1",
+      name: "secret.pdf",
+      path: "/tmp/secret.pdf",
+      pageCount: 1,
+      pageWidth: 612,
+      pageHeight: 792,
+      encrypted: true,
+      readOnly: false,
+      permissions: {
+        canModifyContent: true,
+        canAnnotate: true,
+        canAssemble: true,
+        canFillForms: true,
+        canPrint: true,
+        canCopyContent: true,
+      },
+    });
+
+    await openDocument("/tmp/secret.pdf", "pdfx-user");
+
+    expect(invokeMock).toHaveBeenCalledWith("open_document", {
+      path: "/tmp/secret.pdf",
+      password: "pdfx-user",
+    });
   });
 
   it("opens a second document window through its own command", async () => {
