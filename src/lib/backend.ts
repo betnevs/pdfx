@@ -25,6 +25,8 @@ export type CommandErrorCode =
   | "page_out_of_range"
   | "invalid_scale"
   | "invalid_argument"
+  | "no_editable_text"
+  | "unsupported_font"
   | "render_failed"
   | "window_failed"
   | "update_not_configured"
@@ -142,6 +144,145 @@ export interface TextLayerView {
   chars: TextCharView[];
 }
 
+/**
+ * Initial state of a Text Box when the user clicks existing text.
+ *
+ * Content and style come from the original Text Object; geometry is in
+ * display-space points, the same coordinate system as the text layer.
+ */
+export interface TextBoxTargetView {
+  boxId: number;
+  pageIndex: number;
+  text: string;
+  fontFamily: string;
+  fontSize: number;
+  /** Fill colour as `#rrggbb`. */
+  color: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  /** Style variant flags; an original Text Object's font name can imply them. */
+  bold: boolean;
+  italic: boolean;
+  underline: boolean;
+  alignment: TextAlignment;
+  /** Clockwise rotation in degrees in display space. */
+  rotation: number;
+  /** The height follows the content and never shrinks automatically. */
+  autoHeight: boolean;
+  /** Created by the Text Box tool rather than being an original Text Object. */
+  created: boolean;
+}
+
+/** Horizontal alignment of the lines inside a Text Box. */
+export type TextAlignment = "left" | "center" | "right";
+
+/** Whole-box style the Text Box editor sends to the backend. */
+export interface TextBoxStyleView {
+  fontFamily: string;
+  fontSize: number;
+  bold: boolean;
+  italic: boolean;
+  underline: boolean;
+  /** Fill colour as `#rrggbb`. */
+  color: string;
+  alignment: TextAlignment;
+}
+
+/**
+ * One font the Text Box editor may use.
+ *
+ * `source` distinguishes PDF base-14 fonts from embedded font programs;
+ * `embedded` says whether a program is written into the saved PDF and
+ * `coverage` states which characters the font can render. Ticket 11 adds
+ * embedded families without changing this shape.
+ */
+export interface TextBoxFontView {
+  family: string;
+  label: string;
+  bold: boolean;
+  italic: boolean;
+  postscriptName: string;
+  source: "base14" | "embedded" | string;
+  embedded: boolean;
+  embeddable: boolean;
+  coverage: "win_ansi" | "cjk" | "full" | string;
+}
+
+/** Geometry for a new Text Box, in display-space points. */
+export interface CreateTextBoxRequest {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  /** Omit for the default visible style (Helvetica 16, black, left). */
+  style?: TextBoxStyleView | null;
+}
+
+/** Move, resize or rotate an existing Text Box. */
+export interface TextBoxTransformRequest {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  /** False after a manual resize: the height then clips instead of growing. */
+  autoHeight: boolean;
+  /** Clockwise rotation in degrees in display space. */
+  rotation: number;
+}
+
+/** The outcome of creating or restyling a Text Box. */
+export interface TextBoxEditResultView {
+  pageIndex: number;
+  target: TextBoxTargetView;
+  /** Set when an existing font could not be preserved. */
+  font: FontUsageView | null;
+  history: EditHistoryView;
+}
+
+/** The font chosen for a committed edit, when it differs from the original. */
+export interface FontUsageView {
+  originalFamily: string;
+  family: string;
+  fallback: boolean;
+  /** Why the original font could not be kept, when `fallback` is true. */
+  reason: string | null;
+}
+
+/**
+ * Document-wide undo/redo state shared by every edit tool.
+ *
+ * `revision` is the current document state; `savedRevision` is the state last
+ * written to disk. Undoing back to the saved state clears `dirty`. History
+ * survives saving.
+ */
+export interface EditHistoryView {
+  canUndo: boolean;
+  canRedo: boolean;
+  revision: number;
+  savedRevision: number;
+  dirty: boolean;
+}
+
+/** The outcome of committing a text edit or deletion. */
+export interface TextEditResultView {
+  pageIndex: number;
+  boxId: number;
+  /** Text Box content after the edit (empty after a deletion). */
+  text: string;
+  /** Set when the replacement could not keep the original font. */
+  font: FontUsageView | null;
+  history: EditHistoryView;
+}
+
+/** The outcome of an undo or redo step. */
+export interface EditStepView {
+  /** Page whose content changed, so only that page needs refreshing. */
+  pageIndex: number;
+  history: EditHistoryView;
+}
+
 /** Event emitted to the focused window for native menu activation. */
 export const MENU_EVENT = "pdfx://menu";
 
@@ -157,6 +298,8 @@ const COMMAND_ERROR_CODES: ReadonlySet<string> = new Set<CommandErrorCode>([
   "page_out_of_range",
   "invalid_scale",
   "invalid_argument",
+  "no_editable_text",
+  "unsupported_font",
   "render_failed",
   "window_failed",
   "internal",
@@ -269,6 +412,142 @@ export async function extractTextLayer(
   pageIndex: number,
 ): Promise<TextLayerView> {
   return invoke<TextLayerView>("extract_text_layer", { documentId, pageIndex });
+}
+
+/**
+ * Resolves the Text Object under a text-layer character into the initial Text
+ * Box state. `charIndex` is the index in `TextLayerView.chars`.
+ */
+export async function textEditTarget(
+  documentId: string,
+  pageIndex: number,
+  charIndex: number,
+): Promise<TextBoxTargetView> {
+  return invoke<TextBoxTargetView>("text_edit_target", {
+    documentId,
+    pageIndex,
+    charIndex,
+  });
+}
+
+/**
+ * Replaces a Text Box with `text`, wrapping at its width. Resolves with the
+ * document-wide history state after the edit.
+ */
+export async function applyTextEdit(
+  documentId: string,
+  pageIndex: number,
+  boxId: number,
+  text: string,
+): Promise<TextEditResultView> {
+  return invoke<TextEditResultView>("apply_text_edit", {
+    documentId,
+    pageIndex,
+    boxId,
+    text,
+  });
+}
+
+/** Removes a Text Box and its original page objects from the page content. */
+export async function deleteTextBox(
+  documentId: string,
+  pageIndex: number,
+  boxId: number,
+): Promise<TextEditResultView> {
+  return invoke<TextEditResultView>("delete_text_box", {
+    documentId,
+    pageIndex,
+    boxId,
+  });
+}
+
+/**
+ * Lists the fonts the Text Box editor may use. Until the subset-embedding
+ * pipeline lands these are the PDF base-14 Latin families only; the metadata
+ * already carries `source`, `embedded` and `coverage` for later families.
+ */
+export async function textBoxFonts(): Promise<TextBoxFontView[]> {
+  return invoke<TextBoxFontView[]>("text_box_fonts");
+}
+
+/** Lists the Text Boxes this session created on a page, including empty ones. */
+export async function textBoxes(
+  documentId: string,
+  pageIndex: number,
+): Promise<TextBoxTargetView[]> {
+  return invoke<TextBoxTargetView[]>("text_boxes", { documentId, pageIndex });
+}
+
+/**
+ * Adds an empty Text Box and records its creation in document-wide history.
+ * The backend gives it the default visible style unless `style` is supplied.
+ */
+export async function createTextBox(
+  documentId: string,
+  pageIndex: number,
+  request: CreateTextBoxRequest,
+): Promise<TextBoxEditResultView> {
+  return invoke<TextBoxEditResultView>("create_text_box", {
+    documentId,
+    pageIndex,
+    request,
+  });
+}
+
+/** Replaces the whole-box style; text reflows immediately inside the box. */
+export async function applyTextBoxStyle(
+  documentId: string,
+  pageIndex: number,
+  boxId: number,
+  style: TextBoxStyleView,
+): Promise<TextBoxEditResultView> {
+  return invoke<TextBoxEditResultView>("apply_text_box_style", {
+    documentId,
+    pageIndex,
+    boxId,
+    style,
+  });
+}
+
+/** Moves, resizes or rotates a Text Box as one undoable document action. */
+export async function transformTextBox(
+  documentId: string,
+  pageIndex: number,
+  boxId: number,
+  transform: TextBoxTransformRequest,
+): Promise<TextBoxEditResultView> {
+  return invoke<TextBoxEditResultView>("transform_text_box", {
+    documentId,
+    pageIndex,
+    boxId,
+    transform,
+  });
+}
+
+/** Reads document-wide undo/redo availability. */
+export async function editHistory(documentId: string): Promise<EditHistoryView> {
+  return invoke<EditHistoryView>("edit_history", { documentId });
+}
+
+/** Undoes the most recent edit action and returns the affected page. */
+export async function undoTextEdit(documentId: string): Promise<EditStepView> {
+  return invoke<EditStepView>("undo_text_edit", { documentId });
+}
+
+/** Redoes the most recently undone edit action. */
+export async function redoTextEdit(documentId: string): Promise<EditStepView> {
+  return invoke<EditStepView>("redo_text_edit", { documentId });
+}
+
+/**
+ * Records that the current in-memory state was written to disk. The save
+ * pipeline must call this after a successful write; it moves the clean
+ * baseline without clearing undo/redo, so history survives Save Changes.
+ */
+export async function markDocumentSaved(
+  documentId: string,
+): Promise<EditHistoryView> {
+  return invoke<EditHistoryView>("mark_document_saved", { documentId });
 }
 
 /** Releases a document from the backend registry. Unknown ids are ignored. */

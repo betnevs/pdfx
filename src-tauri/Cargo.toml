@@ -38,6 +38,8 @@ semver = "1"
 # dependency graph; the Windows `shellexecute-on-windows` feature uses
 # ShellExecuteW instead of shell interpolation.
 open = { version = "5", features = ["shellexecute-on-windows"] }
+# Glyph coverage checks before rewriting text with an embedded font.
+ttf-parser = "0.25"
 
 [features]
 default = []
