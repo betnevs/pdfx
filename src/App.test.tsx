@@ -75,6 +75,30 @@ function thumbnailImage(args: { pageIndex: number; documentId?: string }) {
   };
 }
 
+const textLayerView = {
+  pageIndex: 0,
+  pageWidth: 612,
+  pageHeight: 792,
+  rotation: 0,
+  cropX: 0,
+  cropY: 0,
+  hasText: true,
+  text: "PDFX fixture",
+  chars: [
+    {
+      text: "P",
+      x: 72,
+      y: 55.71,
+      width: 12.006,
+      height: 20.088,
+      originX: 72,
+      originY: 72,
+      fontSize: 18,
+      generated: false,
+    },
+  ],
+};
+
 type CommandHandler = (args: unknown) => unknown;
 
 function installBackend(overrides: Record<string, CommandHandler> = {}) {
@@ -112,6 +136,7 @@ function installDocumentBackend(overrides: Record<string, CommandHandler> = {}) 
       };
       return { ...region, pngBase64: "iVBORw0KGgo=" };
     },
+    extract_text_layer: () => textLayerView,
     close_document: () => undefined,
     ...overrides,
   });
@@ -263,6 +288,21 @@ describe("PDFX workspace", () => {
         filters: [{ name: "PDF", extensions: ["pdf"] }],
       }),
     );
+  });
+
+  it("loads the visible page's text layer alongside the rendered canvas", async () => {
+    installDocumentBackend();
+    openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+
+    expect(await screen.findByRole("region", { name: "文本层" })).toBeInTheDocument();
+    expect(commandCalls("extract_text_layer")).toEqual([
+      ["extract_text_layer", { documentId: "doc-1", pageIndex: 0 }],
+    ]);
+    expect(screen.getByRole("img", { name: "第 1 页" })).toBeInTheDocument();
   });
 
   it("opens a PDF dropped onto the window", async () => {
@@ -1010,6 +1050,7 @@ describe("PDFX workspace", () => {
     render(<App />);
     await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
     await screen.findByText("report.pdf");
+    await screen.findByRole("region", { name: "文本层" });
     await waitFor(() => expect(menuHandler).toBeDefined());
 
     act(() => menuHandler?.({ payload: "view.zoom_in" }));
@@ -1029,6 +1070,10 @@ describe("PDFX workspace", () => {
         scale: 1,
       });
     });
+
+    // The layer is page-space geometry overlaid on the canvas; zooming
+    // re-renders the bitmap but must not re-fetch or re-parse the text.
+    expect(commandCalls("extract_text_layer")).toHaveLength(1);
 
     openDialogMock.mockResolvedValueOnce(null);
     act(() => menuHandler?.({ payload: "file.open" }));

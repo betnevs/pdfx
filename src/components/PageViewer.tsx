@@ -21,6 +21,7 @@ import {
   type FitMode,
 } from "../lib/pageGeometry";
 import type { PageRender, ZoomMode } from "../lib/useDocumentViewer";
+import { PageTextLayer } from "./PageTextLayer";
 
 /** Fixed cell height keeps thumbnail virtualization independent of page sizes. */
 const THUMBNAIL_ITEM_HEIGHT = 168;
@@ -352,12 +353,14 @@ export function ThumbnailRail({
 }
 
 export function PageSurface({
+  documentId,
   pageIndex,
   info,
   scale,
   render,
   surfaceRef,
 }: {
+  documentId: string;
   pageIndex: number;
   info: PageInfo | null;
   scale: number;
@@ -413,6 +416,14 @@ export function PageSurface({
             }}
           />
         ))}
+      {/* Text geometry is page-relative, so the overlay always spans the
+          full page surface even when the bitmap itself is rendered as a
+          viewport-sized tile at high zoom. */}
+      <PageTextLayer
+        key={`${documentId}:${pageIndex}`}
+        documentId={documentId}
+        pageIndex={pageIndex}
+      />
     </div>
   );
 }

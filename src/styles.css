@@ -420,6 +420,79 @@ button {
   display: block;
 }
 
+.page-text-layer {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  cursor: text;
+  user-select: none;
+  touch-action: none;
+}
+
+.page-text-layer:focus-visible {
+  outline: 2px solid #3f6ad8;
+  outline-offset: 2px;
+}
+
+.page-text-layer--message {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 14px;
+  pointer-events: none;
+  cursor: default;
+}
+
+.text-layer-message {
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: rgba(31, 36, 48, 0.72);
+  color: #fff;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.text-highlight {
+  position: absolute;
+  border-radius: 1px;
+  background: rgba(255, 196, 0, 0.35);
+  pointer-events: none;
+}
+
+.text-selection-actions {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: rgba(31, 36, 48, 0.86);
+  color: #fff;
+  font-size: 12px;
+  line-height: 1.4;
+  user-select: none;
+}
+
+.text-selection-actions button {
+  padding: 2px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.45);
+  border-radius: 4px;
+  background: transparent;
+  color: #fff;
+  font: inherit;
+  cursor: pointer;
+}
+
+.text-selection-actions button:hover {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.text-copy-status {
+  color: #b9f0c2;
+}
+
 .status-bar {
   display: flex;
   align-items: center;

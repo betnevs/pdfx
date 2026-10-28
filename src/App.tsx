@@ -435,6 +435,7 @@ export function App() {
               >
                 <div className="page-stage-inner">
                   <PageSurface
+                    documentId={open.document.documentId}
                     pageIndex={viewer.pageIndex}
                     info={viewer.info}
                     scale={viewer.scale}

@@ -6,8 +6,8 @@ use std::sync::{Mutex, OnceLock};
 
 use base64::Engine as _;
 use pdfium_render::prelude::{
-    PdfBitmap, PdfBitmapFormat, PdfDocument, PdfPage, PdfRenderConfig, PdfSecurityHandlerRevision,
-    PdfiumError, PdfiumInternalError,
+    PdfBitmap, PdfBitmapFormat, PdfDocument, PdfPage, PdfPageBoundaryBoxType, PdfRenderConfig,
+    PdfSecurityHandlerRevision, PdfiumError, PdfiumInternalError,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, WebviewUrl, WebviewWindowBuilder};
@@ -171,6 +171,58 @@ pub struct ExtractedTextView {
     pub page_index: u32,
     pub text: String,
     pub char_count: u32,
+}
+
+/// One selectable character of a page's text layer.
+///
+/// All geometry is in display-space points: the coordinate system of the
+/// rendered page bitmap divided by the render scale, with the origin at the
+/// page's top-left corner. Intrinsic page rotation and the CropBox origin are
+/// already applied, so overlays can scale these rectangles by the render scale
+/// without knowing anything else about the page.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextCharView {
+    /// Unicode text of the character. Surrogate pairs are combined.
+    pub text: String,
+    /// Left edge in display-space points.
+    pub x: f32,
+    /// Top edge in display-space points.
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    /// Baseline origin in display-space points.
+    pub origin_x: f32,
+    pub origin_y: f32,
+    pub font_size: f32,
+    /// PDFium generated this character (line breaks and similar spacing).
+    /// Generated characters have a degenerate box and are not hit-testable,
+    /// but they carry the page's line breaks when copying.
+    pub generated: bool,
+}
+
+/// The positioned text layer of one page.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextLayerView {
+    pub page_index: u32,
+    /// Display width in points, with intrinsic rotation applied.
+    pub page_width: f32,
+    /// Display height in points, with intrinsic rotation applied.
+    pub page_height: f32,
+    /// Intrinsic page rotation in degrees, clockwise (0, 90, 180 or 270).
+    pub rotation: u16,
+    /// Lower-left corner of the CropBox in PDF user space. Character geometry
+    /// is already relative to the cropped, displayed page.
+    pub crop_x: f32,
+    pub crop_y: f32,
+    /// False for scanned pages and pages whose text is entirely outside the
+    /// visible page box. The frontend shows the "no editable text" state.
+    pub has_text: bool,
+    /// Visible text in character order. Equals the concatenation of
+    /// [`TextCharView::text`].
+    pub text: String,
+    pub chars: Vec<TextCharView>,
 }
 
 struct OpenDocument {
@@ -699,6 +751,347 @@ pub fn extract_text(
         char_count: text.chars().count() as u32,
         text,
     })
+}
+
+/// The `extract_text_layer` command. Returns positioned characters for one
+/// page so the frontend can hit-test, select, highlight and copy text.
+///
+/// Coordinates are display-space points (top-left origin, intrinsic rotation
+/// applied), which is the rendered bitmap's coordinate system divided by the
+/// render scale. Scanned pages return an empty layer.
+#[tauri::command]
+pub fn extract_text_layer(
+    document_id: String,
+    page_index: u32,
+) -> Result<TextLayerView, CommandError> {
+    let registry = registry().lock().expect("document registry poisoned");
+    let entry = registry.documents.get(&document_id).ok_or_else(|| {
+        CommandError::new(
+            CommandErrorCode::DocumentNotFound,
+            format!("no open document with id {document_id}"),
+        )
+    })?;
+
+    let pages = entry.document.pages();
+    if page_index as i32 >= pages.len() {
+        return Err(CommandError::new(
+            CommandErrorCode::PageOutOfRange,
+            format!("page {page_index} is outside 0..{}", pages.len()),
+        ));
+    }
+
+    let page = pages.get(page_index as i32).map_err(|error| {
+        CommandError::new(
+            CommandErrorCode::RenderFailed,
+            format!("could not load page {page_index}: {error:?}"),
+        )
+    })?;
+
+    build_text_layer(&page, page_index)
+}
+
+/// Display-space transform for one page: the box PDFium renders and the
+/// intrinsic rotation it applies.
+struct DisplayGeometry {
+    left: f32,
+    bottom: f32,
+    width: f32,
+    height: f32,
+    display_width: f32,
+    display_height: f32,
+    rotation: u16,
+}
+
+impl DisplayGeometry {
+    fn new(page: &PdfPage<'_>, rotation: u16) -> Result<Self, CommandError> {
+        // FPDF_GetPageBoundingBox is the MediaBox/CropBox intersection, which
+        // is exactly the region PDFium renders. A page without a CropBox
+        // reports its MediaBox here. The box is in unrotated page coordinates;
+        // for 90/270 degree pages the display axes are swapped.
+        let bounds = page
+            .boundaries()
+            .get(PdfPageBoundaryBoxType::Bounding)
+            .map_err(|error| {
+                CommandError::new(
+                    CommandErrorCode::RenderFailed,
+                    format!("could not read the page box: {error:?}"),
+                )
+            })?
+            .bounds;
+
+        let width = bounds.right().value - bounds.left().value;
+        let height = bounds.top().value - bounds.bottom().value;
+        let (display_width, display_height) = match rotation {
+            90 | 270 => (height, width),
+            _ => (width, height),
+        };
+
+        Ok(Self {
+            left: bounds.left().value,
+            bottom: bounds.bottom().value,
+            width,
+            height,
+            display_width,
+            display_height,
+            rotation,
+        })
+    }
+
+    /// Maps a point from PDF user space to display-space points with a
+    /// top-left origin. The four cases are clockwise page rotations.
+    fn point(&self, x: f32, y: f32) -> (f32, f32) {
+        let u = x - self.left;
+        let v = y - self.bottom;
+        match self.rotation {
+            90 => (v, u),
+            180 => (self.width - u, v),
+            270 => (self.height - v, self.width - u),
+            _ => (u, self.height - v),
+        }
+    }
+
+    /// Maps a PDF user-space box to a display-space box, clamped to the page.
+    fn rect(&self, left: f32, bottom: f32, right: f32, top: f32) -> (f32, f32, f32, f32) {
+        let (mut min_x, mut min_y) = (f32::INFINITY, f32::INFINITY);
+        let (mut max_x, mut max_y) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+        for (x, y) in [(left, bottom), (left, top), (right, bottom), (right, top)] {
+            let (x, y) = self.point(x, y);
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x);
+            max_y = max_y.max(y);
+        }
+
+        let min_x = min_x.clamp(0.0, self.display_width);
+        let min_y = min_y.clamp(0.0, self.display_height);
+        let max_x = max_x.clamp(0.0, self.display_width);
+        let max_y = max_y.clamp(0.0, self.display_height);
+        (min_x, min_y, max_x - min_x, max_y - min_y)
+    }
+}
+
+/// Tolerance for visibility checks; PDFium reports boxes in floating point.
+const GEOMETRY_EPSILON: f32 = 0.01;
+
+fn point_inside(x: f32, y: f32, rect: (f32, f32, f32, f32)) -> bool {
+    x >= rect.0 - GEOMETRY_EPSILON
+        && x <= rect.2 + GEOMETRY_EPSILON
+        && y >= rect.1 - GEOMETRY_EPSILON
+        && y <= rect.3 + GEOMETRY_EPSILON
+}
+
+/// True when two PDF user-space boxes overlap with positive area.
+fn boxes_overlap(a: (f32, f32, f32, f32), b: (f32, f32, f32, f32)) -> bool {
+    a.0 < b.2 && a.2 > b.0 && a.1 < b.3 && a.3 > b.1
+}
+
+fn is_high_surrogate(value: u32) -> bool {
+    (0xD800..=0xDBFF).contains(&value)
+}
+
+fn is_low_surrogate(value: u32) -> bool {
+    (0xDC00..=0xDFFF).contains(&value)
+}
+
+/// Builds the positioned text layer for one loaded page.
+fn build_text_layer(page: &PdfPage<'_>, page_index: u32) -> Result<TextLayerView, CommandError> {
+    let rotation = page
+        .rotation()
+        .map_err(|error| {
+            CommandError::new(
+                CommandErrorCode::RenderFailed,
+                format!("could not read page {page_index} rotation: {error:?}"),
+            )
+        })?
+        .as_degrees() as u16;
+    let geometry = DisplayGeometry::new(page, rotation)?;
+    let page_width = page.width().value;
+    let page_height = page.height().value;
+    let (crop_x, crop_y) = page
+        .boundaries()
+        .crop()
+        .map(|boundary| (boundary.bounds.left().value, boundary.bounds.bottom().value))
+        .unwrap_or((0.0, 0.0));
+
+    // A missing text layer is normal for scanned documents; treat a PDFium
+    // failure to page the text the same way so the UI can show the
+    // "no editable text" state instead of an error.
+    let Some(text_page) = page.text().ok() else {
+        return Ok(empty_text_layer(
+            page_index,
+            page_width,
+            page_height,
+            rotation,
+            crop_x,
+            crop_y,
+        ));
+    };
+
+    let raw_chars = text_page.chars();
+    let count = raw_chars.len();
+    let mut chars = Vec::with_capacity(count);
+    let mut index = 0;
+
+    while index < count {
+        let character = raw_chars.get(index).map_err(|error| {
+            CommandError::new(
+                CommandErrorCode::RenderFailed,
+                format!("could not read character {index} on page {page_index}: {error:?}"),
+            )
+        })?;
+        let value = character.unicode_value();
+        if value == 0 {
+            // PDFium uses zero for characters without a Unicode mapping.
+            index += 1;
+            continue;
+        }
+
+        let mut generated = character.is_generated().unwrap_or(false);
+        let mut text = char::from_u32(value).map(|c| c.to_string());
+        let mut char_box = character.loose_bounds().ok().map(pdf_rect_tuple);
+        let origin = character
+            .origin()
+            .map(|(x, y)| (x.value, y.value))
+            .unwrap_or((0.0, 0.0));
+        let font_size = character.unscaled_font_size().value;
+
+        // PDFium stores text as UTF-16 code units; combine a surrogate pair
+        // into a single selectable character with the union of both boxes.
+        if is_high_surrogate(value) {
+            if let Ok(next) = raw_chars.get(index + 1) {
+                let next_value = next.unicode_value();
+                if is_low_surrogate(next_value) {
+                    let combined = 0x10000 + ((value - 0xD800) << 10) + (next_value - 0xDC00);
+                    text = char::from_u32(combined).map(|c| c.to_string());
+                    generated = generated && next.is_generated().unwrap_or(false);
+                    char_box = union_boxes(char_box, next.loose_bounds().ok().map(pdf_rect_tuple));
+                    index += 1;
+                }
+            }
+        }
+
+        index += 1;
+        let Some(text) = text else {
+            // A lone surrogate has no Unicode scalar value; keep its slot out
+            // of the layer rather than inventing text.
+            continue;
+        };
+
+        let visible_box = char_box
+            .map(|b| {
+                boxes_overlap(
+                    b,
+                    (
+                        geometry.left,
+                        geometry.bottom,
+                        geometry.left + geometry.width,
+                        geometry.bottom + geometry.height,
+                    ),
+                )
+            })
+            .unwrap_or(false);
+        let visible_origin = point_inside(
+            origin.0,
+            origin.1,
+            (
+                geometry.left,
+                geometry.bottom,
+                geometry.left + geometry.width,
+                geometry.bottom + geometry.height,
+            ),
+        );
+        if !visible_box && !visible_origin {
+            // Text outside the rendered MediaBox/CropBox is not selectable on
+            // this page.
+            continue;
+        }
+
+        let (x, y, width, height) = match char_box {
+            Some((left, bottom, right, top)) => geometry.rect(left, bottom, right, top),
+            None => {
+                let (x, y) = geometry.point(origin.0, origin.1);
+                (
+                    x.clamp(0.0, page_width),
+                    y.clamp(0.0, page_height),
+                    0.0,
+                    0.0,
+                )
+            }
+        };
+        let (origin_x, origin_y) = geometry.point(origin.0, origin.1);
+
+        chars.push(TextCharView {
+            text,
+            x,
+            y,
+            width,
+            height,
+            origin_x,
+            origin_y,
+            font_size,
+            generated,
+        });
+    }
+
+    let text: String = chars
+        .iter()
+        .map(|character| character.text.as_str())
+        .collect();
+    let has_text = !text.trim().is_empty();
+
+    Ok(TextLayerView {
+        page_index,
+        page_width,
+        page_height,
+        rotation,
+        crop_x,
+        crop_y,
+        has_text,
+        text,
+        chars,
+    })
+}
+
+fn empty_text_layer(
+    page_index: u32,
+    page_width: f32,
+    page_height: f32,
+    rotation: u16,
+    crop_x: f32,
+    crop_y: f32,
+) -> TextLayerView {
+    TextLayerView {
+        page_index,
+        page_width,
+        page_height,
+        rotation,
+        crop_x,
+        crop_y,
+        has_text: false,
+        text: String::new(),
+        chars: Vec::new(),
+    }
+}
+
+fn pdf_rect_tuple(rect: pdfium_render::prelude::PdfRect) -> (f32, f32, f32, f32) {
+    (
+        rect.left().value,
+        rect.bottom().value,
+        rect.right().value,
+        rect.top().value,
+    )
+}
+
+fn union_boxes(
+    a: Option<(f32, f32, f32, f32)>,
+    b: Option<(f32, f32, f32, f32)>,
+) -> Option<(f32, f32, f32, f32)> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some((a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3))),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    }
 }
 
 fn encode_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, CommandError> {

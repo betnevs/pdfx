@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   choosePdfFile,
   closeDocument,
+  extractTextLayer,
   initialDocumentPath,
   isFullscreen,
   MENU_EVENT,
@@ -222,6 +223,53 @@ describe("backend command seam", () => {
 
     expect(setFullscreenMock).toHaveBeenCalledWith(true);
     expect(isFullscreenMock).toHaveBeenCalled();
+  });
+
+  it("extracts a positioned text layer for one page", async () => {
+    invokeMock.mockResolvedValue({
+      pageIndex: 2,
+      pageWidth: 612,
+      pageHeight: 792,
+      rotation: 0,
+      cropX: 0,
+      cropY: 0,
+      hasText: true,
+      text: "Hi",
+      chars: [
+        {
+          text: "H",
+          x: 72,
+          y: 55.71,
+          width: 13,
+          height: 20,
+          originX: 72,
+          originY: 72,
+          fontSize: 18,
+          generated: false,
+        },
+        {
+          text: "i",
+          x: 85,
+          y: 55.71,
+          width: 5,
+          height: 20,
+          originX: 85,
+          originY: 72,
+          fontSize: 18,
+          generated: false,
+        },
+      ],
+    });
+
+    const layer = await extractTextLayer("doc-1", 2);
+
+    expect(invokeMock).toHaveBeenCalledWith("extract_text_layer", {
+      documentId: "doc-1",
+      pageIndex: 2,
+    });
+    expect(layer.chars[0].fontSize).toBe(18);
+    expect(layer.chars[1].text).toBe("i");
+    expect(layer.hasText).toBe(true);
   });
 
   it("sets the current window title", async () => {

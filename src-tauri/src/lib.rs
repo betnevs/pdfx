@@ -40,6 +40,7 @@ pub fn run() {
             commands::render_page_region,
             commands::page_info,
             commands::extract_text,
+            commands::extract_text_layer,
             commands::close_document,
         ])
         .setup(|app| {
