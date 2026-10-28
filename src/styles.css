@@ -2088,6 +2088,30 @@ button {
   height: 8px;
 }
 
+.print-export-warning {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 9px 11px;
+  border: 1px solid var(--pdfx-warning-border);
+  border-radius: 6px;
+  background: var(--pdfx-warning-soft);
+  color: var(--pdfx-warning-strong-text);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.print-export-warning p {
+  margin: 0;
+}
+
+.print-export-warning label {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+}
+
 .print-export-error {
   margin: 0;
   padding: 7px 10px;
