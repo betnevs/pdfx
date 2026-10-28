@@ -390,6 +390,61 @@ export interface ImageEditResultView {
   history: EditHistoryView;
 }
 
+/** Which logical pages receive a watermark. */
+export type WatermarkScope = "current" | "all";
+
+/** A text or image watermark. */
+export type WatermarkKind = "text" | "image";
+
+/**
+ * One watermark apply request. Opacity is a percentage (1-100), rotation is
+ * clockwise degrees around the mark center, scale is a percentage of the
+ * default size, and positions are fractions of the display page (0-1).
+ */
+export interface WatermarkRequest {
+  scope: WatermarkScope;
+  kind: WatermarkKind;
+  text: string | null;
+  imagePath: string | null;
+  opacity: number;
+  rotation: number;
+  scale: number;
+  positionX: number;
+  positionY: number;
+}
+
+/** The active watermark as the panel sees it. */
+export interface WatermarkView {
+  kind: WatermarkKind;
+  /** The scope chosen when this watermark was applied. */
+  scope: WatermarkScope;
+  text: string | null;
+  imageName: string | null;
+  imagePath: string | null;
+  opacity: number;
+  rotation: number;
+  scale: number;
+  positionX: number;
+  positionY: number;
+  /** Logical pages carrying the mark, in page order. */
+  pageIndices: number[];
+}
+
+/** The outcome of applying or deleting the watermark. */
+export interface WatermarkEditResult {
+  watermark: WatermarkView | null;
+  history: EditHistoryView;
+}
+
+/** A local image validated for the live image-watermark preview. */
+export interface WatermarkImagePreview {
+  name: string;
+  mimeType: string;
+  dataUrl: string;
+  width: number;
+  height: number;
+}
+
 /**
  * The two linear page-content objects PDFX creates.
  *
@@ -1567,6 +1622,47 @@ export async function deleteImage(
     pageIndex,
     imageId,
   });
+}
+
+/**
+ * Applies a watermark to the current Page or every visible logical Page. One
+ * watermark is active per editing session: applying again replaces it instead
+ * of stacking. The command is one undoable history action.
+ */
+export async function applyWatermark(
+  documentId: string,
+  pageIndex: number,
+  request: WatermarkRequest,
+): Promise<WatermarkEditResult> {
+  return invoke<WatermarkEditResult>("apply_watermark", {
+    documentId,
+    pageIndex,
+    request,
+  });
+}
+
+/** Reads the active watermark, or null when none is active. */
+export async function watermarkState(
+  documentId: string,
+): Promise<WatermarkView | null> {
+  return invoke<WatermarkView | null>("watermark_state", { documentId });
+}
+
+/** Removes the active watermark as one undoable history action. */
+export async function deleteWatermark(
+  documentId: string,
+): Promise<WatermarkEditResult> {
+  return invoke<WatermarkEditResult>("delete_watermark", { documentId });
+}
+
+/**
+ * Validates an image file and returns its bytes as a data URL for the panel's
+ * live preview. The file is not added to the document until Apply.
+ */
+export async function watermarkImagePreview(
+  path: string,
+): Promise<WatermarkImagePreview> {
+  return invoke<WatermarkImagePreview>("watermark_image_preview", { path });
 }
 
 /**

@@ -122,6 +122,40 @@ describe("ThumbnailRail", () => {
     await waitFor(() => expect(thumbnailCalls(1)).toHaveLength(2));
   });
 
+  it("re-renders every thumbnail after an all-pages content change", async () => {
+    invokeMock.mockImplementation((_command, args) => {
+      const { pageIndex } = args as { pageIndex: number };
+      return Promise.resolve({
+        documentId: "doc-1",
+        pageIndex,
+        scale: 1,
+        width: 10,
+        height: 10,
+        pngBase64: "",
+      });
+    });
+
+    render(
+      <ThumbnailRail
+        documentId="doc-1"
+        pageCount={2}
+        currentPageIndex={0}
+        onSelectPage={vi.fn()}
+      />,
+    );
+    await waitFor(() => expect(thumbnailCalls(0)).toHaveLength(1));
+    await waitFor(() => expect(thumbnailCalls(1)).toHaveLength(1));
+
+    notifyDocumentChanged({
+      documentId: "doc-1",
+      pageIndex: 0,
+      allPagesChanged: true,
+    });
+
+    await waitFor(() => expect(thumbnailCalls(0)).toHaveLength(2));
+    await waitFor(() => expect(thumbnailCalls(1)).toHaveLength(2));
+  });
+
   it("moves a page when a thumbnail is dropped on another slot", () => {
     invokeMock.mockImplementation((_command, args) => {
       const { pageIndex } = args as { pageIndex: number };

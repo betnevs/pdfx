@@ -2695,6 +2695,10 @@ button {
   gap: 10px;
   width: 244px;
   min-height: 0;
+  /* The stamp, attachment, watermark and annotation panels can exceed the
+     window height; the column scrolls as a whole so every panel stays
+     reachable. */
+  overflow-y: auto;
 }
 
 .annotation-column .annotation-panel {
@@ -3369,4 +3373,186 @@ button {
 .link-dialog-actions button:disabled {
   opacity: 0.45;
   cursor: default;
+}
+
+/* Watermark panel: one active text or image mark previewed before applying. */
+
+.watermark-panel {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  width: 244px;
+  max-height: 420px;
+  overflow-y: auto;
+  padding: 10px;
+  box-sizing: border-box;
+  border: 1px solid var(--pdfx-border);
+  border-radius: 9px;
+  background: var(--pdfx-surface);
+  font-size: 12px;
+}
+
+.annotation-column .watermark-panel {
+  width: 100%;
+}
+
+.watermark-panel-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.watermark-panel-header h2 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.watermark-active-count {
+  color: var(--pdfx-muted);
+}
+
+.watermark-active,
+.watermark-notice {
+  margin: 0;
+  color: var(--pdfx-muted);
+  line-height: 1.5;
+}
+
+.watermark-readonly {
+  margin: 0;
+  color: var(--pdfx-status-warning);
+  line-height: 1.5;
+}
+
+.watermark-error {
+  margin: 0;
+  color: var(--pdfx-status-danger);
+  line-height: 1.5;
+}
+
+.watermark-modes,
+.watermark-scopes {
+  display: flex;
+  gap: 10px;
+}
+
+.watermark-modes label,
+.watermark-scopes label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+}
+
+.watermark-modes input:disabled + *,
+.watermark-scopes input:disabled {
+  cursor: default;
+}
+
+.watermark-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.watermark-field-label {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--pdfx-muted);
+}
+
+.watermark-value {
+  color: var(--pdfx-text);
+  font-variant-numeric: tabular-nums;
+}
+
+.watermark-field input[type="text"] {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.watermark-field input[type="range"] {
+  width: 100%;
+  margin: 0;
+}
+
+.watermark-image-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.watermark-choose {
+  flex: none;
+  padding: 3px 7px;
+  font-size: 11px;
+}
+
+.watermark-image-name {
+  overflow: hidden;
+  color: var(--pdfx-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.watermark-preview {
+  position: relative;
+  height: 120px;
+  overflow: hidden;
+  border: 1px solid var(--pdfx-border);
+  border-radius: 6px;
+  background: var(--pdfx-page);
+}
+
+.watermark-preview-mark {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  max-width: 80%;
+  max-height: 80%;
+  transform-origin: center;
+  pointer-events: none;
+}
+
+.watermark-preview-text {
+  max-width: 100%;
+  overflow: hidden;
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: 2px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.watermark-preview-image {
+  display: block;
+  max-width: 100%;
+  max-height: 90px;
+  object-fit: contain;
+}
+
+.watermark-preview-empty {
+  padding: 3px 6px;
+  border: 1px dashed var(--pdfx-border-control);
+  border-radius: 4px;
+  color: var(--pdfx-muted);
+}
+
+.watermark-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.watermark-actions button {
+  padding: 3px 7px;
+  font-size: 11px;
+}
+
+.watermark-apply {
+  flex: 1;
 }
