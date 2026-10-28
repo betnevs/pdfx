@@ -32,9 +32,12 @@ checksum above identifies the upstream release this directory started from.
 
 ## Why vendor
 
-`pdfium-render` 0.9.4 always passes save flags `0` to `FPDF_SaveAsCopy()` and
+`pdfium-render` 0.9.4 always passes save flags `0` to `FPDF_SaveAsCopy()`,
 does not expose circle-annotation creation, ink strokes, annotation border
-width or custom appearance streams. PDFX needs those capabilities on the *same*
+width or custom appearance streams, and cannot load a CIDFontType2 from
+caller-supplied font bytes, ToUnicode CMap and CIDToGIDMap
+(`FPDFText_LoadCidType2Font()`), which PDFX needs for its `subsetter`-produced
+CJK font subsets. PDFX needs those capabilities on the *same*
 `PdfDocument` that holds the high-level `pdfium-render` edits, so that one
 save writes every edit in one revision (see `docs/spikes/pdf-engine.md`, AC2 —
 the spike's "rewrite, then reopen with a second raw document" workaround must
@@ -47,7 +50,7 @@ safe wrapper lives in `src-tauri/src/pdfium_adapter.rs`.
 
 ## Patch scope
 
-Eight files change. Each hunk is additive; no upstream behaviour changes.
+Nine files change. Each hunk is additive; no upstream behaviour changes.
 
 ### `src/pdf/document.rs`
 
@@ -117,6 +120,20 @@ Added to the `PdfPageAnnotation` enum (available on every annotation type):
 - Added `PdfPageStrikeoutAnnotation::close(self)` calling
   `FPDFPage_CloseAnnot()`.
 
+### `src/pdf/document/fonts.rs`
+
+- Added `PdfFonts::load_cid_type2_from_bytes(font_data, to_unicode_cmap,
+  cid_to_gid_map_data)` calling `FPDFText_LoadCidType2Font()`. It lets PDFX
+  embed a `subsetter`-produced CIDFontType2 together with the caller's
+  ToUnicode CMap and CIDToGIDMap instead of letting Pdfium regenerate them
+  from the font program. The new font is registered in the document's font
+  collection like the other `load_*_from_bytes()` constructors.
+- Added `PdfFontToken::to_usize()` / `PdfFontToken::from_usize(handle)`. The
+  edit session caches bundled-font tokens by character set and must stay
+  `Send` for the global document registry; a raw pointer would not. The token
+  remains a non-owning handle valid only while its document is alive, and
+  PDFX stores it only in that document's session (dropped first).
+
 ## Verification
 
 The patch is exercised through the safe adapter in
@@ -144,15 +161,25 @@ cargo check
 cargo test
 ```
 
+The CID-font additions are covered by `src-tauri/tests/cjk_fonts.rs`, which
+drives the command boundary, saves the document and reopens it with lopdf and
+PDFium to assert the Type0/CIDFontType2 structure, `/W` widths, CIDToGIDMap,
+ToUnicode text extraction and repeat-save stability:
+
+```sh
+cd src-tauri
+cargo test --test cjk_fonts
+```
+
 ## Upgrade procedure
 
 1. Fetch the new `pdfium-render` release from crates.io and record its `.crate`
    sha256 here.
 2. Replace everything in this directory with the new crate contents plus
    `LICENSE.md`, keeping `PDFX-PATCH.md`.
-3. Re-apply the hunks above (eight files). `diff -u` against the pristine crate
+3. Re-apply the hunks above (nine files). `diff -u` against the pristine crate
    source (cargo registry unpack directory or a fresh extract of the `.crate`)
-   is the authoritative patch; keep the diff to those eight files.
+   is the authoritative patch; keep the diff to those nine files.
 4. Update `src-tauri/Cargo.toml` version if the patched range changes, then
    build. `pdfium-render` tracks the PDFium API, so re-run the adapter tests
    against the pinned PDFium build first.
