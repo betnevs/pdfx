@@ -476,6 +476,10 @@ pub fn copy_page(document_id: String, page_index: u32) -> Result<PageOperationVi
         let physical_page = before.physical(page_index)?;
         let new_physical = entry.document.pages().len() as u32;
         let inherited = inherited_form_values(entry, physical_page)?;
+        // Pdfium's importer drops page link destinations; capture them while
+        // the copy still points at the live source page.
+        let source_links =
+            crate::links::capture_copied_link_sources(&entry.document, physical_page)?;
 
         // Import from Pdfium's own serialization, not the finalized save
         // output: it carries every PDFium-side edit while keeping physical
@@ -503,6 +507,15 @@ pub fn copy_page(document_id: String, page_index: u32) -> Result<PageOperationVi
         // Pdfium shares field objects (radio parents and nested fields) across
         // the import; keep the snapshot so those pointers stay valid.
         entry.copy_snapshots.push(source);
+        // The copy must be usable in the viewer before it is saved: give its
+        // dropped page destinations back through PDFX's private page key. A
+        // failure here does not invalidate the copied page, and the save
+        // pipeline still repairs the output from the source page.
+        if let Err(error) =
+            crate::links::restore_copied_link_sources(&entry.document, new_physical, &source_links)
+        {
+            eprintln!("[pdfx] could not restore copied link destinations: {error:?}");
+        }
 
         let mut after = before.clone();
         after.order.insert((page_index + 1) as usize, new_physical);

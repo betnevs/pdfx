@@ -989,16 +989,30 @@ fn apply_copy_links_fixup(
                     .and_then(|action| action.as_dict().ok())
                     .map(|action| action.has(b"D"))
                     .unwrap_or(false);
-                let copy_action_has_destination = dictionary
+                let copy_action = dictionary
                     .get(b"A")
                     .ok()
                     .and_then(|action| resolve_object_any(incremental, action))
-                    .and_then(|action| action.as_dict().ok())
-                    .map(|action| action.has(b"D"))
-                    .unwrap_or(false);
-                let needs_action = source_action_has_destination && !copy_action_has_destination;
+                    .and_then(|action| action.as_dict().ok());
+                let copy_action_has_destination =
+                    copy_action.map(|action| action.has(b"D")).unwrap_or(false);
+                let copy_action_is_goto = copy_action
+                    .and_then(|action| action.get(b"S").ok())
+                    .and_then(|kind| kind.as_name().ok())
+                    .is_some_and(|kind| kind == b"GoTo".as_slice());
+                let copy_has_destination = dictionary.has(b"Dest") || copy_action_has_destination;
+                // A destination may already have been materialized from PDFX's
+                // private page key by the annotation pass; do not add the
+                // source's `/Dest` on top of that GoTo action. A URI action is
+                // a link the user (or PDFX) chose independently and must never
+                // be replaced by a page destination that happens to share the
+                // source link's rectangle.
+                let needs_action = source_action_has_destination
+                    && !copy_has_destination
+                    && (copy_action.is_none() || copy_action_is_goto);
                 let source_destination = source_link.get(b"Dest").ok();
-                let needs_destination = source_destination.is_some() && !dictionary.has(b"Dest");
+                let needs_destination =
+                    source_destination.is_some() && !copy_has_destination && copy_action.is_none();
                 if !needs_action && !needs_destination {
                     continue;
                 }

@@ -313,7 +313,6 @@ fn resolve_link_target(
             return Ok(LinkTarget::Page { page_index });
         }
     }
-
     let attributes = link_attributes(document, target)
         .map_err(map_adapter_error)?
         .ok_or(TargetError::Unsupported(LinkUnsupportedReason::Malformed))?;
@@ -331,6 +330,109 @@ fn resolve_link_target(
         LinkUnsupportedReason::Malformed
     };
     Err(TargetError::Unsupported(reason))
+}
+
+/// One source-page link, kept across a `copy_page` import.
+///
+/// Pdfium's page importer clones link annotations but drops `/GoTo`
+/// destinations and direct `/Dest` arrays, so a copied page would expose dead
+/// links until the next save. The source target is captured before the import
+/// and written into the copy as PDFX's private page key, which the live link
+/// reader already understands and the save pass turns into a real destination.
+pub(crate) struct CopiedLinkSource {
+    rect: AnnotationRect,
+    target: Option<LinkTarget>,
+}
+
+/// Captures the links of one page in annotation order.
+pub(crate) fn capture_copied_link_sources(
+    document: &PdfDocument<'static>,
+    page_index: u32,
+) -> Result<Vec<CopiedLinkSource>, CommandError> {
+    let mut sources = Vec::new();
+    for target in page_link_annotations(document, page_index)? {
+        let rect = annotation_bounds(document, target).map_err(map_adapter_error)?;
+        let target = match resolve_link_target(document, target) {
+            Ok(target) => Some(target),
+            Err(TargetError::Unsupported(_)) => None,
+            Err(TargetError::Failed(error)) => return Err(error),
+        };
+        sources.push(CopiedLinkSource { rect, target });
+    }
+    Ok(sources)
+}
+
+/// Restores page targets the importer dropped from a copied page's links.
+///
+/// Only links whose source target is a page are touched; URL links are kept by
+/// the importer, unsupported links must stay visibly unsupported, and a link
+/// that already resolves to the right page (named destinations, PDFX-created
+/// links whose private key survived the import) is left alone. Setting the key
+/// is non-destructive: the copied annotation keeps its rectangle, metadata and
+/// appearance, and the save pipeline materializes the destination.
+pub(crate) fn restore_copied_link_sources(
+    document: &PdfDocument<'static>,
+    page_index: u32,
+    sources: &[CopiedLinkSource],
+) -> Result<(), CommandError> {
+    for (index, target) in page_link_annotations(document, page_index)?
+        .iter()
+        .enumerate()
+    {
+        let rect = annotation_bounds(document, *target).map_err(map_adapter_error)?;
+        let source = sources
+            .iter()
+            .find(|source| rects_close(source.rect, rect))
+            .or_else(|| sources.get(index));
+        let Some(LinkTarget::Page { page_index }) =
+            source.and_then(|source| source.target.as_ref())
+        else {
+            continue;
+        };
+        if matches!(
+            resolve_link_target(document, *target),
+            Ok(LinkTarget::Page { page_index: current }) if current == *page_index
+        ) {
+            continue;
+        }
+        set_annotation_string_value(document, *target, LINK_TARGET_KEY, &page_key(*page_index))
+            .map_err(map_adapter_error)?;
+    }
+    Ok(())
+}
+
+/// The `/Link` annotations on one physical page, in annotation order.
+fn page_link_annotations(
+    document: &PdfDocument<'static>,
+    page_index: u32,
+) -> Result<Vec<AnnotationRef>, CommandError> {
+    let count = document
+        .pages()
+        .get(page_index as i32)
+        .map_err(|error| internal_error(format!("could not load page {page_index}: {error:?}")))?
+        .annotations()
+        .len();
+    let mut links = Vec::new();
+    for index in 0..count {
+        let target = AnnotationRef::new(page_index as i32, index);
+        if annotation_type(document, target).map_err(map_adapter_error)?
+            == PdfPageAnnotationType::Link
+        {
+            links.push(target);
+        }
+    }
+    Ok(links)
+}
+
+/// Whether two link rectangles describe the same region. Imported annotations
+/// keep the source rectangle exactly, but compare with a tolerance like the
+/// save-time link fixup so writer rounding cannot break the pairing.
+fn rects_close(left: AnnotationRect, right: AnnotationRect) -> bool {
+    let close = |left: f32, right: f32| (left - right).abs() < 0.01;
+    close(left.left, right.left)
+        && close(left.bottom, right.bottom)
+        && close(left.right, right.right)
+        && close(left.top, right.top)
 }
 
 /// Reads one link annotation into the view the overlays consume.

@@ -18,6 +18,10 @@ use pdfx_lib::commands::{
 use pdfx_lib::form::{
     fill_form_field, form_fields, FormFieldKind, FormFieldValueInput, FormFieldView,
 };
+use pdfx_lib::links::{
+    list_links, update_link_target, LinkTarget, LinkUnsupportedReason, LinkView,
+    UpdateLinkTargetRequest,
+};
 use pdfx_lib::save::{save_document_with_progress, SaveDocumentRequest, SaveResultView};
 use pdfx_lib::text_edit::{edit_history, redo_text_edit, undo_text_edit};
 use support::synthetic;
@@ -1204,6 +1208,157 @@ fn repeat_saves_of_a_copied_page_are_stable() {
     }
 
     close_document(document_id).expect("close document");
+}
+
+#[test]
+fn copied_page_keeps_link_targets_live_and_after_save() {
+    let dir = TempDir::new("copy-page-links");
+    let source = synthetic::destination_links_pdf();
+    let document = open(Path::new(&source.path_string()));
+    let document_id = document.document_id.clone();
+    assert_eq!(document.page_count, 2);
+
+    let signature = |link: &LinkView| (link.target.clone(), link.unsupported, link.rects.clone());
+    let original: Vec<_> = list_links(document_id.clone())
+        .expect("list links")
+        .into_iter()
+        .filter(|link| link.page_index == 0)
+        .map(|link| signature(&link))
+        .collect();
+    assert_eq!(original.len(), 4, "the fixture carries four links");
+    // Three destinations resolve to page 2; the fourth names a missing
+    // destination and stays visibly unsupported.
+    assert_eq!(original[0].0, Some(LinkTarget::Page { page_index: 1 }));
+    assert_eq!(original[1].0, Some(LinkTarget::Page { page_index: 1 }));
+    assert_eq!(original[2].0, Some(LinkTarget::Page { page_index: 1 }));
+    assert_eq!(original[3].1, Some(LinkUnsupportedReason::Destination));
+
+    let view = pdfx_lib::page_ops::copy_page(document_id.clone(), 0).expect("copy page");
+    assert_eq!((view.page_count, view.page_index), (3, 1));
+
+    // The viewer reads links from the live document, so the duplicate must
+    // expose the same targets without waiting for a save. The source page's
+    // own targets moved one slot because the copy is now between them and the
+    // destination page.
+    let after_copy = list_links(document_id.clone()).expect("list links after copy");
+    let original_after: Vec<_> = after_copy
+        .iter()
+        .filter(|link| link.page_index == 0)
+        .map(|link| signature(link))
+        .collect();
+    assert_eq!(original_after.len(), 4, "the source keeps its four links");
+    for (target, unsupported, _) in &original_after[..3] {
+        assert_eq!(target, &Some(LinkTarget::Page { page_index: 2 }));
+        assert_eq!(*unsupported, None);
+    }
+    assert_eq!(
+        original_after[3].1,
+        Some(LinkUnsupportedReason::Destination)
+    );
+    let live: Vec<_> = after_copy
+        .iter()
+        .filter(|link| link.page_index == 1)
+        .map(|link| signature(link))
+        .collect();
+    assert_eq!(
+        live, original_after,
+        "live copy links match the source page"
+    );
+
+    let output = dir.path().join("copied-links.pdf");
+    save(&document_id, &output);
+    close_document(document_id).expect("close document");
+
+    let reopened = open(&output);
+    let saved: Vec<_> = list_links(reopened.document_id.clone())
+        .expect("list links in saved output")
+        .into_iter()
+        .filter(|link| link.page_index == 1)
+        .map(|link| signature(&link))
+        .collect();
+    // The copy keeps the source page's link targets: the original page 2 is
+    // slot 2 in the saved arrangement too.
+    assert_eq!(
+        saved, original_after,
+        "saved copy links match the source page"
+    );
+    close_document(reopened.document_id).expect("close reopened document");
+}
+
+#[test]
+fn retargeting_a_copied_link_leaves_the_source_link_untouched() {
+    let dir = TempDir::new("copy-page-link-edit");
+    let source = synthetic::destination_links_pdf();
+    let document = open(Path::new(&source.path_string()));
+    let document_id = document.document_id.clone();
+
+    let view = pdfx_lib::page_ops::copy_page(document_id.clone(), 0).expect("copy page");
+    assert_eq!((view.page_count, view.page_index), (3, 1));
+
+    let copy_link = list_links(document_id.clone())
+        .expect("list links after copy")
+        .into_iter()
+        .find(|link| link.page_index == 1 && matches!(link.target, Some(LinkTarget::Page { .. })))
+        .expect("the copy carries a page link");
+    let url = "https://example.com/copied-page".to_string();
+    update_link_target(
+        document_id.clone(),
+        UpdateLinkTargetRequest {
+            link_id: copy_link.id,
+            target: LinkTarget::Url { url: url.clone() },
+        },
+    )
+    .expect("retarget the copied link");
+
+    let after_edit = list_links(document_id.clone()).expect("list links after edit");
+    let source_links: Vec<_> = after_edit
+        .iter()
+        .filter(|link| link.page_index == 0)
+        .collect();
+    assert_eq!(source_links.len(), 4, "the source keeps its four links");
+    for link in &source_links[..3] {
+        assert_eq!(link.target, Some(LinkTarget::Page { page_index: 2 }));
+    }
+    assert_eq!(
+        source_links[3].unsupported,
+        Some(LinkUnsupportedReason::Destination)
+    );
+    let copy_links: Vec<_> = after_edit
+        .iter()
+        .filter(|link| link.page_index == 1)
+        .collect();
+    assert_eq!(copy_links.len(), 4, "the copied page keeps all four links");
+    assert!(
+        copy_links
+            .iter()
+            .any(|link| link.target == Some(LinkTarget::Url { url: url.clone() })),
+        "the copied link was retargeted"
+    );
+
+    let output = dir.path().join("edited-copy-link.pdf");
+    save(&document_id, &output);
+    close_document(document_id).expect("close document");
+
+    let reopened = open(&output);
+    let saved = list_links(reopened.document_id.clone()).expect("list saved links");
+    let saved_source: Vec<_> = saved.iter().filter(|link| link.page_index == 0).collect();
+    assert_eq!(saved_source.len(), 4, "the source links survive the save");
+    for link in &saved_source[..3] {
+        assert_eq!(
+            link.target,
+            Some(LinkTarget::Page { page_index: 2 }),
+            "the source link still points at its page"
+        );
+    }
+    let saved_copy: Vec<_> = saved.iter().filter(|link| link.page_index == 1).collect();
+    assert_eq!(saved_copy.len(), 4, "the copied links survive the save");
+    assert!(
+        saved_copy
+            .iter()
+            .any(|link| link.target == Some(LinkTarget::Url { url: url.clone() })),
+        "the save fixup must not overwrite a URI the user chose"
+    );
+    close_document(reopened.document_id).expect("close reopened document");
 }
 
 #[test]
