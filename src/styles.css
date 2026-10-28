@@ -848,6 +848,239 @@ button {
   text-align: center;
 }
 
+/* Printing and page export */
+
+.document-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  padding: 6px 2px 0;
+}
+
+.print-export-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.print-export-actions button,
+.print-export-dialog button {
+  padding: 5px 11px;
+  border: 1px solid var(--pdfx-border-control);
+  border-radius: 6px;
+  background: var(--pdfx-raised);
+  color: var(--pdfx-text);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.print-export-actions button:hover:not(:disabled),
+.print-export-dialog button:hover:not(:disabled) {
+  border-color: var(--pdfx-border-hover);
+}
+
+.print-export-actions button:disabled,
+.print-export-dialog button:disabled {
+  color: var(--pdfx-disabled-text);
+  cursor: default;
+}
+
+.print-disabled-reason {
+  color: var(--pdfx-warning-text);
+  font-size: 12px;
+}
+
+.print-export-notice {
+  color: var(--pdfx-text-secondary);
+  font-size: 12px;
+}
+
+.print-export-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: var(--pdfx-overlay-page);
+}
+
+.print-export-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: min(420px, 100%);
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+  padding: 22px 24px;
+  border-radius: 12px;
+  background: var(--pdfx-surface);
+  box-shadow: var(--pdfx-dialog-shadow);
+}
+
+.print-export-dialog h2 {
+  margin: 0;
+  font-size: 17px;
+}
+
+.print-export-hint {
+  margin: 0;
+  color: var(--pdfx-muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.print-export-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--pdfx-text-secondary);
+  font-size: 13px;
+}
+
+.print-export-field select,
+.print-export-field input[type="number"] {
+  width: 140px;
+  padding: 5px 8px;
+  border: 1px solid var(--pdfx-border-control);
+  border-radius: 6px;
+  background: var(--pdfx-raised);
+  color: var(--pdfx-text);
+  font: inherit;
+  font-size: 13px;
+}
+
+.print-export-form-range {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  color: var(--pdfx-text-secondary);
+  font-size: 13px;
+}
+
+.print-export-form-range legend {
+  margin-bottom: 6px;
+  padding: 0;
+  font-weight: 600;
+}
+
+.print-export-range-options {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.print-export-range-options label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.print-export-custom-range {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-left: 22px;
+}
+
+.print-export-custom-range input {
+  width: 64px;
+  padding: 4px 7px;
+  border: 1px solid var(--pdfx-border-control);
+  border-radius: 6px;
+  background: var(--pdfx-raised);
+  color: var(--pdfx-text);
+  font: inherit;
+  font-size: 13px;
+}
+
+.print-export-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: var(--pdfx-text-secondary);
+  font-size: 12px;
+}
+
+.print-export-progress progress {
+  width: 100%;
+  height: 8px;
+}
+
+.print-export-error {
+  margin: 0;
+  padding: 7px 10px;
+  border: 1px solid var(--pdfx-danger-border);
+  border-radius: 6px;
+  background: var(--pdfx-danger-soft);
+  color: var(--pdfx-danger-text);
+  font-size: 12px;
+}
+
+.print-export-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+/* The print-only surface lives outside #root and is invisible on screen. */
+.print-root {
+  display: none;
+}
+
+@media print {
+  /* --pdfx-page is white in both themes, so paper stays white in dark mode. */
+  html,
+  body {
+    background: var(--pdfx-page) !important;
+  }
+
+  #root {
+    display: none !important;
+  }
+
+  .print-root {
+    display: block;
+    background: var(--pdfx-page);
+  }
+
+  .print-page {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    break-after: page;
+    page-break-after: always;
+  }
+
+  .print-page:last-child {
+    break-after: auto;
+    page-break-after: auto;
+  }
+
+  .print-page img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+  }
+
+  .print-page img.print-page-image--actual {
+    width: auto;
+    height: auto;
+    max-width: none;
+    max-height: none;
+    object-fit: none;
+  }
+}
+
 .save-progress,
 .save-result {
   margin: 0;

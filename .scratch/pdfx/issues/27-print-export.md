@@ -4,9 +4,30 @@
 
 **Blocked by:** 05 (翻页、缩放与缩略图)
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] 打印对话框显示正确的 Page 范围、方向与缩放选项。
-- [ ] 当前 Page 可导出 PNG/JPG，分辨率可选，导出结果与画布一致。
-- [ ] 打印/导出不修改 Document，不产生未保存标记。
-- [ ] 大文档打印有进度或可取消。
+- [x] 当前 Page 可导出 PNG/JPG，分辨率可选，导出结果与画布一致。
+- [x] 打印/导出不修改 Document，不产生未保存标记。
+- [x] 大文档打印有进度或可取消。
+
+**Verification notes:**
+
+- 合并提交 `ee60a86`（`ticket/27-print-export` `56619a7`，feature `99c7411`，fix `b13a473`，feature merge base `920f260`），`git merge --no-ff`，**无冲突**。分支此前两次并入集成：`79e8105` 并入 `0d97044`（ticket 10 保存日志）与 `56619a7` 并入集成 tip `622c7a1`；第一次并入的提交说明记录了预期冲突（菜单项、命令注册、依赖列表、`App.tsx` 布局、样式 token），均按“同时保留保存管线与打印/导出”解决，第二次并入及本次合并均由 git 自动完成。本 ticket 未修改 spec、ADR、`src-tauri/tauri.conf.json`、capabilities 或 `package.json`/`package-lock.json`。
+- 架构：新增 `src-tauri/src/print_export.rs`，在既有 Tauri 命令 seam 上增加 `export_page(document_id, page_index, format, dpi, destination)` 与 `print_document(document_id)`（相对 spec 草案的 `export_page(session_id, ...)` 改为 document_id + 显式 destination，与只读渲染/原生保存对话框的实际需要一致，未新开 seam）。导出与查看器共用 `render_page_rgba`（`commands.rs` 从 `render_full_page_png` 拆出），这是“导出结果与画布一致”的结构性保证；后端接受 36–600 DPI，UI 提供 72/150/300（72 = 实际大小），PNG 在 72 DPI 与 `render_page(scale=1.0)` 的画布字节逐字节相同。
+- 勾选 2（导出）：`exporting_the_page_as_png_at_72_dpi_writes_exactly_the_canvas_bitmap` 断言尺寸与画布一致、PNG 字节完全相同、返回的 `bytes/path` 与写盘一致；`exporting_the_page_as_jpeg_at_150_dpi_uses_the_requested_resolution_and_page_content` 断言 612×792pt 在 150 DPI 得到 1275×1650、JPEG SOI、与画布 RGBA 的平均通道误差 <6（JPEG 质量 90，透明像素按白色背景合成）；`export_rejects_invalid_resolutions_and_pages_without_writing_a_file` 断言 0 DPI → `invalid_argument`、越界页 → `page_out_of_range` 且不产生文件。前端 `PrintExport.test.tsx` 断言格式/分辨率选择后以 `export_page` 调用、默认建议文件名 `report-page-2.jpg`、原生保存对话框 filter 随格式变化、取消对话框不调用命令、写入失败显示中文 `role="alert"` 并保持对话框可重试、选择源 PDF 时显示“不能覆盖源 PDF 文件”（`b13a473` 补的中文错误映射；注意后端 `invalid_argument` 也用于空目标与 DPI 越界，UI 目前不会触发，将来增加参数时应拆分错误码）、成功后 `role="status"` 显示“已导出第 N 页”。`backend.test.ts` 覆盖两条新命令的参数形状、保存对话框 filter 与两个新错误码的识别。
+- 勾选 3（只读/不产生未保存标记）：`exporting_does_not_change_the_edit_history_or_the_dirty_state` 先做一次文字编辑使 `dirty=true`，导出后断言 `edit_history` 完整相等且仍 dirty，即导出不记录历史、不移动保存基线、不清除未保存标记；同一测试另断言源 PDF 字节不变。`exporting_over_the_source_document_is_refused_and_leaves_the_source_untouched` 用临时副本打开后导出到源路径，断言 `invalid_argument` 且源字节不变；路径比较先 `canonicalize` 最长存在前缀（目标不存在时解析父目录），因此大小写/符号链接指向源也会被拒。实现只用 `fs::write` 写目标文件，不创建临时文件，也不触碰 `SaveState`/`EditSession`；打印准备只发 `page_info`/`render_page`，随后 `print_document`，前端测试 `prepares one print page per selected page and then opens the print dialog` 断言命令集合恰好是 `{page_info, render_page, print_document}` 且最后一条是 `print_document`，两条新命令都不发编辑事件、不产生 dirty。导出为只读操作，打印权限被禁时导出仍可用（前端测试覆盖）。
+- 勾选 4（进度/取消）：打印先在隐藏的 print-only surface 中逐页以 150 DPI 渲染（每页一次 `render_page` + `page_info`），准备期间显示“正在准备第 N / M 页…”与原生 `<progress>`，并提供“取消打印”；`shows preparation progress for a large document and can cancel it` 用 200 页文档、挂起的 `render_page` 断言进度 0/200、取消后对话框关闭、放行渲染后不再继续、不调用 `print_document`、不留下 `.print-root`。取消只在每页渲染完成后检查（单页 `render_page` 本身不可中断）。准备完成后以 `flushSync` 提交隐藏打印面、`decodePrintImages` 预解码所有位图（避免首页空白），再调用 `print_document`；`afterprint` 后清理位图。
+- 勾选 1 未验证（人工项）：**未打开真实 macOS 或 Windows 打印对话框**，也未产生实际打印输出。自动化只覆盖隐藏打印面的构造：`prepares one print page per selected page and then opens the print dialog` 断言全部 3 页各一张位图、`@page size: 612pt 792pt`、命令顺序；`honours a custom page range, orientation and actual-size scaling` 断言自定义 2–3 页映射为索引 [1,2]、横向把首页尺寸交换为 792pt×612pt、每张纸统一尺寸、实际大小按各页真实 pt 居中；`rejects an invalid custom range...` 断言非法范围不渲染不打印。原生对话框如何解释 `@page`（纸张尺寸/方向、页边距）、打印份数、页面编号（打印面只有所选子集的 1..N，而非文档原页码）与真实打印机输出均未验证；原生打印操作是否派发 `afterprint` 也未在真实窗口验证。实现说明称 `WebviewWindow::print` 在 macOS 走 `printOperationWithPrintInfo`、其他平台由 wry 调 `window.print()`/GTK `PrintOperation::run_dialog`，与 Tauri 0.57 系 wry 源码一致，但真实对话框行为仍需人工验收。
+- 打印权限：新 fixture `encrypted-print-denied.pdf`（用户密码空，owner `pdfx-owner`，权限位 `-8`，仅禁止打印，编辑/复制/注释仍允许），`fixtures/generate.py --check` 与 `swift fixtures/verify.swift`（PDFKit：`print restriction denies printing`、`print-only restriction still allows changes/copying`）均通过；`printing_is_denied_when_permission_restrictions_forbid_it` 断言该文档非只读但 `ensure_print_allowed` 返回 `permission_denied`、不会到达打印对话框，`printing_is_allowed_for_an_unrestricted_document` 覆盖允许路径。前端 `documentPolicy` 在 `permissions.canPrint=false` 时禁用“打印…”并显示中文原因“文档所有者限制了打印权限。”，菜单 `file.print` 同样被忽略；导出按钮保持可用。`print_document` 在命令内再次校验权限（不信任前端），校验在释放文档注册表锁之后才打开平台对话框。`pdfium_adapter.rs` 的加密 fixture 计数相应由 2 改为 3。
+- 依赖/许可/网络：Cargo 新增直接依赖 `image 0.25.10`（`default-features = false, features = ["jpeg"]`，MIT OR Apache-2.0），`Cargo.lock` 新增 52 行、6 个包：`image`、`zune-jpeg 0.5.15`、`zune-core 0.5.3`、`moxcms 0.8.1`、`pxfm 0.1.30`（BSD-3-Clause OR Apache-2.0）、`byteorder-lite 0.1.0`（Unlicense OR MIT），另有既有 `bytemuck`/`num-traits` 复用；经 `cargo metadata` 核对均为宽松许可，无 GPL/AGPL。npm 依赖未变。新代码无 HTTP/遥测/自动上传；日志只记录 `document.export_page`（documentId/page/format/dpi/bytes）、`document.export_page.failed`（code/message）与 `document.print`（documentId），不记录页面内容。新增 UI 文案均为中文，错误映射为中文并提供可重试路径。
+- 自动化验证（合并后于集成树、仓库根执行）：`npm run typecheck` 通过；`npm test` 20 个文件、215 项通过（合并前基线 19 文件/199 项，本 ticket 净增 16 项：PrintExport 10 + App 2 + backend 3 + document-policy 1）；`npm run build` 通过；`npm run test:e2e` 12 项通过；`cargo fmt --check` 通过；`cargo clippy -- -D warnings` exit 0（仅 vendored `pdfium-render` 4 条 dead_code warning，未用 `--all-targets`）；`cargo test` 152 项通过、0 失败、3 项手动/延迟测试忽略（合并前 145/3；本 ticket 新增 `tests/print_export.rs` 7 项）；`python3 -I fixtures/generate.py --check` 输出 `fixtures OK (11 PDFs)`；`swift fixtures/verify.swift` 全部通过（含新 fixture 的打印限制与编辑/复制仍允许断言）。
+- 已知限制/后续（均不阻塞本 ticket）：
+  - 打印准备把所选范围每页的 150 DPI PNG 以 base64 保存在 DOM，并在打开对话框前用 `Promise.all` 同时解码所有页。解码后的 RGBA 约为页数 × 每页 8.4 MB（Letter 150 DPI 1275×1650），全量打印 2000 页理论上可达数十 GB，存在内存风险；进度/取消可用，但大文档应改为分块解码/降低打印分辨率或流式提交。这是本 ticket 最值得后续处理的问题。
+  - 导出的 `fs::write` 非原子：磁盘写满等中途失败可能在目标路径留下部分图片文件（不会留下临时文件，重试会覆盖）；与保存管线的临时文件 + rename 不同。
+  - 导出只拒绝源 PDF，不拒绝当前 Output Document：在图片保存对话框中选中已保存的输出 PDF 会用图片字节覆盖它（仅靠系统对话框的覆盖确认）。ticket 35（Flatten 导出）等后续导出功能应同时保护 Output Document。
+  - 菜单项 `file.print`/`file.export_page` 目前始终可点，无文档时由前端 no-op；ticket 45 要求无文档/只读时菜单置灰，接入时应一并处理。快捷键 `Cmd/Ctrl+P` 与 `Cmd/Ctrl+Shift+E` 已由本 ticket 注册，ticket 45 需要保留。
+  - 打印纸张尺寸取所选范围第一页，混合尺寸时其余页按“适合页面”留白或按“实际大小”居中且超出纸张部分被 `overflow: hidden` 裁切；未有混合尺寸/旋转页的打印自动化用例（查看器与导出已复用 PDFium 的旋转后显示尺寸）。
+  - 大页页面在 600 DPI（或超出 64M 像素预算）时导出返回 `render_failed`，消息来自查看器的 “use a page region”，对导出场景略误导；UI 上限 300 DPI，仅超大页会触发。
+  - `print_document` 在平台打印操作启动后即返回（macOS 打印面板在独立线程运行），因此“已准备打印”提示会早于用户完成/取消原生打印；原生取消没有回传，打印面依赖 `afterprint` 清理，若原生操作不派发该事件则位图保留到下一次打印或切换文档。
+- 未验证的人工 GUI 项：真实 macOS/Windows 系统打印对话框与打印机输出（勾选 1：纸张尺寸/方向/页边距/页码、适合页面 vs 实际大小、深色主题下打印纸面仍为白色）；真实 Tauri 窗口中的导出原生保存对话框、成功提示与文件落盘；打包应用里打开加密的打印受限文档并确认按钮禁用/菜单忽略的中文界面。自动化仅通过 mock invoke/dialog、jsdom 与 Rust 命令层覆盖。
