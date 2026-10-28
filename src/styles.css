@@ -631,6 +631,133 @@ button {
   cursor: crosshair;
 }
 
+/* Image overlay. The layer clips to the page: an image dragged past the page
+   edge is shown only inside the page box, matching the saved PDF. */
+.page-image-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  overflow: hidden;
+  pointer-events: none;
+  user-select: none;
+  touch-action: none;
+}
+
+.image-edit-toolbar {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  z-index: 6;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  max-width: calc(100% - 16px);
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--pdfx-pill-bg);
+  color: var(--pdfx-pill-text);
+  font-size: 12px;
+  line-height: 1.4;
+  user-select: none;
+  pointer-events: auto;
+}
+
+.image-edit-toolbar button {
+  padding: 2px 8px;
+  border: 1px solid var(--pdfx-pill-border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--pdfx-pill-text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.image-edit-toolbar button:hover:enabled {
+  background: var(--pdfx-pill-hover);
+}
+
+.image-edit-toolbar button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.image-edit-reason {
+  color: var(--pdfx-status-warning);
+}
+
+.image-edit-warning {
+  color: var(--pdfx-status-warning);
+}
+
+.image-edit-notice--info {
+  color: var(--pdfx-status-success);
+}
+
+.image-edit-notice--error {
+  color: var(--pdfx-status-danger);
+}
+
+.image-outline {
+  position: absolute;
+  box-sizing: border-box;
+  border: 1px dashed var(--pdfx-blue);
+  /* Rotation happens around the image center, matching the saved matrix. */
+  transform-origin: center;
+  pointer-events: auto;
+  cursor: move;
+}
+
+.image-outline--selected {
+  border-style: solid;
+  box-shadow: 0 0 0 1px var(--pdfx-blue);
+}
+
+.image-outline-label {
+  position: absolute;
+  top: -17px;
+  left: -1px;
+  max-width: 100%;
+  overflow: hidden;
+  padding: 1px 5px;
+  border-radius: 2px 2px 0 0;
+  background: var(--pdfx-blue);
+  color: var(--pdfx-on-accent);
+  font-size: 10px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.image-handle {
+  position: absolute;
+  box-sizing: border-box;
+  width: 10px;
+  height: 10px;
+  padding: 0;
+  border: 1px solid var(--pdfx-page);
+  border-radius: 50%;
+  background: var(--pdfx-blue);
+  box-shadow: 0 0 0 1px var(--pdfx-blue);
+  cursor: nwse-resize;
+  touch-action: none;
+}
+
+.image-handle--resize {
+  right: -5px;
+  bottom: -5px;
+}
+
+.image-handle--rotate {
+  top: -20px;
+  left: 50%;
+  margin-left: -5px;
+  cursor: grab;
+  background: var(--pdfx-page);
+  border-color: var(--pdfx-blue);
+}
+
 .text-box-style-panel {
   position: absolute;
   top: 8px;

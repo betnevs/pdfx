@@ -175,6 +175,7 @@ function installDocumentBackend(overrides: Record<string, CommandHandler> = {}) 
       return { ...region, pngBase64: "iVBORw0KGgo=" };
     },
     extract_text_layer: () => textLayerView,
+    page_images: () => [],
     edit_history: () => idleHistory,
     close_document: () => undefined,
     ...overrides,

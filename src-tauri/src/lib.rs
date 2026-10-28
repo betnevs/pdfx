@@ -1,6 +1,7 @@
 pub mod commands;
 pub mod engine;
 pub mod file_association;
+pub mod image_edit;
 pub mod logging;
 mod menu;
 pub mod pdfium_adapter;
@@ -61,6 +62,10 @@ pub fn run() {
             text_edit::undo_text_edit,
             text_edit::redo_text_edit,
             text_edit::mark_document_saved,
+            image_edit::insert_image,
+            image_edit::page_images,
+            image_edit::transform_image,
+            image_edit::delete_image,
             print_export::export_page,
             print_export::print_document,
             save::save_document,

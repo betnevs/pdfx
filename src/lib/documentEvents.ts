@@ -16,6 +16,12 @@ export const DOCUMENT_CHANGED_EVENT = "pdfx://document-changed";
 export interface DocumentChangedDetail {
   documentId: string;
   pageIndex: number;
+  /**
+   * The tool that made the change, when another overlay needs to refresh
+   * tool-specific state such as the shared undo availability. Omitted by
+   * callers whose command results already carry that state.
+   */
+  source?: "text" | "image";
 }
 
 export function notifyDocumentChanged(detail: DocumentChangedDetail): void {
