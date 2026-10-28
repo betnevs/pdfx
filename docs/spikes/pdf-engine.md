@@ -161,6 +161,25 @@ face/weight, not per text box.
 
 ## M1 decisions
 
+### Required `pdfium-render` patch scope
+
+The spike proves the raw-FFI path; it does **not** claim the crate path works.
+The vendored patch (MIT OR Apache-2.0) should add, in order of necessity:
+
+1. Save with flags: a `PdfDocument::save_to_writer_with_flags` (or public raw
+   `FPDF_DOCUMENT` handle) passing `FPDF_INCREMENTAL`; expose
+   `FPDF_REMOVE_SECURITY` for encrypted sources. Today `save_to_writer`
+   hardcodes `flags = 0` and `handle()` is `pub(crate)`.
+2. `create_circle_annotation()` (the crate has the type but no creator).
+3. `FPDFAnnot_AddInkStroke` and `FPDFAnnot_SetBorder` for real ink and border
+   width; the current ink creator yields an empty annotation.
+4. `FPDFAnnot_SetAP` appearance-stream support, or a higher-level appearance
+   helper, since PDFium does not paint annotations without `/AP`.
+
+Raw `FPDFPage_CreateAnnot`, `FPDFAnnot_SetRect`, `FPDFAnnot_SetColor`,
+`FPDFAnnot_SetStringValue` and `FPDFAnnot_SetAP` are already exercised by
+`spikes/pdf-engine/src/raw.rs` and are sufficient as an interim layer.
+
 ### Save
 
 1. Patch/fork `pdfium-render` 0.9.4 to expose `FPDF_SaveAsCopy` flags (and,
