@@ -4,12 +4,25 @@
 
 **Blocked by:** 10 (Save As / Save Changes 管线)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] 任一编辑动作（编辑文字、新建/变换 Text Box、撤销/重做）后标题栏出现未保存标记。
-- [ ] 保存成功后标记与 `dirty` 状态清除；继续编辑后再次出现。
-- [ ] 关闭有未保存修改的窗口时显示中文确认，三个选项分别执行保存后关闭、直接关闭、取消关闭。
-- [ ] 无未保存修改时关闭不弹确认。
-- [ ] 关闭确认与标题标记只依赖命令边界返回的 dirty 状态，不在前端重复推断。
+- [x] 任一编辑动作（编辑文字、新建/变换 Text Box、撤销/重做）后标题栏出现未保存标记。
+- [x] 保存成功后标记与 `dirty` 状态清除；继续编辑后再次出现。
+- [x] 关闭有未保存修改的窗口时显示中文确认，三个选项分别执行保存后关闭、直接关闭、取消关闭。
+- [x] 无未保存修改时关闭不弹确认。
+- [x] 关闭确认与标题标记只依赖命令边界返回的 dirty 状态，不在前端重复推断。
 
 **Notes:** 票据 04 的“关闭有未保存修改时确认”与用户故事 8/10 目前仍是脚手架（`App.tsx` 的 `dirty` 恒为 false）。票据 10 只负责会话的 dirty 状态与保存；本票负责把它接到标题栏与窗口关闭守卫。
+
+**Verification notes:**
+
+- 实现提交 `9bbf942`（9 文件，+1027/−36，新增 `src/components/CloseConfirmDialog.tsx`）；并入 `integration/pdfx` tip `08c55de` 的合并提交 `44e5770`，**无冲突**（`src/lib/backend.ts` 与 `src/styles.css` 由 git 自动合并，ticket 34 的高级注释/自由文本改动与本票新增的 `destroyWindow`/`.dirty-indicator` 并存）。分支此前已并入过集成 `588e48b`（合并提交 `9f26512`）。未修改 spec、ADR、依赖、`tauri.conf.json` 或打包配置；唯一配置改动是 `src-tauri/capabilities/default.json` 增加 `core:window:allow-destroy`（Tauri v2 的 `Window.destroy()` 不在 `core:default` 内）。
+- 勾选 1（未保存标记）：`App.tsx` 的标题 effect 由 `save.dirty` 生成 `名称（未保存） — PDFX`，头部同时显示“未保存”徽标；`save.dirty` 只来自 `edit_history` / `save_document` 返回的 `EditHistoryView.dirty`，前端不比较 revision、不自行推断。`useDocumentSave` 在每次 `pdfx://document-changed` 后重读 `edit_history`，因此文字、Text Box、图片、形状、线条、注释、表单与页面操作、撤销/重做都会更新同一个后端 dirty。测试：`shows the unsaved marker from backend history and clears it on undo to the saved revision` 断言打开时无标记、编辑事件后出现“未保存”且标题变为 `report.pdf（未保存） — PDFX`、撤销回保存点后标记与标题恢复、redo 越过保存点后再次出现；`clears the unsaved marker after a successful save and restores it after another edit` 覆盖保存成功清除、继续编辑恢复。限制：标记的“任一编辑动作”依赖各编辑命令发出文档变更事件（ticket 10 建立的既有 seam），本票未逐组件重新验证每种编辑的通知路径。
+- 勾选 2（保存后清除）：`save_document` 成功结果里的 `history.dirty=false` 直接写入保存 hook 的 history（`mark_document_saved` 由后端在保存管线内调用），标题与徽标随 `save.dirty` 清除；保存后再次编辑，`document-changed` 重读得到 dirty=true，标记恢复。撤销回保存版本由后端 `saved_state` 判定为 clean，因此无需保存即可清除；redo 越过保存点重新变 dirty。上述两个 App 测试同时覆盖这三段状态；Rust 侧 `history_survives_saving_and_dirty_tracks_the_saved_state`（既有）与新增 `a_fresh_history_read_tracks_the_state_the_close_guard_asks_about` 覆盖命令边界。
+- 勾选 3（关闭确认）：`CloseConfirmDialog` 为中文模态框（`role="dialog"`、`aria-modal="true"`、初焦点在“取消”、Escape 取消、保存中禁用三个按钮）。OS 关闭事件的处理始终先 `preventDefault()`，然后在命令边界做决定：先 `waitForIdle()` 等待菜单触发的保存写完，再对新 `edit_history(documentId)` 做一次同步查询；读取失败按 dirty 处理（绝不静默丢弃）。dirty 时显示确认；干净时用 `close_document` 释放文档后调用 `destroyWindow()`（`Window.destroy()`，不再触发第二轮 close 事件）。三个选项：保存 → `saveForClose()` 走 ticket 10 的正常保存流程（无输出或只读文档先弹 Save As；加密文档弹“输出将不加密”确认；必填字段未填返回 `blocked`；写入失败返回 `failed`），只有 `"saved"` 才关闭窗口；不保存 → 直接释放文档并销毁窗口；取消 → 仅关闭确认框。Save As 取消、加密确认取消、保存失败、必填字段缺失都会让窗口保持打开，失败时确认框内显示中文原因（“保存失败，窗口未关闭。请取消后重试保存。”/“有必填字段尚未填写，窗口未关闭。请取消后补全再试。”），用户可再次点“保存”重试或取消后走既有错误面板的重试。重复关闭请求在确认框打开或关闭进行中会被忽略；确认框打开期间 App 层忽略菜单动作与文件拖放，避免原生快捷键在问题未答完时启动第二个保存或换文档（菜单项置灰属 ticket 45）。测试：取消（含焦点断言）、不保存、Save As 后关闭、已有输出时 Save Changes 后关闭、保存失败保持打开并在取消后保留可重试错误、Save As 取消保持打开、必填字段阻止关闭、加密确认叠加且确认后关闭、新编辑的事件未到达时仍能读到 dirty、重复关闭只显示一个确认框、Escape 取消、等待进行中的保存完成后关闭、确认框打开时忽略 `file.save`/`file.save_as` 快捷键。
+- 勾选 4（干净关闭）：`closes a clean document without a confirmation dialog` 断言干净文档关闭无对话框、调用 `close_document` 与 `destroyWindow` 各一次；`triggerWindowClose` 断言 `preventDefault` 被调用（先阻止默认关闭，再显式销毁），避免 Tauri 默认处理与守卫竞争。无文档的工作区窗口同样直接销毁。
+- 勾选 5（单一命令 seam）：标题标记与关闭判断只消费后端命令返回的 `dirty`；本票未新增后端命令、未新增错误码，关闭守卫复用 `edit_history`、`save_document`、`close_document` 与既有的 `mark_document_saved` 测试辅助。新增 Rust 集成测试 `a_fresh_history_read_tracks_the_state_the_close_guard_asks_about` 直接调用 `edit_history` 验证“打开时 clean → 编辑后立即读取为 dirty → `mark_document_saved` 后 clean → undo 后 dirty → redo 后 clean”，即关闭守卫所依赖的新鲜读取契约。`destroyWindow` 的窗口 API 另有一条 backend seam 测试（`destroys the current window after the close guard releases the document`）。
+- 隐私/依赖/文案：无新增 `Cargo.toml`/`package.json` 依赖，无网络、遥测或上传；新增 UI 文案均为中文；未实现 ticket 45。
+- 自动化验证（合并后工作树，仓库根）：`npm run typecheck` 通过；`npm test` **37 文件 / 412 项**通过（本票新增 15 项 App 测试与 1 项 backend 测试）；`npm run build` 通过；`npm run test:e2e` **12 项**通过；`cargo fmt --check` 通过；`cargo clippy -- -D warnings` exit 0（仅 vendored `pdfium-render` 4 条既有 warning，未用 `--all-targets`）；`cargo test` **281 通过 / 0 失败 / 3 ignored（29 个 suite，含 doc-tests）**，其中 `tests/text_edit.rs` 含本票新增的 1 项，3 项 ignored 均为既有手动项。
+- 人工未验项：真实 Tauri 窗口的关闭按钮/系统关闭路径（自动化 mock 了 `onCloseRequested` 与 `destroy()`，jsdom 无法验证 Tauri 的默认关闭与 `preventDefault` 交互）；真实窗口标题栏中“（未保存）”的渲染、对话框焦点与视觉；真实原生 Save As / 加密确认对话框与关闭守卫叠加时的平台模态行为；真实大文档编辑后立即关闭的事件时序。以上不阻塞自动化验收。
+- 已知限制：确认框打开时 App 层阻止了菜单动作与文件拖放，但原生菜单项本身不会置灰（ticket 45）；若编辑命令未发出文档变更事件，标题标记要等到下一次 history 重读，而关闭守卫始终以关闭瞬间的 `edit_history` 为准，不受影响。
