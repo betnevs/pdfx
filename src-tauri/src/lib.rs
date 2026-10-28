@@ -5,6 +5,7 @@ pub mod logging;
 mod menu;
 pub mod pdfium_adapter;
 pub mod settings;
+pub mod text_edit;
 
 use tauri::{Emitter, Manager};
 
@@ -48,6 +49,18 @@ pub fn run() {
             commands::get_settings,
             commands::update_settings,
             commands::export_diagnostics,
+            text_edit::text_edit_target,
+            text_edit::apply_text_edit,
+            text_edit::delete_text_box,
+            text_edit::text_box_fonts,
+            text_edit::create_text_box,
+            text_edit::text_boxes,
+            text_edit::apply_text_box_style,
+            text_edit::transform_text_box,
+            text_edit::edit_history,
+            text_edit::undo_text_edit,
+            text_edit::redo_text_edit,
+            text_edit::mark_document_saved,
         ])
         .setup(|app| {
             // Logging is local-only and must never prevent the shell from

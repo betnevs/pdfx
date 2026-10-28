@@ -56,7 +56,7 @@ npm run build:macos
 - `src-tauri/target/universal-apple-darwin/release/bundle/macos/PDFX.app`
 - `src-tauri/target/universal-apple-darwin/release/bundle/dmg/PDFX_0.1.0_universal.dmg`
 
-首次启动会被 Gatekeeper 拦截。右键/Control 点击“打开”、在“系统设置 → 隐私与安全性”点击“仍要打开”，或执行 `xattr -dr com.apple.quarantine /Applications/PDFX.app` 即可放行。完整说明见 [`docs/install-macos.md`](docs/install-macos.md)，同一文件会随应用放入 `Contents/Resources/INSTALL-macos.md`。不购买 Apple Developer Program、不做公证是 ADR-0009 的零成本分发取舍：用户需要手动放行，应用也不会自动更新。Windows 安装器属于票 18，尚未提供。
+首次启动会被 Gatekeeper 拦截。右键/Control 点击“打开”、在“系统设置 → 隐私与安全性”点击“仍要打开”，或执行 `xattr -dr com.apple.quarantine /Applications/PDFX.app` 即可放行。完整说明见 [`docs/install-macos.md`](docs/install-macos.md)，同一文件会随应用放入 `Contents/Resources/INSTALL-macos.md`。不购买 Apple Developer Program、不做公证是 ADR-0009 的零成本分发取舍：用户需要手动放行，应用也不会自动更新。Windows 安装器（`.msi` / `.exe` / portable zip）由票 18 提供，见 [`docs/install-windows.md`](docs/install-windows.md)。
 
 ## 命令
 
@@ -132,4 +132,4 @@ M0 原型还有两个独立 seam：
 - fixture 中的“大文件”是 500 页的提交版本；可用 `--large-pages 2000` 生成完整压力样例。
 - 中文/Embedded Font/Font Subset fixture 待字体管线票补充（见 `fixtures/README.md`）。
 - 生产构建目前未签名、未公证；macOS 首次启动需按 [`docs/install-macos.md`](docs/install-macos.md) 绕过 Gatekeeper。Intel 硬件与 macOS 12 上的实机启动仍需在发布前用对应机器验证；仓库内的自动化检查只能验证 universal 架构与包结构。
-- Windows 安装器（`.msi` / `.exe` / portable zip）尚未提供，见票 18。
+- Windows 安装器（`.msi` / `.exe` / portable zip）见 [`docs/install-windows.md`](docs/install-windows.md)；尚未在 Windows 实机验证。

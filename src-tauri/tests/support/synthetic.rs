@@ -3,6 +3,10 @@
 //!
 //! The fixtures live in a unique temporary file for the duration of the test.
 
+// Each integration test binary uses a different subset of these shared
+// fixtures, so unused ones are expected rather than dead code.
+#![allow(dead_code)]
+
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -190,4 +194,112 @@ end\nend\n";
         (6, stream("", &content)),
     ];
     write_pdf("surrogate-pair", build_pdf(objects, 1))
+}
+
+/// A 612x792 page with one line of Helvetica 18pt text at user-space
+/// (72, 720), so editing it changes exactly one Text Object.
+pub fn single_line_pdf() -> TempPdf {
+    let content = b"BT /F1 18 Tf 72 720 Td (Original line.) Tj ET\n".to_vec();
+    let objects = vec![
+        (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+        (2, b"<< /Type /Pages /Kids [4 0 R] /Count 1 >>".to_vec()),
+        (3, HELVETICA.to_vec()),
+        (
+            4,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R >>".to_vec(),
+        ),
+        (5, stream("", &content)),
+    ];
+    write_pdf("single-line", build_pdf(objects, 1))
+}
+
+/// Wraps arbitrary bytes (for example a document saved by the backend) in a
+/// temporary file so it can be reopened through the command boundary.
+pub fn pdf_bytes_file(name: &str, bytes: Vec<u8>) -> TempPdf {
+    write_pdf(name, bytes)
+}
+
+/// Liberation Sans, used to build a PDF with a real embedded TrueType font.
+/// Liberation fonts are SIL Open Font License; see `tests/fonts/LICENSE_LIBERATION`.
+const EMBEDDED_FONT: &[u8] = include_bytes!("../fonts/LiberationSans-Regular.ttf");
+
+fn scale_to_1000(value: i16, units_per_em: u16) -> i64 {
+    (f64::from(value) * 1000.0 / f64::from(units_per_em)).round() as i64
+}
+
+/// A 612x792 page drawing 18pt Liberation Sans as an embedded simple TrueType
+/// font with WinAnsiEncoding. The font program retains its cmap, so every
+/// Latin character can be checked for glyph coverage.
+pub fn embedded_true_type_pdf() -> TempPdf {
+    let face = ttf_parser::Face::parse(EMBEDDED_FONT, 0).expect("parse test font");
+    let units_per_em = face.units_per_em();
+    let widths = (32u8..=126)
+        .map(|code| {
+            let glyph = face
+                .glyph_index(char::from(code))
+                .expect("test font covers ASCII");
+            let advance = face.glyph_hor_advance(glyph).unwrap_or(0);
+            scale_to_1000(advance as i16, units_per_em).to_string()
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let bbox = face.global_bounding_box();
+    let font_descriptor = format!(
+        "<< /Type /FontDescriptor /FontName /LiberationSans /Flags 32 \
+/FontBBox [{} {} {} {}] /ItalicAngle 0 /Ascent {} /Descent {} /CapHeight {} /StemV 80 /FontFile2 5 0 R >>",
+        scale_to_1000(bbox.x_min, units_per_em),
+        scale_to_1000(bbox.y_min, units_per_em),
+        scale_to_1000(bbox.x_max, units_per_em),
+        scale_to_1000(bbox.y_max, units_per_em),
+        scale_to_1000(face.ascender(), units_per_em),
+        scale_to_1000(face.descender(), units_per_em),
+        scale_to_1000(face.capital_height().unwrap_or(face.ascender()), units_per_em),
+    );
+    let font = format!(
+        "<< /Type /Font /Subtype /TrueType /BaseFont /LiberationSans /FirstChar 32 /LastChar 126 \
+/Widths [{widths}] /FontDescriptor 4 0 R /Encoding /WinAnsiEncoding >>"
+    );
+    let content = b"BT /F1 18 Tf 72 720 Td (Embedded font sample.) Tj ET\n".to_vec();
+    let objects = vec![
+        (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+        (2, b"<< /Type /Pages /Kids [6 0 R] /Count 1 >>".to_vec()),
+        (3, font.into_bytes()),
+        (4, font_descriptor.into_bytes()),
+        (
+            5,
+            stream(&format!("/Length1 {}", EMBEDDED_FONT.len()), EMBEDDED_FONT),
+        ),
+        (
+            6,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 7 0 R >>".to_vec(),
+        ),
+        (7, stream("", &content)),
+    ];
+    write_pdf("embedded-true-type", build_pdf(objects, 1))
+}
+
+/// A 612x792 page using a non-embedded, non-standard font name. Pdfium
+/// substitutes a rendering font, but the text object still advertises the
+/// document's original (non-standard) font.
+pub fn non_standard_font_pdf() -> TempPdf {
+    let content = b"BT /F1 18 Tf 72 720 Td (Fallback font sample.) Tj ET\n".to_vec();
+    let objects = vec![
+        (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+        (2, b"<< /Type /Pages /Kids [5 0 R] /Count 1 >>".to_vec()),
+        (
+            3,
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /PDFXMissingFont /Encoding /WinAnsiEncoding /FontDescriptor 4 0 R >>".to_vec(),
+        ),
+        (
+            4,
+            b"<< /Type /FontDescriptor /FontName /PDFXMissingFont /Flags 32 /FontBBox [-200 -250 1000 900] /ItalicAngle 0 /Ascent 800 /Descent -200 /CapHeight 700 /StemV 80 >>".to_vec(),
+        ),
+        (
+            5,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 6 0 R >>".to_vec(),
+        ),
+        (6, stream("", &content)),
+    ];
+    write_pdf("non-standard-font", build_pdf(objects, 1))
 }

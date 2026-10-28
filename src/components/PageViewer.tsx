@@ -13,6 +13,7 @@ import {
   type PageInfo,
   type PageRegionView,
 } from "../lib/backend";
+import { onDocumentChanged } from "../lib/documentEvents";
 import {
   pagePixelSize,
   percentToScale,
@@ -208,24 +209,47 @@ export function ThumbnailRail({
   const railRef = useRef<HTMLElement>(null);
   const cacheRef = useRef(new Map<number, PageImageView>());
   const pendingRef = useRef(new Set<number>());
+  const pageGenerationRef = useRef(new Map<number, number>());
   const aliveRef = useRef(true);
   const revealedRef = useRef(currentPageIndex);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(
     THUMBNAIL_FALLBACK_VIEWPORT,
   );
+  const [contentRevision, setContentRevision] = useState(0);
   const [, bump] = useReducer((value: number) => value + 1, 0);
 
   useEffect(() => {
     aliveRef.current = true;
     cacheRef.current.clear();
     pendingRef.current.clear();
+    pageGenerationRef.current.clear();
     revealedRef.current = 0;
     setScrollTop(0);
+    setContentRevision(0);
     return () => {
       aliveRef.current = false;
     };
   }, [documentId]);
+
+  // An edit, delete or undo invalidates that page's thumbnail. The generation
+  // check keeps a render that was already in flight from caching stale pixels.
+  useEffect(
+    () =>
+      onDocumentChanged((detail) => {
+        if (detail.documentId !== documentId) {
+          return;
+        }
+        pageGenerationRef.current.set(
+          detail.pageIndex,
+          (pageGenerationRef.current.get(detail.pageIndex) ?? 0) + 1,
+        );
+        cacheRef.current.delete(detail.pageIndex);
+        pendingRef.current.delete(detail.pageIndex);
+        setContentRevision((value) => value + 1);
+      }),
+    [documentId],
+  );
 
   // Measure the rail after layout so the first lazy window matches its real
   // height instead of the fallback used before the first scroll.
@@ -286,9 +310,13 @@ export function ThumbnailRail({
         continue;
       }
       pendingRef.current.add(index);
+      const generation = pageGenerationRef.current.get(index) ?? 0;
       renderThumbnail(documentId, index, THUMBNAIL_MAX_EDGE)
         .then((image) => {
-          if (!aliveRef.current) {
+          if (
+            !aliveRef.current ||
+            (pageGenerationRef.current.get(index) ?? 0) !== generation
+          ) {
             return;
           }
           cacheRef.current.set(index, image);
@@ -301,7 +329,7 @@ export function ThumbnailRail({
           pendingRef.current.delete(index);
         });
     }
-  }, [documentId, range.start, range.end]);
+  }, [documentId, range.start, range.end, contentRevision]);
 
   const items = [];
   for (let index = range.start; index < range.end; index += 1) {
@@ -358,6 +386,7 @@ export function PageSurface({
   info,
   scale,
   render,
+  readOnly,
   surfaceRef,
 }: {
   documentId: string;
@@ -365,6 +394,7 @@ export function PageSurface({
   info: PageInfo | null;
   scale: number;
   render: PageRender;
+  readOnly: boolean;
   surfaceRef: RefObject<HTMLDivElement | null>;
 }) {
   const pixel = info ? pagePixelSize(info, scale) : null;
@@ -423,6 +453,8 @@ export function PageSurface({
         key={`${documentId}:${pageIndex}`}
         documentId={documentId}
         pageIndex={pageIndex}
+        readOnly={readOnly}
+        scale={scale}
       />
     </div>
   );
