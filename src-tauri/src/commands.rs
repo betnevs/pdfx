@@ -85,6 +85,10 @@ pub enum CommandErrorCode {
     ExportTargetIsOutput,
     /// The platform print operation could not be started.
     PrintFailed,
+    /// The flattened copy could not be built or written. Nothing was written
+    /// to the destination and the open document is unchanged; the export may
+    /// be retried.
+    FlattenExportFailed,
     WindowFailed,
     /// Writing the Output Document failed. The Source Document and any
     /// previous Output Document are unchanged; the save may be retried.

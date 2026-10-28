@@ -1,7 +1,9 @@
 pub mod annotations;
+mod atomic_write;
 pub mod commands;
 pub mod engine;
 pub mod file_association;
+pub mod flatten_export;
 mod fonts;
 pub mod form;
 pub mod form_create;
@@ -107,6 +109,7 @@ pub fn run() {
             annotations::erase_ink_stroke,
             print_export::export_page,
             print_export::print_document,
+            flatten_export::export_flattened_copy,
             save::save_document,
             commands::get_settings,
             commands::update_settings,

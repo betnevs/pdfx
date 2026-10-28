@@ -235,6 +235,166 @@ describe("PrintExport", () => {
   });
 });
 
+function flattenResult(overrides: Record<string, unknown> = {}) {
+  return {
+    documentId: "doc-1",
+    path: "/tmp/report-flattened.pdf",
+    bytes: 2048,
+    flattened: 4,
+    preserved: 2,
+    skipped: [],
+    ...overrides,
+  };
+}
+
+async function openFlattenDialog() {
+  const user = userEvent.setup();
+  renderPrintExport();
+  await user.click(
+    screen.getByRole("button", { name: "导出 Flatten 副本…" }),
+  );
+  return {
+    user,
+    dialog: screen.getByRole("dialog", { name: "导出 Flatten 副本" }),
+  };
+}
+
+describe("PrintExport flattened copy", () => {
+  it("exports a flattened copy and reports the counts in Chinese", async () => {
+    saveMock.mockResolvedValue("/tmp/report-flattened.pdf");
+    invokeMock.mockResolvedValue(
+      flattenResult({
+        skipped: [
+          { pageIndex: 0, subtype: "Square", reason: "no_appearance" },
+          { pageIndex: 1, subtype: "Text", reason: "popup" },
+        ],
+      }),
+    );
+    const { user, dialog } = await openFlattenDialog();
+
+    expect(within(dialog).getByText(/视觉标注将绘制为页面内容/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/链接和表单字段保持可交互/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/原文档不会被修改/)).toBeInTheDocument();
+
+    await user.click(within(dialog).getByRole("button", { name: "导出…" }));
+
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("export_flattened_copy", {
+        documentId: "doc-1",
+        destination: "/tmp/report-flattened.pdf",
+        confirmUnencryptedOutput: false,
+      }),
+    );
+    expect(saveMock).toHaveBeenCalledWith({
+      defaultPath: "report-flattened.pdf",
+      filters: [{ name: "PDF", extensions: ["pdf"] }],
+    });
+    const notice = await screen.findByRole("status");
+    expect(notice).toHaveTextContent("已导出 Flatten 副本");
+    expect(notice).toHaveTextContent("flatten 4 个标注");
+    expect(notice).toHaveTextContent("保留 2 个交互项");
+    expect(notice).toHaveTextContent("跳过 2 个");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("does not export when the save dialog is cancelled", async () => {
+    saveMock.mockResolvedValue(null);
+    const { user, dialog } = await openFlattenDialog();
+
+    await user.click(within(dialog).getByRole("button", { name: "导出…" }));
+
+    await waitFor(() => expect(saveMock).toHaveBeenCalled());
+    expect(invokeMock).not.toHaveBeenCalled();
+    expect(
+      screen.getByRole("dialog", { name: "导出 Flatten 副本" }),
+    ).toBeInTheDocument();
+  });
+
+  it("explains why the source PDF cannot be the flattened-copy target", async () => {
+    saveMock.mockResolvedValue("/tmp/report.pdf");
+    invokeMock.mockRejectedValue({
+      code: "export_target_is_source",
+      message: "/tmp/report.pdf is the open Source Document",
+    });
+    const { user, dialog } = await openFlattenDialog();
+
+    await user.click(within(dialog).getByRole("button", { name: "导出…" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "不能覆盖源 PDF 文件，请选择其他位置。",
+    );
+    expect(
+      screen.getByRole("dialog", { name: "导出 Flatten 副本" }),
+    ).toBeInTheDocument();
+  });
+
+  it("explains why the current output PDF cannot be the flattened-copy target", async () => {
+    saveMock.mockResolvedValue("/tmp/report-output.pdf");
+    invokeMock.mockRejectedValue({
+      code: "export_target_is_output",
+      message: "/tmp/report-output.pdf is the current Output Document",
+    });
+    const { user, dialog } = await openFlattenDialog();
+
+    await user.click(within(dialog).getByRole("button", { name: "导出…" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "不能覆盖当前输出 PDF 文件，请选择其他位置。",
+    );
+  });
+
+  it("warns that an encrypted source produces an unencrypted copy", async () => {
+    saveMock.mockResolvedValue("/tmp/report-flattened.pdf");
+    invokeMock.mockResolvedValue(flattenResult());
+    const user = userEvent.setup();
+    renderPrintExport(documentView({ encrypted: true }));
+
+    await user.click(
+      screen.getByRole("button", { name: "导出 Flatten 副本…" }),
+    );
+    const dialog = screen.getByRole("dialog", { name: "导出 Flatten 副本" });
+    expect(within(dialog).getByText(/将以未加密方式保存/)).toBeInTheDocument();
+
+    const submit = within(dialog).getByRole("button", { name: "导出…" });
+    expect(submit).toBeDisabled();
+
+    await user.click(
+      within(dialog).getByRole("checkbox", {
+        name: "我了解副本将不加密，继续导出",
+      }),
+    );
+    expect(submit).toBeEnabled();
+    await user.click(submit);
+
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("export_flattened_copy", {
+        documentId: "doc-1",
+        destination: "/tmp/report-flattened.pdf",
+        confirmUnencryptedOutput: true,
+      }),
+    );
+  });
+
+  it("shows a localized retryable error and keeps the dialog open when flattening fails", async () => {
+    saveMock.mockResolvedValue("/tmp/report-flattened.pdf");
+    invokeMock.mockRejectedValue({
+      code: "flatten_export_failed",
+      message: "could not draw annotation",
+    });
+    const { user, dialog } = await openFlattenDialog();
+
+    await user.click(within(dialog).getByRole("button", { name: "导出…" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "无法生成 Flatten 副本，请检查文档后重试。",
+    );
+    expect(
+      screen.getByRole("dialog", { name: "导出 Flatten 副本" }),
+    ).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "导出…" })).toBeEnabled();
+  });
+});
+
 function pageInfoFor(pageIndex: number) {
   return {
     pageIndex,
