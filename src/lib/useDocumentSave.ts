@@ -31,6 +31,19 @@ export interface SaveConfirmation {
   request: SaveDocumentRequest;
 }
 
+/**
+ * How a save that gates closing the window ended.
+ *
+ * Only `"saved"` means the Output Document is on disk; every other outcome
+ * must leave the window open. `"cancelled"` covers a dismissed Save As dialog
+ * or unencrypted-output confirmation, `"blocked"` a missing required field,
+ * and `"failed"` a write or dialog error.
+ */
+export type SaveForCloseResult = "saved" | "cancelled" | "failed" | "blocked";
+
+/** The outcome of one actual write attempt. */
+type SaveOutcome = "saved" | "failed";
+
 /** Callbacks the workspace supplies to the save flow. */
 export interface DocumentSaveOptions {
   /**
@@ -58,6 +71,13 @@ export interface DocumentSave {
   saveChanges: () => void;
   /** Chooses a target path and writes a new Output Document. */
   saveAs: () => void;
+  /**
+   * Runs the normal save flow for a window close and resolves how it ended.
+   * The window may close only when the result is `"saved"`.
+   */
+  saveForClose: () => Promise<SaveForCloseResult>;
+  /** Resolves once no save is running (immediately when idle). */
+  waitForIdle: () => Promise<void>;
   /** Continues a pending save after accepting the unencrypted-output warning. */
   confirmUnencrypted: () => void;
   cancelConfirmation: () => void;
@@ -99,9 +119,20 @@ export function useDocumentSave(
   // The backend remembers the Output Document; this mirrors whether a Save As
   // has happened in this window so Save Changes can fall back to Save As.
   const hasOutputRef = useRef(false);
+  // Resolves the promise returned by `startSave` once the user answers an
+  // unencrypted-output confirmation. Only one confirmation can be pending.
+  const confirmationResolverRef = useRef<
+    ((result: SaveForCloseResult) => void) | null
+  >(null);
+  // Close requests wait here while a save is already in flight, so the fresh
+  // history read happens after the backend has settled the write.
+  const idleWaitersRef = useRef<Array<() => void>>([]);
 
   // A new document starts with fresh save state.
   useEffect(() => {
+    const pendingConfirmation = confirmationResolverRef.current;
+    confirmationResolverRef.current = null;
+    pendingConfirmation?.("cancelled");
     setHistory(null);
     setBusy(false);
     setProgress(null);
@@ -190,10 +221,10 @@ export function useDocumentSave(
   }, [documentId]);
 
   const runSave = useCallback(
-    async (kind: SaveKind, request: SaveDocumentRequest) => {
+    async (kind: SaveKind, request: SaveDocumentRequest): Promise<SaveOutcome> => {
       const current = documentRef.current;
       if (!current || busyRef.current) {
-        return;
+        return "failed";
       }
       busyRef.current = true;
       setBusy(true);
@@ -208,11 +239,18 @@ export function useDocumentSave(
         setHistory(result.history);
         setLastSavedPath(result.outputPath);
         setRequiredFields(null);
+        return "saved";
       } catch (saveError) {
         setError({ error: toCommandError(saveError), kind, request });
+        return "failed";
       } finally {
         busyRef.current = false;
         setBusy(false);
+        const waiters = idleWaitersRef.current;
+        idleWaitersRef.current = [];
+        for (const resolve of waiters) {
+          resolve();
+        }
       }
     },
     [],
@@ -245,18 +283,26 @@ export function useDocumentSave(
   }, []);
 
   const startSave = useCallback(
-    (kind: SaveKind, request: SaveDocumentRequest) => {
+    (
+      kind: SaveKind,
+      request: SaveDocumentRequest,
+    ): Promise<SaveForCloseResult> => {
       const current = documentRef.current;
       if (!current) {
-        return;
+        return Promise.resolve("cancelled");
       }
       // ADR-0007: never write an unencrypted Output Document without an
       // explicit confirmation for this save.
       if (current.encrypted && !request.confirmUnencryptedOutput) {
-        setConfirmation({ kind, request });
-        return;
+        // A newer attempt supersedes an older, unanswered confirmation.
+        const previous = confirmationResolverRef.current;
+        previous?.("cancelled");
+        return new Promise((resolve) => {
+          confirmationResolverRef.current = resolve;
+          setConfirmation({ kind, request });
+        });
       }
-      void runSave(kind, request);
+      return runSave(kind, request);
     },
     [runSave],
   );
@@ -310,20 +356,81 @@ export function useDocumentSave(
     })();
   }, [checkRequired, saveAs, startSave]);
 
+  /**
+   * The close guard's save path.
+   *
+   * It is the same flow as the Save buttons — required fields, Save As when no
+   * Output Document exists, the unencrypted-output confirmation and the
+   * retryable write error — but it resolves an outcome so the caller can keep
+   * the window open unless the document is actually on disk.
+   */
+  const saveForClose = useCallback(async (): Promise<SaveForCloseResult> => {
+    const current = documentRef.current;
+    if (!current || busyRef.current) {
+      return "failed";
+    }
+    if (!(await checkRequired())) {
+      return "blocked";
+    }
+    // A confirmation left over from an earlier save attempt must not swallow
+    // this close: answer it as cancelled and let this save raise its own.
+    if (confirmationResolverRef.current) {
+      const previous = confirmationResolverRef.current;
+      confirmationResolverRef.current = null;
+      setConfirmation(null);
+      previous("cancelled");
+    }
+    // A read-only document cannot Save Changes, but Save As still works.
+    if (current.readOnly || !hasOutputRef.current) {
+      let path: string | null;
+      try {
+        path = await chooseSaveFile(current.name);
+      } catch (dialogError) {
+        console.warn("[pdfx] could not show the Save As dialog", dialogError);
+        return "failed";
+      }
+      if (!path) {
+        return "cancelled";
+      }
+      return startSave("save_as", {
+        saveAsPath: path,
+        confirmUnencryptedOutput: false,
+      });
+    }
+    return startSave("save_changes", {
+      saveAsPath: null,
+      confirmUnencryptedOutput: false,
+    });
+  }, [checkRequired, startSave]);
+
+  const waitForIdle = useCallback((): Promise<void> => {
+    if (!busyRef.current) {
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => {
+      idleWaitersRef.current.push(resolve);
+    });
+  }, []);
+
   const confirmUnencrypted = useCallback(() => {
     if (!confirmation) {
       return;
     }
     const pending = confirmation;
+    const resolve = confirmationResolverRef.current;
+    confirmationResolverRef.current = null;
     setConfirmation(null);
     void runSave(pending.kind, {
       ...pending.request,
       confirmUnencryptedOutput: true,
-    });
+    }).then((outcome) => resolve?.(outcome));
   }, [confirmation, runSave]);
 
   const cancelConfirmation = useCallback(() => {
+    const resolve = confirmationResolverRef.current;
+    confirmationResolverRef.current = null;
     setConfirmation(null);
+    resolve?.("cancelled");
   }, []);
 
   const retry = useCallback(() => {
@@ -362,6 +469,8 @@ export function useDocumentSave(
     lastSavedPath,
     saveChanges,
     saveAs,
+    saveForClose,
+    waitForIdle,
     confirmUnencrypted,
     cancelConfirmation,
     retry,

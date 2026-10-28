@@ -10,10 +10,13 @@ import {
 } from "./components/PrintExport";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { PasswordPrompt } from "./components/PasswordPrompt";
+import { CloseConfirmDialog } from "./components/CloseConfirmDialog";
 import { SaveConfirmDialog } from "./components/SaveConfirmDialog";
 import {
   choosePdfFile,
   closeDocument,
+  destroyWindow,
+  editHistory,
   getAppInfo,
   initialDocumentPath,
   onFileDrop,
@@ -29,6 +32,7 @@ import {
   type CommandError,
   type CommandErrorCode,
   type DocumentView,
+  type EditHistoryView,
   type FormFieldView,
   type StampKind,
 } from "./lib/backend";
@@ -54,6 +58,14 @@ interface PasswordPromptState {
   fileName: string;
   error: string | null;
   busy: boolean;
+}
+
+/** The unsaved-changes question shown before a dirty window closes. */
+interface ClosePromptState {
+  /** True while the close-triggered save is running. */
+  busy: boolean;
+  /** Explains why the last save attempt left the window open. */
+  message: string | null;
 }
 
 const WRONG_PASSWORD_MESSAGE = "密码不正确，请重试。";
@@ -101,11 +113,13 @@ export function App() {
 
   const editorRef = useRef(editor);
   editorRef.current = editor;
-  // Ticket 44 wires the save session's dirty flag into the title marker and
-  // the close confirmation; ticket 10 only exposes it from the backend.
-  const [dirty] = useState(false);
-  const dirtyRef = useRef(dirty);
-  dirtyRef.current = dirty;
+  const [closePrompt, setClosePrompt] = useState<ClosePromptState | null>(null);
+  const closePromptRef = useRef(closePrompt);
+  closePromptRef.current = closePrompt;
+  // Set once the guard has released the Document and asked the window to go
+  // away; further close events must not re-enter the confirmation flow.
+  const closingRef = useRef(false);
+  const closeSaveInFlightRef = useRef(false);
   const openingRef = useRef(false);
   const printExportRef = useRef<PrintExportHandle>(null);
 
@@ -187,6 +201,144 @@ export function App() {
   const saveRef = useRef(save);
   saveRef.current = save;
 
+  // Story 10: the native title carries the Document name and an unsaved
+  // marker. The marker comes from the backend's dirty flag only; the save
+  // hook re-reads it after every edit, undo and redo.
+  const openDocumentId = openDocumentView?.documentId ?? null;
+  const openDocumentName = openDocumentView?.name ?? null;
+  const lastTitleRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!openDocumentName) {
+      // A document that was closed after an error no longer backs the title.
+      if (lastTitleRef.current !== null) {
+        lastTitleRef.current = null;
+        void setWindowTitle("PDFX").catch(() => {});
+      }
+      return;
+    }
+    const marker = save.dirty ? "（未保存）" : "";
+    const title = `${openDocumentName}${marker} — PDFX`;
+    if (lastTitleRef.current === title) {
+      return;
+    }
+    lastTitleRef.current = title;
+    void setWindowTitle(title).catch(() => {
+      // The title is cosmetic; a missing window capability must not fail open.
+    });
+  }, [openDocumentId, openDocumentName, save.dirty]);
+
+  /**
+   * Releases the Document and destroys the window without another close
+   * round trip.
+   */
+  const closeWindow = useCallback(async () => {
+    if (closingRef.current) {
+      return;
+    }
+    closingRef.current = true;
+    const current = editorRef.current;
+    if (current.status === "open") {
+      await closeDocument(current.document.documentId).catch(() => {});
+    }
+    closePromptRef.current = null;
+    setClosePrompt(null);
+    try {
+      await destroyWindow();
+    } catch (error) {
+      // The window survived; allow a later close attempt to run the guard.
+      closingRef.current = false;
+      console.warn("[pdfx] could not close the window", error);
+    }
+  }, []);
+
+  /**
+   * The OS close request. The default close is always prevented first so the
+   * decision can wait on a fresh backend read; a clean window is then closed
+   * explicitly. An edit whose page-change event has not arrived yet is still
+   * seen because `edit_history` is queried at the command boundary.
+   */
+  const handleCloseRequested = useCallback(
+    async (event: { preventDefault: () => void }) => {
+      event.preventDefault();
+      if (closingRef.current || closePromptRef.current) {
+        // Already closing, or already asking. Repeated close clicks must not
+        // stack dialogs or start a second save.
+        return;
+      }
+      const current = editorRef.current;
+      if (current.status !== "open") {
+        await closeWindow();
+        return;
+      }
+      const documentId = current.document.documentId;
+      // A save started from the menu may still be writing. Let it settle so
+      // the read below reflects the backend's command-boundary state.
+      await saveRef.current.waitForIdle();
+      if (closingRef.current || closePromptRef.current) {
+        return;
+      }
+      let history: EditHistoryView | null = null;
+      try {
+        history = await editHistory(documentId);
+      } catch {
+        // Without an answer, never discard changes silently: ask the user.
+      }
+      if (closingRef.current || closePromptRef.current) {
+        return;
+      }
+      if (history && !history.dirty) {
+        await closeWindow();
+        return;
+      }
+      // A confirmation left over from an earlier save attempt belongs to that
+      // attempt; the close dialog re-raises it if the user chooses Save.
+      saveRef.current.cancelConfirmation();
+      setClosePrompt({ busy: false, message: null });
+    },
+    [closeWindow],
+  );
+
+  /**
+   * Save from the close dialog. Only a successful write closes the window;
+   * cancelling a dialog, a blocked form or a failed write leaves it open.
+   */
+  const handleCloseSave = useCallback(async () => {
+    if (closeSaveInFlightRef.current) {
+      return;
+    }
+    closeSaveInFlightRef.current = true;
+    setClosePrompt({ busy: true, message: null });
+    try {
+      const result = await saveRef.current.saveForClose();
+      if (result === "saved") {
+        await closeWindow();
+        return;
+      }
+      if (closingRef.current) {
+        return;
+      }
+      setClosePrompt({
+        busy: false,
+        message:
+          result === "failed"
+            ? "保存失败，窗口未关闭。请取消后重试保存。"
+            : result === "blocked"
+              ? "有必填字段尚未填写，窗口未关闭。请取消后补全再试。"
+              : null,
+      });
+    } finally {
+      closeSaveInFlightRef.current = false;
+    }
+  }, [closeWindow]);
+
+  const handleCloseDiscard = useCallback(() => {
+    void closeWindow();
+  }, [closeWindow]);
+
+  const handleCloseCancel = useCallback(() => {
+    setClosePrompt(null);
+  }, []);
+
   useEffect(() => {
     setFormFocusFieldId(null);
   }, [openDocumentView?.documentId]);
@@ -240,11 +392,6 @@ export function App() {
       const document = await openDocument(path, password);
       openedDocumentId = document.documentId;
       setPasswordPrompt(null);
-
-      await setWindowTitle(`${document.name} — PDFX`).catch(() => {
-        // The title is cosmetic; a missing window capability must not fail open.
-      });
-
       setEditor({ status: "open", document });
     } catch (error) {
       if (openedDocumentId) {
@@ -307,6 +454,11 @@ export function App() {
   }
 
   function handleMenu(menuId: string) {
+    // The close question is modal: native accelerators must not start a save
+    // or replace the document while the user is answering it.
+    if (closePromptRef.current) {
+      return;
+    }
     const current = viewerRef.current;
     switch (menuId) {
       case "file.open":
@@ -373,22 +525,14 @@ export function App() {
       subscribe(
         onFileDrop((paths) => {
           const pdf = paths.find((path) => path.toLowerCase().endsWith(".pdf"));
-          if (pdf) {
+          if (pdf && !closePromptRef.current) {
             void openPath(pdf);
           }
         }),
       );
       subscribe(
         onWindowCloseRequested((event) => {
-          if (dirtyRef.current) {
-            // Confirm or save before closing once editing exists.
-            event.preventDefault();
-            return;
-          }
-          const current = editorRef.current;
-          if (current.status === "open") {
-            void closeDocument(current.document.documentId).catch(() => {});
-          }
+          void handleCloseRequested(event);
         }),
       );
     } catch {
@@ -429,6 +573,11 @@ export function App() {
           {open && (
             <span className="document-name" title={open.document.path}>
               {open.document.name}
+            </span>
+          )}
+          {open && save.dirty && (
+            <span className="dirty-indicator" title="有未保存的更改">
+              未保存
             </span>
           )}
           <span className="app-mode">本地 PDF 编辑器</span>
@@ -491,6 +640,19 @@ export function App() {
         />
       )}
 
+      {closePrompt && open && (
+        <CloseConfirmDialog
+          documentName={open.document.name}
+          busy={closePrompt.busy || save.busy}
+          message={closePrompt.message}
+          onSave={() => void handleCloseSave()}
+          onDiscard={handleCloseDiscard}
+          onCancel={handleCloseCancel}
+        />
+      )}
+
+      {/* Rendered after the close dialog so the unencrypted-output question it
+          raises during the close save paints on top. */}
       {open && save.confirmation && (
         <SaveConfirmDialog
           documentName={open.document.name}

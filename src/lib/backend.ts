@@ -1598,6 +1598,15 @@ export async function setWindowTitle(title: string): Promise<void> {
   return getCurrentWindow().setTitle(title);
 }
 
+/**
+ * Destroys the current window without emitting another close-requested round
+ * trip. The close guard calls this once it has released the Document, so the
+ * window cannot be closed a second time by the default event handling.
+ */
+export async function destroyWindow(): Promise<void> {
+  return getCurrentWindow().destroy();
+}
+
 /** Enters or leaves native fullscreen for the current window. */
 export async function setFullscreen(fullscreen: boolean): Promise<void> {
   return getCurrentWindow().setFullscreen(fullscreen);
@@ -1624,7 +1633,7 @@ export function onFileDrop(handler: (paths: string[]) => void): Promise<Unlisten
 
 /** Runs the handler when the OS asks this window to close. */
 export function onWindowCloseRequested(
-  handler: (event: { preventDefault: () => void }) => void,
+  handler: (event: { preventDefault: () => void }) => void | Promise<void>,
 ): Promise<UnlistenFn> {
   return getCurrentWindow().onCloseRequested(handler);
 }
