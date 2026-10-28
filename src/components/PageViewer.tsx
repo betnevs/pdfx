@@ -13,6 +13,7 @@ import {
   type PageImageView,
   type PageInfo,
   type PageRegionView,
+  type StampKind,
 } from "../lib/backend";
 import { onDocumentChanged } from "../lib/documentEvents";
 import {
@@ -24,6 +25,7 @@ import {
 } from "../lib/pageGeometry";
 import type { PageRender, ZoomMode } from "../lib/useDocumentViewer";
 import { PageTextLayer } from "./PageTextLayer";
+import { StampLayer } from "./StampLayer";
 
 /** Fixed cell height keeps thumbnail virtualization independent of page sizes. */
 const THUMBNAIL_ITEM_HEIGHT = 168;
@@ -389,7 +391,13 @@ export function PageSurface({
   render,
   readOnly,
   canAnnotate,
+  annotations,
   selectedAnnotation,
+  armedStamp,
+  onSelectAnnotation,
+  onStampPlaced,
+  onArmedStampChange,
+  onAnnotationsChanged,
   surfaceRef,
 }: {
   documentId: string;
@@ -399,7 +407,13 @@ export function PageSurface({
   render: PageRender;
   readOnly: boolean;
   canAnnotate: boolean;
+  annotations: AnnotationView[];
   selectedAnnotation: AnnotationView | null;
+  armedStamp: StampKind | null;
+  onSelectAnnotation: (annotation: AnnotationView | null) => void;
+  onStampPlaced: (annotation: AnnotationView) => void;
+  onArmedStampChange: (kind: StampKind | null) => void;
+  onAnnotationsChanged: () => void;
   surfaceRef: RefObject<HTMLDivElement | null>;
 }) {
   const pixel = info ? pagePixelSize(info, scale) : null;
@@ -463,6 +477,23 @@ export function PageSurface({
         selectedAnnotation={selectedAnnotation}
         scale={scale}
       />
+      {info && (
+        <StampLayer
+          documentId={documentId}
+          pageIndex={pageIndex}
+          pageWidth={info.width}
+          pageHeight={info.height}
+          readOnly={readOnly}
+          canAnnotate={canAnnotate}
+          annotations={annotations}
+          selectedName={selectedAnnotation?.name ?? null}
+          armed={armedStamp}
+          onSelect={onSelectAnnotation}
+          onPlaced={onStampPlaced}
+          onArmedChange={onArmedStampChange}
+          onChanged={onAnnotationsChanged}
+        />
+      )}
     </div>
   );
 }

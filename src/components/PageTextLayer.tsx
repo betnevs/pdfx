@@ -1281,6 +1281,7 @@ export function PageTextLayer({
       ))}
 
       {selectedAnnotation?.pageIndex === pageIndex &&
+        selectedAnnotation.kind !== "stamp" &&
         selectedAnnotation.rects.map((rect, index) => (
           <div
             key={`selected:${index}:${rect.x}:${rect.y}`}

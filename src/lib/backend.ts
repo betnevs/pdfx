@@ -313,8 +313,48 @@ export interface CreateTextMarkupRequest {
   rects: TextMarkupRect[];
 }
 
+/** The annotation kinds the list and property panel show. */
+export type AnnotationKind = TextMarkupKind | "stamp";
+
+/** The four built-in stamps. */
+export type StampKind = "approved" | "draft" | "confidential" | "rejected";
+
 /**
- * A native text markup annotation read back from the in-memory document.
+ * A stamp frame in display-space page points: top-left origin and clockwise
+ * rotation in degrees, the same convention as the Text Box overlay.
+ */
+export interface StampFrameView {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  rotation: number;
+}
+
+/** The built-in design and editable frame of a stamp annotation. */
+export interface StampView {
+  kind: StampKind;
+  frame: StampFrameView;
+}
+
+/** Places one built-in stamp with the given opacity percentage. */
+export interface CreateStampRequest {
+  pageIndex: number;
+  kind: StampKind;
+  /** Constant opacity in percent (0-100); the ink colour comes from the kind. */
+  opacity: number;
+  /** Display-space frame. */
+  frame: StampFrameView;
+}
+
+/** Moves, resizes or rotates a stamp as one undoable action. */
+export interface TransformStampRequest {
+  name: string;
+  frame: StampFrameView;
+}
+
+/**
+ * A native annotation read back from the in-memory document.
  *
  * `name` is the stable `/NM` identity used by locate, restyle and delete.
  * `author` and `createdAt` are copied into the PDF at creation time; `createdAt`
@@ -323,12 +363,15 @@ export interface CreateTextMarkupRequest {
 export interface AnnotationView {
   name: string;
   pageIndex: number;
-  kind: TextMarkupKind;
+  kind: AnnotationKind;
   author: string | null;
   createdAt: string | null;
   color: string;
   opacity: number;
+  /** Display-space boxes: one per markup quad, or the stamp's display bounds. */
   rects: TextMarkupRect[];
+  /** Set only for stamp annotations. */
+  stamp: StampView | null;
 }
 
 /** The outcome of creating, restyling or deleting one annotation. */
@@ -734,7 +777,32 @@ export async function createTextMarkupAnnotation(
   });
 }
 
-/** Lists every text markup annotation in the document, in page order. */
+/**
+ * Places one built-in stamp on a page as a native Stamp annotation. The author
+ * comes from the persisted settings on the Rust side.
+ */
+export async function createStampAnnotation(
+  documentId: string,
+  request: CreateStampRequest,
+): Promise<AnnotationMutationView> {
+  return invoke<AnnotationMutationView>("create_stamp_annotation", {
+    documentId,
+    request,
+  });
+}
+
+/** Moves, resizes or rotates a stamp in one undoable step. */
+export async function transformStampAnnotation(
+  documentId: string,
+  request: TransformStampRequest,
+): Promise<AnnotationMutationView> {
+  return invoke<AnnotationMutationView>("transform_stamp_annotation", {
+    documentId,
+    request,
+  });
+}
+
+/** Lists every PDFX markup and stamp annotation in page order. */
 export async function listAnnotations(
   documentId: string,
 ): Promise<AnnotationView[]> {

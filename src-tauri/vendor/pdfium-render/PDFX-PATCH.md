@@ -47,7 +47,7 @@ safe wrapper lives in `src-tauri/src/pdfium_adapter.rs`.
 
 ## Patch scope
 
-Eight files change. Each hunk is additive; no upstream behaviour changes.
+Nine files change. Each hunk is additive; no upstream behaviour changes.
 
 ### `src/pdf/document.rs`
 
@@ -117,6 +117,11 @@ Added to the `PdfPageAnnotation` enum (available on every annotation type):
 - Added `PdfPageStrikeoutAnnotation::close(self)` calling
   `FPDFPage_CloseAnnot()`.
 
+### `src/pdf/document/page/annotation/stamp.rs`
+
+- Added `PdfPageStampAnnotation::close(self)` calling
+  `FPDFPage_CloseAnnot()`.
+
 ## Verification
 
 The patch is exercised through the safe adapter in
@@ -150,9 +155,9 @@ cargo test
    sha256 here.
 2. Replace everything in this directory with the new crate contents plus
    `LICENSE.md`, keeping `PDFX-PATCH.md`.
-3. Re-apply the hunks above (eight files). `diff -u` against the pristine crate
+3. Re-apply the hunks above (nine files). `diff -u` against the pristine crate
    source (cargo registry unpack directory or a fresh extract of the `.crate`)
-   is the authoritative patch; keep the diff to those eight files.
+   is the authoritative patch; keep the diff to those nine files.
 4. Update `src-tauri/Cargo.toml` version if the patched range changes, then
    build. `pdfium-render` tracks the PDFium API, so re-run the adapter tests
    against the pinned PDFium build first.
@@ -164,9 +169,9 @@ cargo test
 
 - Upstream concrete annotation types (e.g. `PdfPageCircleAnnotation`) have no
   `Drop`; only the `PdfPageAnnotation` enum closes its annotation handle. The
-  patch adds `close(self)` to the five types PDFX creates (circle, ink,
-  highlight, underline, strikeout), and the adapter calls it immediately after
-  setting bounds. Other concrete annotation types keep upstream behaviour, so
+  patch adds `close(self)` to the six types PDFX creates (circle, ink,
+  highlight, underline, strikeout, stamp), and the adapter calls it immediately
+  after setting bounds. Other concrete annotation types keep upstream behaviour, so
   callers creating them directly must close them explicitly if the patch is
   extended to expose them. Later adapter operations fetch the annotation
   through the enum, which does close the handle.

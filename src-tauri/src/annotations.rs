@@ -31,17 +31,24 @@ use crate::commands::{
 use crate::pdfium_adapter::{
     annotation_author, annotation_bounds, annotation_color, annotation_creation_date,
     annotation_name, annotation_quads, annotation_string_value, annotation_type,
-    append_annotation_quads, create_text_markup_annotation as create_markup_annotation,
-    remove_annotation, set_annotation_appearance, set_annotation_author, set_annotation_color,
+    append_annotation_quads, create_stamp_annotation as create_stamp_pdf_annotation,
+    create_text_markup_annotation as create_markup_annotation, remove_annotation,
+    set_annotation_appearance, set_annotation_author, set_annotation_color,
     set_annotation_creation_date, set_annotation_name, set_annotation_string_value, AnnotationRect,
     AnnotationRef, TextMarkupAnnotationKind,
 };
 use crate::settings::Settings;
+use crate::stamps::{
+    display_bounds, validate_frame, StampFrame, StampFrameView, StampKind, StampView,
+};
 use crate::text_edit::{push_annotation_action, EditHistoryView};
 
 /// Private annotation keys mirroring `/C` and `/CA` for reliable read-back.
 const COLOR_KEY: &str = "PDFXColor";
 const OPACITY_KEY: &str = "PDFXOpacity";
+/// Identity of a built-in stamp kind and its rotation-capable frame.
+const STAMP_KEY: &str = "PDFXStamp";
+const STAMP_FRAME_KEY: &str = "PDFXStampFrame";
 const DEFAULT_MARKUP_COLOR: &str = "#ffd400";
 /// Underline and strikeout stroke width in page points.
 const MARKUP_LINE_WIDTH: f32 = 1.5;
@@ -56,6 +63,27 @@ pub enum TextMarkupKind {
     Highlight,
     Underline,
     Strikeout,
+}
+
+/// The annotation kinds the list and property panel show. Stamps carry their
+/// built-in design separately in [`AnnotationView::stamp`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AnnotationKind {
+    Highlight,
+    Underline,
+    Strikeout,
+    Stamp,
+}
+
+impl From<TextMarkupKind> for AnnotationKind {
+    fn from(kind: TextMarkupKind) -> Self {
+        match kind {
+            TextMarkupKind::Highlight => Self::Highlight,
+            TextMarkupKind::Underline => Self::Underline,
+            TextMarkupKind::Strikeout => Self::Strikeout,
+        }
+    }
 }
 
 impl From<TextMarkupKind> for TextMarkupAnnotationKind {
@@ -105,19 +133,42 @@ pub struct CreateTextMarkupRequest {
     pub rects: Vec<TextMarkupRect>,
 }
 
+/// The frontend's request to place one built-in stamp.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateStampRequest {
+    pub page_index: u32,
+    pub kind: StampKind,
+    /// Opacity percentage (0-100). The ink colour comes from the stamp kind.
+    pub opacity: u8,
+    /// Frame in display-space points.
+    pub frame: StampFrameView,
+}
+
+/// The frontend's request to move, resize or rotate a stamp.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransformStampRequest {
+    pub name: String,
+    pub frame: StampFrameView,
+}
+
 /// One annotation as the annotation list and overlay consume it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AnnotationView {
     pub name: String,
     pub page_index: u32,
-    pub kind: TextMarkupKind,
+    pub kind: AnnotationKind,
     pub author: Option<String>,
     pub created_at: Option<String>,
     pub color: String,
     pub opacity: u8,
-    /// Display-space boxes, one per quadrilateral.
+    /// Display-space boxes: one per quadrilateral for markup, and the rotated
+    /// stamp's axis-aligned display bounds for a stamp.
     pub rects: Vec<TextMarkupRect>,
+    /// The built-in design and editable frame; `None` for text markup.
+    pub stamp: Option<StampView>,
 }
 
 /// The outcome of creating, restyling or deleting one annotation.
@@ -130,22 +181,66 @@ pub struct AnnotationMutationView {
     pub history: EditHistoryView,
 }
 
+/// The geometry that distinguishes one annotation kind from another.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum AnnotationContent {
+    Markup {
+        kind: TextMarkupKind,
+        /// Quadrilaterals in PDF user space, in the order PDFX creates them.
+        quads: Vec<[f32; 8]>,
+        /// Display-space boxes derived from `quads`, kept for the list/overlay.
+        rects: Vec<TextMarkupRect>,
+    },
+    Stamp {
+        kind: StampKind,
+        /// Frame in PDF user space.
+        frame: StampFrame,
+        /// The same frame in display space, captured for the list/overlay.
+        frame_view: StampFrameView,
+        /// Display-space axis-aligned bounds of the rotated frame.
+        rects: Vec<TextMarkupRect>,
+    },
+}
+
+impl AnnotationContent {
+    fn kind(&self) -> AnnotationKind {
+        match self {
+            Self::Markup { kind, .. } => (*kind).into(),
+            Self::Stamp { .. } => AnnotationKind::Stamp,
+        }
+    }
+
+    fn rects(&self) -> &[TextMarkupRect] {
+        match self {
+            Self::Markup { rects, .. } | Self::Stamp { rects, .. } => rects,
+        }
+    }
+
+    fn stamp(&self) -> Option<StampView> {
+        match self {
+            Self::Stamp {
+                kind, frame_view, ..
+            } => Some(StampView {
+                kind: *kind,
+                frame: *frame_view,
+            }),
+            Self::Markup { .. } => None,
+        }
+    }
+}
+
 /// Everything undo/redo needs to recreate an annotation or restyle it.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct AnnotationSnapshot {
     pub(crate) page_index: u32,
     pub(crate) name: String,
-    pub(crate) kind: TextMarkupKind,
     pub(crate) author: Option<String>,
     pub(crate) created_at: Option<String>,
     pub(crate) color: String,
     pub(crate) opacity: u8,
-    /// Bounds in PDF user space.
+    /// Bounds in PDF user space, used as the annotation `/Rect`.
     pub(crate) rect: AnnotationRect,
-    /// Quadrilaterals in PDF user space, in the order PDFX creates them.
-    pub(crate) quads: Vec<[f32; 8]>,
-    /// Display-space boxes derived from `quads`, kept for the list/overlay.
-    pub(crate) rects: Vec<TextMarkupRect>,
+    pub(crate) content: AnnotationContent,
 }
 
 impl AnnotationSnapshot {
@@ -153,12 +248,13 @@ impl AnnotationSnapshot {
         AnnotationView {
             name: self.name.clone(),
             page_index: self.page_index,
-            kind: self.kind,
+            kind: self.content.kind(),
             author: self.author.clone(),
             created_at: self.created_at.clone(),
             color: self.color.clone(),
             opacity: self.opacity,
-            rects: self.rects.clone(),
+            rects: self.content.rects().to_vec(),
+            stamp: self.content.stamp(),
         }
     }
 }
@@ -509,12 +605,6 @@ fn capture_snapshot(
     geometry: &DisplayGeometry,
 ) -> Result<AnnotationSnapshot, CommandError> {
     let annotation_type = annotation_type(document, target).map_err(map_adapter_error)?;
-    let kind = TextMarkupKind::from_pdfium(annotation_type).ok_or_else(|| {
-        internal_error(format!(
-            "annotation {} on page {page_index} is not a text markup annotation",
-            target.index
-        ))
-    })?;
     let name = annotation_name(document, target)
         .map_err(map_adapter_error)?
         .filter(|name| !name.trim().is_empty())
@@ -522,87 +612,151 @@ fn capture_snapshot(
     let author = annotation_author(document, target).map_err(map_adapter_error)?;
     let created_at = annotation_creation_date(document, target).map_err(map_adapter_error)?;
     let measured = annotation_color(document, target).ok();
-    let color = annotation_string_value(document, target, COLOR_KEY)
-        .map_err(map_adapter_error)?
-        .unwrap_or_else(|| {
-            measured
-                .map(|(red, green, blue, _)| format_color(red, green, blue))
-                .unwrap_or_else(|| DEFAULT_MARKUP_COLOR.to_owned())
-        });
+    let stored_color =
+        annotation_string_value(document, target, COLOR_KEY).map_err(map_adapter_error)?;
     let opacity = annotation_string_value(document, target, OPACITY_KEY)
         .map_err(map_adapter_error)?
         .and_then(|value| value.parse::<u8>().ok())
         .filter(|opacity| *opacity <= 100)
         .or_else(|| measured.map(|(_, _, _, alpha)| alpha_to_opacity(alpha)))
         .unwrap_or(100);
-    let quads = annotation_quads(document, target).map_err(map_adapter_error)?;
     let rect = annotation_bounds(document, target).map_err(map_adapter_error)?;
-    let rects = display_rects(geometry, &quads);
+
+    let (content, color) = match annotation_type {
+        PdfPageAnnotationType::Stamp => {
+            let kind = annotation_string_value(document, target, STAMP_KEY)
+                .map_err(map_adapter_error)?
+                .and_then(|value| StampKind::parse(&value))
+                .ok_or_else(|| {
+                    internal_error(format!(
+                        "stamp annotation {} on page {page_index} was not created by PDFX",
+                        target.index
+                    ))
+                })?;
+            let frame = annotation_string_value(document, target, STAMP_FRAME_KEY)
+                .map_err(map_adapter_error)?
+                .and_then(|value| StampFrame::decode(&value))
+                .unwrap_or_else(|| StampFrame::from_rect(rect));
+            let frame_view = frame.to_view(geometry);
+            let (x, y, width, height) = display_bounds(&frame_view);
+            let color = stored_color.unwrap_or_else(|| kind.color().to_owned());
+            (
+                AnnotationContent::Stamp {
+                    kind,
+                    frame,
+                    frame_view,
+                    rects: vec![TextMarkupRect {
+                        x,
+                        y,
+                        width,
+                        height,
+                    }],
+                },
+                color,
+            )
+        }
+        other => {
+            let kind = TextMarkupKind::from_pdfium(other).ok_or_else(|| {
+                internal_error(format!(
+                    "annotation {} on page {page_index} is not a text markup annotation",
+                    target.index
+                ))
+            })?;
+            let color = stored_color.unwrap_or_else(|| {
+                measured
+                    .map(|(red, green, blue, _)| format_color(red, green, blue))
+                    .unwrap_or_else(|| DEFAULT_MARKUP_COLOR.to_owned())
+            });
+            let quads = annotation_quads(document, target).map_err(map_adapter_error)?;
+            let rects = display_rects(geometry, &quads);
+            (AnnotationContent::Markup { kind, quads, rects }, color)
+        }
+    };
+
     Ok(AnnotationSnapshot {
         page_index,
         name,
-        kind,
         author,
         created_at,
         color,
         opacity,
         rect,
-        quads,
-        rects,
+        content,
     })
 }
 
 /// Identity and style written onto a newly created (or restored) annotation.
-struct MarkupProperties<'a> {
+struct AnnotationProperties<'a> {
     name: &'a str,
     author: Option<&'a str>,
     created_at: Option<&'a str>,
     color: &'a str,
     opacity: u8,
-    kind: TextMarkupKind,
 }
 
-/// Writes the standard properties every PDFX-created markup annotation carries.
-/// The appearance stream must be installed last: Pdfium fixes the Form XObject
-/// `/BBox` from `/Rect` at that moment.
-fn write_annotation_properties(
+/// Writes the properties shared by markup and stamps. The appearance stream is
+/// installed afterwards by the kind-specific writer: Pdfium fixes the Form
+/// XObject `/BBox` from `/Rect` at that moment, so geometry must be final.
+fn write_common_properties(
     document: &PdfDocument<'static>,
     target: AnnotationRef,
-    properties: MarkupProperties<'_>,
-    quads: &[[f32; 8]],
+    properties: &AnnotationProperties<'_>,
 ) -> Result<(), CommandError> {
-    let MarkupProperties {
-        name,
-        author,
-        created_at,
-        color,
-        opacity,
-        kind,
-    } = properties;
-    let rgb = parse_color(color)?;
-    set_annotation_name(document, target, name).map_err(map_adapter_error)?;
-    if let Some(author) = author {
+    let rgb = parse_color(properties.color)?;
+    set_annotation_name(document, target, properties.name).map_err(map_adapter_error)?;
+    if let Some(author) = properties.author {
         set_annotation_author(document, target, author).map_err(map_adapter_error)?;
     }
-    if let Some(created_at) = created_at {
+    if let Some(created_at) = properties.created_at {
         set_annotation_creation_date(document, target, created_at).map_err(map_adapter_error)?;
     }
-    append_annotation_quads(document, target, quads).map_err(map_adapter_error)?;
-    set_annotation_string_value(document, target, COLOR_KEY, color).map_err(map_adapter_error)?;
-    set_annotation_string_value(document, target, OPACITY_KEY, &opacity.to_string())
+    set_annotation_string_value(document, target, COLOR_KEY, properties.color)
         .map_err(map_adapter_error)?;
+    set_annotation_string_value(
+        document,
+        target,
+        OPACITY_KEY,
+        &properties.opacity.to_string(),
+    )
+    .map_err(map_adapter_error)?;
     set_annotation_color(
         document,
         target,
         rgb.0,
         rgb.1,
         rgb.2,
-        opacity_to_alpha(opacity),
+        opacity_to_alpha(properties.opacity),
     )
-    .map_err(map_adapter_error)?;
+    .map_err(map_adapter_error)
+}
+
+fn write_markup_properties(
+    document: &PdfDocument<'static>,
+    target: AnnotationRef,
+    properties: &AnnotationProperties<'_>,
+    kind: TextMarkupKind,
+    quads: &[[f32; 8]],
+) -> Result<(), CommandError> {
+    write_common_properties(document, target, properties)?;
+    append_annotation_quads(document, target, quads).map_err(map_adapter_error)?;
+    let rgb = parse_color(properties.color)?;
     set_annotation_appearance(document, target, &appearance_stream(kind, rgb, quads))
+        .map_err(map_adapter_error)
+}
+
+fn write_stamp_properties(
+    document: &PdfDocument<'static>,
+    target: AnnotationRef,
+    properties: &AnnotationProperties<'_>,
+    kind: StampKind,
+    frame: &StampFrame,
+) -> Result<(), CommandError> {
+    write_common_properties(document, target, properties)?;
+    set_annotation_string_value(document, target, STAMP_KEY, kind.key())
         .map_err(map_adapter_error)?;
-    Ok(())
+    set_annotation_string_value(document, target, STAMP_FRAME_KEY, &frame.encode())
+        .map_err(map_adapter_error)?;
+    set_annotation_appearance(document, target, &frame.appearance(kind)).map_err(map_adapter_error)
 }
 
 /// Recreates the annotation described by `snapshot`, first removing any
@@ -616,26 +770,33 @@ pub(crate) fn restore_annotation_snapshot(
     if let Some(existing) = find_target(document, &snapshot.name)? {
         remove_annotation(document, existing).map_err(map_adapter_error)?;
     }
-    let target = create_markup_annotation(
-        document,
-        snapshot.page_index as i32,
-        snapshot.kind.into(),
-        snapshot.rect,
-    )
+    let target = match &snapshot.content {
+        AnnotationContent::Markup { kind, .. } => create_markup_annotation(
+            document,
+            snapshot.page_index as i32,
+            (*kind).into(),
+            snapshot.rect,
+        ),
+        AnnotationContent::Stamp { .. } => {
+            create_stamp_pdf_annotation(document, snapshot.page_index as i32, snapshot.rect)
+        }
+    }
     .map_err(map_adapter_error)?;
-    write_annotation_properties(
-        document,
-        target,
-        MarkupProperties {
-            name: &snapshot.name,
-            author: snapshot.author.as_deref(),
-            created_at: snapshot.created_at.as_deref(),
-            color: &snapshot.color,
-            opacity: snapshot.opacity,
-            kind: snapshot.kind,
-        },
-        &snapshot.quads,
-    )
+    let properties = AnnotationProperties {
+        name: &snapshot.name,
+        author: snapshot.author.as_deref(),
+        created_at: snapshot.created_at.as_deref(),
+        color: &snapshot.color,
+        opacity: snapshot.opacity,
+    };
+    match &snapshot.content {
+        AnnotationContent::Markup { kind, quads, .. } => {
+            write_markup_properties(document, target, &properties, *kind, quads)
+        }
+        AnnotationContent::Stamp { kind, frame, .. } => {
+            write_stamp_properties(document, target, &properties, *kind, frame)
+        }
+    }
 }
 
 /// Removes the annotation with `name`. Used by undo/redo for actions with no
@@ -680,17 +841,17 @@ pub fn create_text_markup_with_author(
             bounds,
         )
         .map_err(map_adapter_error)?;
-        write_annotation_properties(
+        write_markup_properties(
             &entry.document,
             target,
-            MarkupProperties {
+            &AnnotationProperties {
                 name: &name,
                 author: Some(&author),
                 created_at: Some(&created_at),
                 color: &color,
                 opacity: request.opacity,
-                kind: request.kind,
             },
+            request.kind,
             &quads,
         )?;
 
@@ -726,7 +887,149 @@ pub fn create_text_markup_annotation(
     create_text_markup_from_settings(document_id, &settings, request)
 }
 
-/// Lists every named text markup annotation, grouped by page order.
+/// Places one built-in stamp attributed to `author`.
+///
+/// The stamp is a native Stamp annotation with a generated appearance; like
+/// markup creation, the command layer supplies the author from settings.
+pub fn create_stamp_with_author(
+    document_id: String,
+    author: String,
+    request: CreateStampRequest,
+) -> Result<AnnotationMutationView, CommandError> {
+    let author = normalize_author(&author)?;
+    validate_frame(&request.frame)?;
+    if request.opacity > 100 {
+        return Err(invalid_argument(
+            "the annotation opacity must be between 0 and 100",
+        ));
+    }
+    with_open_document(&document_id, |entry| {
+        ensure_annotation_editable(&entry.document)?;
+        let geometry = page_geometry(&entry.document, request.page_index)?;
+        let frame = StampFrame::from_view(&geometry, request.frame)?;
+        let name = next_annotation_name();
+        let created_at = pdf_date_now();
+        let color = request.kind.color();
+
+        let target =
+            create_stamp_pdf_annotation(&entry.document, request.page_index as i32, frame.bounds())
+                .map_err(map_adapter_error)?;
+        write_stamp_properties(
+            &entry.document,
+            target,
+            &AnnotationProperties {
+                name: &name,
+                author: Some(&author),
+                created_at: Some(&created_at),
+                color,
+                opacity: request.opacity,
+            },
+            request.kind,
+            &frame,
+        )?;
+
+        let snapshot = capture_snapshot(&entry.document, request.page_index, target, &geometry)?;
+        let view = snapshot.view();
+        let history = push_annotation_action(entry, request.page_index, name, None, Some(snapshot));
+        Ok(AnnotationMutationView {
+            annotation: Some(view),
+            page_index: request.page_index,
+            history,
+        })
+    })
+}
+
+/// Creates a stamp using the author from persisted settings.
+pub fn create_stamp_from_settings(
+    document_id: String,
+    settings: &Settings,
+    request: CreateStampRequest,
+) -> Result<AnnotationMutationView, CommandError> {
+    create_stamp_with_author(document_id, settings.annotation_author.clone(), request)
+}
+
+/// The `create_stamp_annotation` command. The author is read from settings at
+/// creation time and never accepted from the frontend.
+#[tauri::command]
+pub fn create_stamp_annotation(
+    app: AppHandle,
+    document_id: String,
+    request: CreateStampRequest,
+) -> Result<AnnotationMutationView, CommandError> {
+    let settings = crate::commands::settings_store(&app)?.load();
+    create_stamp_from_settings(document_id, &settings, request)
+}
+
+/// Moves, resizes or rotates a stamp in one undoable step.
+#[tauri::command]
+pub fn transform_stamp_annotation(
+    document_id: String,
+    request: TransformStampRequest,
+) -> Result<AnnotationMutationView, CommandError> {
+    validate_frame(&request.frame)?;
+    with_open_document(&document_id, |entry| {
+        ensure_annotation_editable(&entry.document)?;
+        let Some((page_index, target, geometry)) = locate(&entry.document, &request.name)? else {
+            return Err(invalid_argument(format!(
+                "no annotation named {} exists in this document",
+                request.name
+            )));
+        };
+        let before = capture_snapshot(&entry.document, page_index, target, &geometry)?;
+        let AnnotationContent::Stamp { kind, .. } = before.content else {
+            return Err(invalid_argument(
+                "only stamp annotations can be moved, resized or rotated",
+            ));
+        };
+        let frame = StampFrame::from_view(&geometry, request.frame)?;
+        let frame_view = frame.to_view(&geometry);
+        let (x, y, width, height) = display_bounds(&frame_view);
+        let mut after = before.clone();
+        after.rect = frame.bounds();
+        after.content = AnnotationContent::Stamp {
+            kind,
+            frame,
+            frame_view,
+            rects: vec![TextMarkupRect {
+                x,
+                y,
+                width,
+                height,
+            }],
+        };
+        restore_annotation_snapshot(&entry.document, &after)?;
+        let view = after.view();
+        let history =
+            push_annotation_action(entry, page_index, request.name, Some(before), Some(after));
+        Ok(AnnotationMutationView {
+            annotation: Some(view),
+            page_index,
+            history,
+        })
+    })
+}
+
+/// Whether an annotation is one PDFX can list and manage. Foreign stamps have
+/// no `/PDFXStamp` identity and are rendered by Pdfium but not listed.
+fn is_managed_annotation(
+    document: &PdfDocument<'static>,
+    target: AnnotationRef,
+    annotation_type: PdfPageAnnotationType,
+) -> Result<bool, CommandError> {
+    if TextMarkupKind::from_pdfium(annotation_type).is_some() {
+        return Ok(true);
+    }
+    if annotation_type != PdfPageAnnotationType::Stamp {
+        return Ok(false);
+    }
+    Ok(annotation_string_value(document, target, STAMP_KEY)
+        .map_err(map_adapter_error)?
+        .and_then(|value| StampKind::parse(&value))
+        .is_some())
+}
+
+/// Lists every named text markup and PDFX stamp annotation, grouped by page
+/// order.
 #[tauri::command]
 pub fn list_annotations(document_id: String) -> Result<Vec<AnnotationView>, CommandError> {
     with_open_document(&document_id, |entry| {
@@ -749,7 +1052,7 @@ pub fn list_annotations(document_id: String) -> Result<Vec<AnnotationView>, Comm
                 let Ok(annotation_type) = annotation_type(document, target) else {
                     continue;
                 };
-                if TextMarkupKind::from_pdfium(annotation_type).is_none() {
+                if !is_managed_annotation(document, target, annotation_type)? {
                     continue;
                 }
                 let named = annotation_name(document, target)
@@ -792,7 +1095,12 @@ pub fn update_annotation_style(
         };
         let before = capture_snapshot(&entry.document, page_index, target, &geometry)?;
         let mut after = before.clone();
-        after.color = color;
+        // A stamp's ink is part of its built-in design, so the panel only
+        // changes its opacity. Markup keeps the requested colour.
+        after.color = match &before.content {
+            AnnotationContent::Markup { .. } => color,
+            AnnotationContent::Stamp { kind, .. } => kind.color().to_owned(),
+        };
         after.opacity = opacity;
         restore_annotation_snapshot(&entry.document, &after)?;
         let view = after.view();

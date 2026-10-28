@@ -13,8 +13,8 @@ use base64::Engine as _;
 use lopdf::Object;
 use pdfx_lib::annotations::{
     create_text_markup_from_settings, create_text_markup_with_author, delete_annotation,
-    list_annotations, update_annotation_style, CreateTextMarkupRequest, TextMarkupKind,
-    TextMarkupRect,
+    list_annotations, update_annotation_style, AnnotationKind, CreateTextMarkupRequest,
+    TextMarkupKind, TextMarkupRect,
 };
 use pdfx_lib::commands::{
     close_document, extract_text_layer, open_document, render_page, CommandErrorCode, TextLayerView,
@@ -254,7 +254,7 @@ fn a_selection_highlight_saves_as_a_native_annotation_with_an_appearance_and_aut
     .expect("create highlight");
 
     let created = mutation.annotation.expect("created annotation view");
-    assert_eq!(created.kind, TextMarkupKind::Highlight);
+    assert_eq!(created.kind, AnnotationKind::Highlight);
     assert_eq!(created.author.as_deref(), Some("测试作者"));
     assert!(
         created
@@ -337,7 +337,7 @@ fn a_selection_highlight_saves_as_a_native_annotation_with_an_appearance_and_aut
         list_annotations(reopened.document_id.clone()).expect("list reopened");
     assert_eq!(reopened_annotations.len(), 1);
     assert_eq!(reopened_annotations[0].author.as_deref(), Some("测试作者"));
-    assert_eq!(reopened_annotations[0].kind, TextMarkupKind::Highlight);
+    assert_eq!(reopened_annotations[0].kind, AnnotationKind::Highlight);
     close_document(reopened.document_id).expect("close reopened");
 }
 
@@ -468,8 +468,8 @@ fn underline_and_strikeout_are_native_annotations_with_visible_appearance_ink() 
 
     let listed = list_annotations(document_id.clone()).expect("list annotations");
     assert_eq!(listed.len(), 2);
-    assert_eq!(listed[0].kind, TextMarkupKind::Underline);
-    assert_eq!(listed[1].kind, TextMarkupKind::Strikeout);
+    assert_eq!(listed[0].kind, AnnotationKind::Underline);
+    assert_eq!(listed[1].kind, AnnotationKind::Strikeout);
 
     let output = dir.path().join("lines.pdf");
     save_as(&document_id, &output);

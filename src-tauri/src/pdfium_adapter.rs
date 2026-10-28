@@ -3,10 +3,10 @@
 //! The adapter always operates on the same `PdfDocument` handle that holds
 //! high-level `pdfium-render` edits. It adds only the capabilities PDFium
 //! supports but `pdfium-render` 0.9.4 does not expose: flags-aware saves,
-//! circle-annotation creation, ink strokes, annotation border width, text
-//! markup annotations, annotation identity and custom appearance streams. The
-//! patch itself lives in `vendor/pdfium-render/PDFX-PATCH.md`; callers of this
-//! module never need `unsafe` and never touch a PDFium handle.
+//! circle- and stamp-annotation creation, ink strokes, annotation border
+//! width, text markup annotations, annotation identity and custom appearance
+//! streams. The patch itself lives in `vendor/pdfium-render/PDFX-PATCH.md`;
+//! callers of this module never need `unsafe` and never touch a PDFium handle.
 //!
 //! Saving is explicit: callers choose [SaveMode::Incremental] (append a
 //! revision whose output begins with the source bytes), [SaveMode::FullRewrite]
@@ -253,6 +253,24 @@ pub fn create_text_markup_annotation(
     Ok(AnnotationRef::new(page_index, annotations.len() - 1))
 }
 
+/// Creates a stamp annotation with `rect` bounds.
+///
+/// Pdfium does not generate an appearance for the annotation; callers install
+/// one with [`set_annotation_appearance`] before saving.
+pub fn create_stamp_annotation(
+    document: &PdfDocument<'_>,
+    page_index: i32,
+    rect: AnnotationRect,
+) -> Result<AnnotationRef, AdapterError> {
+    let pages = document.pages();
+    let mut page = pages.get(page_index)?;
+    let annotations = page.annotations_mut();
+    let mut annotation = annotations.create_stamp_annotation()?;
+    annotation.set_bounds(rect.to_pdf_rect())?;
+    annotation.close();
+    Ok(AnnotationRef::new(page_index, annotations.len() - 1))
+}
+
 /// Returns the [PdfPageAnnotationType] of the annotation identified by
 /// `target`.
 pub fn annotation_type(
@@ -286,11 +304,7 @@ pub fn annotation_author(
     document: &PdfDocument<'_>,
     target: AnnotationRef,
 ) -> Result<Option<String>, AdapterError> {
-    with_annotation_on(
-        document,
-        target,
-        |annotation| with_text_markup!(annotation, annotation => Ok(annotation.creator())),
-    )
+    with_annotation_on(document, target, |annotation| Ok(annotation.creator()))
 }
 
 /// Sets the annotation author (`/T`).
@@ -299,11 +313,9 @@ pub fn set_annotation_author(
     target: AnnotationRef,
     author: &str,
 ) -> Result<(), AdapterError> {
-    with_annotation_on(
-        document,
-        target,
-        |annotation| with_text_markup!(annotation, annotation => annotation.set_creator(author)),
-    )
+    with_annotation_on(document, target, |annotation| {
+        annotation.set_creator(author)
+    })
 }
 
 /// Returns the raw `/CreationDate` string, if any.
@@ -363,9 +375,7 @@ pub fn annotation_bounds(
     target: AnnotationRef,
 ) -> Result<AnnotationRect, AdapterError> {
     with_annotation_on(document, target, |annotation| {
-        with_text_markup!(annotation, annotation => {
-            annotation.bounds().map(AnnotationRect::from_pdf_rect)
-        })
+        annotation.bounds().map(AnnotationRect::from_pdf_rect)
     })
 }
 
@@ -375,11 +385,9 @@ pub fn annotation_color(
     target: AnnotationRef,
 ) -> Result<(u8, u8, u8, u8), AdapterError> {
     with_annotation_on(document, target, |annotation| {
-        with_text_markup!(annotation, annotation => {
-            annotation
-                .stroke_color()
-                .map(|color| (color.red(), color.green(), color.blue(), color.alpha()))
-        })
+        annotation
+            .stroke_color()
+            .map(|color| (color.red(), color.green(), color.blue(), color.alpha()))
     })
 }
 
@@ -393,9 +401,7 @@ pub fn set_annotation_color(
     alpha: u8,
 ) -> Result<(), AdapterError> {
     with_annotation_on(document, target, |annotation| {
-        with_text_markup!(annotation, annotation => {
-            annotation.set_stroke_color(PdfColor::new(red, green, blue, alpha))
-        })
+        annotation.set_stroke_color(PdfColor::new(red, green, blue, alpha))
     })
 }
 

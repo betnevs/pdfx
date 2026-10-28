@@ -388,6 +388,7 @@ describe("PDFX workspace", () => {
         color: "#ffd400",
         opacity: 50,
         rects: [{ x: 100, y: 100, width: 12, height: 20 }],
+        stamp: null,
       },
     ];
     installDocumentBackend({
@@ -438,6 +439,97 @@ describe("PDFX workspace", () => {
     expect(await screen.findByText("还没有注释")).toBeInTheDocument();
     expect(
       screen.queryByTestId("selected-annotation-outline"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("places a stamp from the panel on the page and selects it", async () => {
+    let annotations: unknown[] = [];
+    const placed = {
+      name: "pdfx-stamp-1",
+      pageIndex: 0,
+      kind: "stamp" as const,
+      author: "PDFX 用户",
+      createdAt: "D:20261028123456Z",
+      color: "#15803d",
+      opacity: 100,
+      rects: [{ x: 216, y: 366, width: 180, height: 60 }],
+      stamp: {
+        kind: "approved" as const,
+        frame: { x: 216, y: 366, width: 180, height: 60, rotation: 0 },
+      },
+    };
+    installDocumentBackend({
+      list_annotations: () => annotations,
+      create_stamp_annotation: () => {
+        annotations = [placed];
+        return {
+          annotation: placed,
+          pageIndex: 0,
+          history: {
+            canUndo: true,
+            canRedo: false,
+            revision: 1,
+            savedRevision: 0,
+            dirty: true,
+          },
+        };
+      },
+    });
+    openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("report.pdf");
+
+    await user.click(screen.getByRole("button", { name: "放置已批准图章" }));
+    expect(
+      screen.getByText("在页面上单击放置“已批准”图章。"),
+    ).toBeInTheDocument();
+
+    const layer = await screen.findByTestId("stamp-layer");
+    vi.spyOn(layer, "getBoundingClientRect").mockReturnValue({
+      x: 0,
+      y: 0,
+      left: 0,
+      top: 0,
+      right: 612,
+      bottom: 792,
+      width: 612,
+      height: 792,
+      toJSON: () => ({}),
+    } as DOMRect);
+    fireEvent.pointerDown(layer, {
+      button: 0,
+      clientX: 306,
+      clientY: 396,
+      pointerId: 9,
+    });
+
+    await waitFor(() => {
+      expect(commandCalls("create_stamp_annotation")).toEqual([
+        [
+          "create_stamp_annotation",
+          {
+            documentId: "doc-1",
+            request: {
+              pageIndex: 0,
+              kind: "approved",
+              opacity: 100,
+              frame: { x: 216, y: 366, width: 180, height: 60, rotation: 0 },
+            },
+          },
+        ],
+      ]);
+    });
+    expect(
+      await screen.findByRole("button", {
+        name: "图章 · 已批准，第 1 页，PDFX 用户",
+      }),
+    ).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByText("图章：已批准")).toBeInTheDocument();
+    expect(
+      screen.queryByText("在页面上单击放置“已批准”图章。"),
     ).not.toBeInTheDocument();
   });
 

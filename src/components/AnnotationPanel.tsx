@@ -5,15 +5,9 @@ import {
   toCommandError,
   updateAnnotationStyle,
   type AnnotationView,
-  type TextMarkupKind,
 } from "../lib/backend";
 import { notifyDocumentChanged } from "../lib/documentEvents";
-
-const KIND_LABELS: Record<TextMarkupKind, string> = {
-  highlight: "高亮",
-  underline: "下划线",
-  strikeout: "删除线",
-};
+import { annotationLabel, STAMP_LABELS } from "../lib/stampCatalog";
 
 /** Formats the backend's PDF date into the list's readable UTC label. */
 export function formatAnnotationTime(value: string | null): string | null {
@@ -89,9 +83,11 @@ export function AnnotationPanel({
   }, [annotations]);
 
   const editable = canAnnotate && !readOnly;
+  const isStamp = selected?.kind === "stamp";
   const styleChanged =
     selected !== null &&
-    (colorDraft !== selected.color || opacityDraft !== selected.opacity);
+    ((!isStamp && colorDraft !== selected.color) ||
+      opacityDraft !== selected.opacity);
 
   async function applyStyle() {
     if (!selected || !styleChanged || busy) {
@@ -103,7 +99,7 @@ export function AnnotationPanel({
       await updateAnnotationStyle(
         documentId,
         selected.name,
-        colorDraft,
+        selected.kind === "stamp" ? selected.color : colorDraft,
         opacityDraft,
       );
       onChanged();
@@ -163,7 +159,7 @@ export function AnnotationPanel({
       ) : annotations.length === 0 ? (
         <div className="annotation-empty">
           <p>还没有注释</p>
-          <p>选择页面文字即可添加高亮、下划线或删除线。</p>
+          <p>选择页面文字添加标记，或从上方图章面板放置图章。</p>
         </div>
       ) : (
         <div className="annotation-groups">
@@ -179,7 +175,7 @@ export function AnnotationPanel({
               </div>
               <ul className="annotation-items">
                 {pageAnnotations.map((annotation) => {
-                  const label = KIND_LABELS[annotation.kind];
+                  const label = annotationLabel(annotation);
                   const created = formatAnnotationTime(annotation.createdAt);
                   return (
                     <li key={annotation.name}>
@@ -219,16 +215,23 @@ export function AnnotationPanel({
 
       {selected && editable && (
         <div className="annotation-properties" aria-label="注释属性">
-          <label className="annotation-control">
-            <span>颜色</span>
-            <input
-              type="color"
-              aria-label="注释颜色"
-              value={colorDraft}
-              disabled={busy !== null}
-              onChange={(event) => setColorDraft(event.target.value)}
-            />
-          </label>
+          {selected.kind === "stamp" ? (
+            <p className="annotation-stamp-summary">
+              图章：
+              {selected.stamp ? STAMP_LABELS[selected.stamp.kind] : "内置"}
+            </p>
+          ) : (
+            <label className="annotation-control">
+              <span>颜色</span>
+              <input
+                type="color"
+                aria-label="注释颜色"
+                value={colorDraft}
+                disabled={busy !== null}
+                onChange={(event) => setColorDraft(event.target.value)}
+              />
+            </label>
+          )}
           <label className="annotation-control">
             <span>透明度</span>
             <input

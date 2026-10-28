@@ -8,6 +8,8 @@ pub mod pdfium_adapter;
 pub mod print_export;
 pub mod save;
 pub mod settings;
+mod stamp_glyphs;
+pub mod stamps;
 pub mod text_edit;
 pub mod updater;
 
@@ -63,6 +65,8 @@ pub fn run() {
             text_edit::redo_text_edit,
             text_edit::mark_document_saved,
             annotations::create_text_markup_annotation,
+            annotations::create_stamp_annotation,
+            annotations::transform_stamp_annotation,
             annotations::list_annotations,
             annotations::update_annotation_style,
             annotations::delete_annotation,
