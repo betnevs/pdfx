@@ -13,6 +13,7 @@ import {
   type PageImageView,
   type PageInfo,
   type PageRegionView,
+  type StampKind,
 } from "../lib/backend";
 import { onDocumentChanged } from "../lib/documentEvents";
 import {
@@ -27,6 +28,7 @@ import { FormLayer } from "./FormLayer";
 import { PageImageLayer } from "./PageImageLayer";
 import { PageTextLayer } from "./PageTextLayer";
 import { ShapeLayer } from "./ShapeLayer";
+import { StampLayer } from "./StampLayer";
 
 /** Fixed cell height keeps thumbnail virtualization independent of page sizes. */
 const THUMBNAIL_ITEM_HEIGHT = 168;
@@ -394,9 +396,14 @@ export function PageSurface({
   canAnnotate,
   annotations,
   selectedAnnotation,
+  armedStamp,
   onSelectAnnotation,
+  onStampPlaced,
+  onArmedStampChange,
+  onAnnotationsChanged,
   surfaceRef,
   canFillForms = false,
+  canModifyContent = false,
   formFocusFieldId = null,
   onFormFocusHandled,
   onSelectPage,
@@ -411,10 +418,16 @@ export function PageSurface({
   canAnnotate: boolean;
   annotations: AnnotationView[];
   selectedAnnotation: AnnotationView | null;
+  armedStamp: StampKind | null;
   onSelectAnnotation: (annotation: AnnotationView | null) => void;
+  onStampPlaced: (annotation: AnnotationView) => void;
+  onArmedStampChange: (kind: StampKind | null) => void;
+  onAnnotationsChanged: () => void;
   surfaceRef: RefObject<HTMLDivElement | null>;
   /** Permission Restrictions allow filling existing form fields. */
   canFillForms?: boolean;
+  /** Permission Restrictions allow creating and changing form fields. */
+  canModifyContent?: boolean;
   /** Widget to focus after the caller navigated to its page. */
   formFocusFieldId?: string | null;
   onFormFocusHandled?: () => void;
@@ -501,6 +514,7 @@ export function PageSurface({
             pageHeight={info.height}
             scale={scale}
             canFillForms={canFillForms}
+            canModifyContent={canModifyContent}
             focusFieldId={formFocusFieldId}
             onFocusHandled={onFormFocusHandled}
             onSelectPage={onSelectPage}
@@ -520,6 +534,23 @@ export function PageSurface({
           annotations={annotations}
           selectedAnnotation={selectedAnnotation}
           onSelectAnnotation={onSelectAnnotation}
+        />
+      )}
+      {info && (
+        <StampLayer
+          documentId={documentId}
+          pageIndex={pageIndex}
+          pageWidth={info.width}
+          pageHeight={info.height}
+          readOnly={readOnly}
+          canAnnotate={canAnnotate}
+          annotations={annotations}
+          selectedName={selectedAnnotation?.name ?? null}
+          armed={armedStamp}
+          onSelect={onSelectAnnotation}
+          onPlaced={onStampPlaced}
+          onArmedChange={onArmedStampChange}
+          onChanged={onAnnotationsChanged}
         />
       )}
     </div>

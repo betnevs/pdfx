@@ -122,8 +122,8 @@ pub async fn save_document(
 /// An object-level change PDFium cannot make itself. These are applied as one
 /// `lopdf` revision appended after PDFium's incremental revision. Text and
 /// Text Box edits are PDFium page-object edits, so they do not appear here;
-/// AcroForm and font-embedding edits will.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// AcroForm creation and its embedded appearance font do.
+#[derive(Debug, Clone, PartialEq)]
 pub enum ObjectEdit {
     /// Sets an entry in the document `/Info` dictionary.
     SetInfoEntry { key: String, value: String },
@@ -135,6 +135,12 @@ pub enum ObjectEdit {
     SetRadioGroup { field_name: String, state: String },
     /// Sets a choice field's `/V` and, when the label is one of `/Opt`, `/I`.
     SetChoiceValue { field_name: String, label: String },
+    /// Writes the AcroForm text fields created in this session: `/AcroForm`,
+    /// `/Fields`, `/DA`, `/DR`, widget dictionaries, appearance streams and
+    /// the embedded CJK font subset.
+    CreateTextFields {
+        fields: Vec<crate::form_create::TextFieldSpec>,
+    },
 }
 
 /// Per-document save state, kept next to the PDFium document.
@@ -189,6 +195,10 @@ pub fn save_document_with_progress(
         // the output without a second copy of form state.
         let mut object_edits = entry.save.object_edits.clone();
         object_edits.extend(crate::form::save_object_edits(&entry.edit));
+        // Created form fields are re-derived from the session on every save,
+        // so repeated saves cannot duplicate them and undo/redo is reflected
+        // in the output.
+        object_edits.extend(crate::form_create::save_object_edits(&entry.edit));
         let output_bytes = append_object_edits(output_bytes, &object_edits)?;
 
         emit(document_id, SaveStage::Writing, 3, progress);
@@ -417,6 +427,9 @@ fn apply_object_edit(
         }
         ObjectEdit::SetChoiceValue { field_name, label } => {
             apply_choice_value(incremental, field_name, label)
+        }
+        ObjectEdit::CreateTextFields { fields } => {
+            crate::form_create::apply_created_fields(incremental, fields)
         }
     }
 }

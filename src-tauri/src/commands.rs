@@ -106,6 +106,10 @@ pub enum CommandErrorCode {
     FormFillNotPermitted,
     /// The value does not match the widget type or one of its options.
     FormValueInvalid,
+    /// A new form field needs a non-blank, bounded name.
+    FormFieldNameInvalid,
+    /// Another field in the document already uses the requested name.
+    FormFieldNameDuplicate,
     UpdateNotConfigured,
     UpdateCheckFailed,
     UpdateManifestInvalid,

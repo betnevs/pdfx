@@ -696,6 +696,156 @@ button {
   pointer-events: none;
 }
 
+.form-layer--placing {
+  pointer-events: auto;
+  cursor: crosshair;
+}
+
+.form-layer--placing .form-field,
+.form-layer--placing .form-field-panel {
+  pointer-events: none;
+}
+
+.form-layer-toolbar {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 6;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  max-width: calc(100% - 16px);
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--pdfx-pill-bg);
+  color: var(--pdfx-pill-text);
+  font-size: 12px;
+  line-height: 1.4;
+  user-select: none;
+  pointer-events: auto;
+}
+
+.form-layer-toolbar button {
+  padding: 2px 8px;
+  border: 1px solid var(--pdfx-pill-border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--pdfx-pill-text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.form-layer-toolbar button:hover:enabled {
+  background: var(--pdfx-pill-hover);
+}
+
+.form-layer-toolbar button[aria-pressed="true"] {
+  background: var(--pdfx-pill-active);
+}
+
+.form-layer-toolbar button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.form-edit-reason {
+  color: var(--pdfx-status-warning);
+}
+
+.form-field-create-preview {
+  position: absolute;
+  z-index: 4;
+  box-sizing: border-box;
+  border: 1px dashed var(--pdfx-blue);
+  background: color-mix(in srgb, var(--pdfx-blue) 10%, transparent);
+  pointer-events: none;
+}
+
+.form-field-panel {
+  position: absolute;
+  top: 44px;
+  right: 8px;
+  z-index: 7;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  box-sizing: border-box;
+  width: min(240px, calc(100% - 16px));
+  max-height: calc(100% - 52px);
+  overflow: auto;
+  padding: 8px 10px;
+  border: 1px solid var(--pdfx-pill-border);
+  border-radius: 6px;
+  background: var(--pdfx-pill-bg);
+  color: var(--pdfx-pill-text);
+  font-size: 12px;
+  line-height: 1.4;
+  user-select: none;
+  pointer-events: auto;
+}
+
+.form-field-panel-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.form-field-panel-heading button,
+.form-field-panel-actions button {
+  padding: 2px 8px;
+  border: 1px solid var(--pdfx-pill-border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--pdfx-pill-text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.form-field-panel-heading button:hover:enabled,
+.form-field-panel-actions button:hover:enabled {
+  background: var(--pdfx-pill-hover);
+}
+
+.form-field-panel-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.form-field-panel-row input[type="text"],
+.form-field-panel-row input[type="number"],
+.form-field-panel-row select {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 2px 4px;
+  border: 1px solid var(--pdfx-pill-border);
+  border-radius: 3px;
+  background: var(--pdfx-page-control-bg);
+  color: var(--pdfx-page-ink);
+  font: inherit;
+}
+
+.form-field-panel-row--check {
+  justify-content: flex-start;
+}
+
+.form-field-panel-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.form-field-delete {
+  color: var(--pdfx-status-danger) !important;
+}
+
+.form-field-panel-error {
+  color: var(--pdfx-status-danger);
+}
+
 .form-field {
   position: absolute;
   box-sizing: border-box;
@@ -1898,4 +2048,213 @@ button {
   justify-content: flex-end;
   gap: 8px;
   margin-top: 6px;
+}
+
+/* Annotation column: stamp catalogue above the document-wide list. */
+
+.annotation-column {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 244px;
+  min-height: 0;
+}
+
+.annotation-column .annotation-panel {
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+}
+
+.stamp-panel {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  box-sizing: border-box;
+  border: 1px solid var(--pdfx-border);
+  border-radius: 9px;
+  background: var(--pdfx-surface);
+}
+
+.stamp-panel-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.stamp-panel-header h2 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.stamp-panel-header span,
+.stamp-panel-hint {
+  margin: 0;
+  color: var(--pdfx-muted);
+  font-size: 11px;
+}
+
+.stamp-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.stamp-choice {
+  display: grid;
+  place-items: center;
+  min-height: 48px;
+  padding: 6px;
+  border: 1px solid var(--pdfx-border-control);
+  border-radius: 6px;
+  background: var(--pdfx-raised);
+  cursor: pointer;
+}
+
+.stamp-choice:hover:not(:disabled) {
+  border-color: var(--pdfx-border-hover);
+  background: var(--pdfx-pill-hover);
+}
+
+.stamp-choice--armed,
+.stamp-choice[aria-pressed="true"] {
+  border-color: var(--pdfx-focus-ring);
+  box-shadow: 0 0 0 1px var(--pdfx-focus-ring);
+}
+
+.stamp-choice:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.stamp-preview {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 76px;
+  padding: 5px 7px;
+  border: 2px solid currentColor;
+  border-radius: 5px;
+  box-shadow:
+    inset 0 0 0 2px var(--pdfx-surface),
+    inset 0 0 0 3px currentColor;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  line-height: 1.2;
+  transform: rotate(-3deg);
+  opacity: 0.9;
+}
+
+.stamp-placement-hint {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--pdfx-pill-active);
+  color: var(--pdfx-text-secondary);
+  font-size: 11px;
+}
+
+.stamp-cancel {
+  flex: none;
+  padding: 2px 8px;
+  border: 1px solid var(--pdfx-border-control);
+  border-radius: 5px;
+  background: var(--pdfx-raised);
+  color: var(--pdfx-text);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+/* Interactive stamp layer over the rendered page. */
+
+.stamp-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.stamp-layer--armed {
+  pointer-events: auto;
+  cursor: crosshair;
+}
+
+.stamp-hit {
+  position: absolute;
+  box-sizing: border-box;
+  border: 2px dashed transparent;
+  transform-origin: center;
+  pointer-events: auto;
+  cursor: move;
+  touch-action: none;
+}
+
+.stamp-hit--selected {
+  border-style: dashed;
+}
+
+.stamp-hit--selected:hover {
+  border-style: solid;
+}
+
+.stamp-handle {
+  position: absolute;
+  box-sizing: border-box;
+  width: 11px;
+  height: 11px;
+  padding: 0;
+  border: 1px solid var(--pdfx-page);
+  border-radius: 50%;
+  background: var(--pdfx-blue);
+  box-shadow: 0 0 0 1px var(--pdfx-blue);
+  touch-action: none;
+}
+
+.stamp-handle--rotate {
+  top: -20px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--pdfx-page);
+  border-color: var(--pdfx-blue);
+  cursor: grab;
+}
+
+.stamp-handle--resize {
+  right: -6px;
+  bottom: -6px;
+  cursor: nwse-resize;
+}
+
+.stamp-layer-error {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  max-width: calc(100% - 16px);
+  margin: 0;
+  padding: 5px 10px;
+  border: 1px solid var(--pdfx-danger-border);
+  border-radius: 6px;
+  background: var(--pdfx-danger-soft);
+  color: var(--pdfx-danger-text);
+  font-size: 12px;
+  pointer-events: none;
+  transform: translateX(-50%);
+}
+
+.annotation-stamp-summary {
+  margin: 0;
+  color: var(--pdfx-text-secondary);
+  font-size: 12px;
+  font-weight: 600;
 }

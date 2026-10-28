@@ -3,10 +3,10 @@
 //! The adapter always operates on the same `PdfDocument` handle that holds
 //! high-level `pdfium-render` edits. It adds only the capabilities PDFium
 //! supports but `pdfium-render` 0.9.4 does not expose: flags-aware saves,
-//! circle-annotation creation, ink strokes, annotation border width, text
-//! markup annotations, annotation identity and custom appearance streams. The
-//! patch itself lives in `vendor/pdfium-render/PDFX-PATCH.md`; callers of this
-//! module never need `unsafe` and never touch a PDFium handle.
+//! circle- and stamp-annotation creation, ink strokes, annotation border
+//! width, text markup annotations, annotation identity and custom appearance
+//! streams. The patch itself lives in `vendor/pdfium-render/PDFX-PATCH.md`;
+//! callers of this module never need `unsafe` and never touch a PDFium handle.
 //!
 //! Saving is explicit: callers choose [SaveMode::Incremental] (append a
 //! revision whose output begins with the source bytes), [SaveMode::FullRewrite]
@@ -257,6 +257,25 @@ pub fn create_text_markup_annotation(
         }
     }
 
+    Ok(AnnotationRef::new(page_index, annotations.len() - 1))
+}
+
+/// Creates a stamp annotation with `rect` bounds.
+///
+/// Pdfium does not generate an appearance for the annotation; callers install
+/// one with [`set_annotation_appearance`] before saving.
+pub fn create_stamp_annotation(
+    document: &PdfDocument<'_>,
+    page_index: i32,
+    rect: AnnotationRect,
+) -> Result<AnnotationRef, AdapterError> {
+    let pages = document.pages();
+    let mut page = pages.get(page_index)?;
+    let annotations = page.annotations_mut();
+    let mut annotation = annotations.create_stamp_annotation()?;
+    let result = annotation.set_bounds(rect.to_pdf_rect());
+    annotation.close();
+    result?;
     Ok(AnnotationRef::new(page_index, annotations.len() - 1))
 }
 

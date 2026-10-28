@@ -34,6 +34,7 @@ const highlight: AnnotationView = {
   strokes: [],
   rects: [{ x: 100, y: 100, width: 120, height: 20 }],
   shape: null,
+  stamp: null,
 };
 
 const underline: AnnotationView = {
@@ -49,6 +50,26 @@ const underline: AnnotationView = {
   strokes: [],
   rects: [{ x: 80, y: 200, width: 90, height: 18 }],
   shape: null,
+  stamp: null,
+};
+
+const stamp: AnnotationView = {
+  name: "s1",
+  pageIndex: 0,
+  kind: "stamp",
+  author: "测试作者",
+  createdAt: "D:20261028123456Z",
+  color: "#15803d",
+  opacity: 100,
+  lineWidth: null,
+  text: null,
+  strokes: [],
+  rects: [{ x: 216, y: 366, width: 180, height: 60 }],
+  shape: null,
+  stamp: {
+    kind: "approved",
+    frame: { x: 216, y: 366, width: 180, height: 60, rotation: 0 },
+  },
 };
 
 const rectangle: AnnotationView = {
@@ -73,6 +94,7 @@ const rectangle: AnnotationView = {
       lineWidth: 3,
     },
   },
+  stamp: null,
 };
 
 const note: AnnotationView = {
@@ -88,6 +110,7 @@ const note: AnnotationView = {
   strokes: [],
   rects: [{ x: 200, y: 220, width: 28, height: 28 }],
   shape: null,
+  stamp: null,
 };
 
 const ink: AnnotationView = {
@@ -112,6 +135,7 @@ const ink: AnnotationView = {
   ],
   rects: [{ x: 97, y: 297, width: 146, height: 46 }],
   shape: null,
+  stamp: null,
 };
 
 function renderPanel(
@@ -211,6 +235,37 @@ describe("AnnotationPanel", () => {
     expect(onChanged).toHaveBeenCalled();
   });
 
+  it("shows stamp properties without a colour picker and keeps the stamp ink", async () => {
+    const { onChanged } = renderPanel({
+      annotations: [stamp],
+      selectedName: "s1",
+    });
+
+    expect(
+      screen.getByRole("button", {
+        name: "图章 · 已批准，第 1 页，测试作者",
+      }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("图章：已批准")).toBeInTheDocument();
+    expect(screen.queryByLabelText("注释颜色")).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("注释透明度"), {
+      target: { value: "40" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "应用样式" }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("update_annotation_style", {
+        documentId: "doc-1",
+        name: "s1",
+        color: "#15803d",
+        opacity: 40,
+        lineWidth: null,
+      });
+    });
+    expect(onChanged).toHaveBeenCalled();
+  });
+
   it("deletes the selected annotation and clears the selection", async () => {
     const { onSelect, onChanged } = renderPanel({ selectedName: "a1" });
 
@@ -242,7 +297,7 @@ describe("AnnotationPanel", () => {
     expect(screen.getByText("还没有注释")).toBeInTheDocument();
     expect(
       screen.getByText(
-        "选择页面文字即可添加高亮、下划线或删除线；使用页面上的形状工具绘制矩形或椭圆，也可以放置便签或手绘。",
+        "选择页面文字即可添加高亮、下划线或删除线；使用页面上的形状工具绘制矩形或椭圆，也可以放置便签、手绘或图章。",
       ),
     ).toBeInTheDocument();
     expect(

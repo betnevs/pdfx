@@ -4,6 +4,7 @@ pub mod engine;
 pub mod file_association;
 mod fonts;
 pub mod form;
+pub mod form_create;
 pub mod image_edit;
 pub mod logging;
 mod menu;
@@ -11,6 +12,8 @@ pub mod pdfium_adapter;
 pub mod print_export;
 pub mod save;
 pub mod settings;
+mod stamp_glyphs;
+pub mod stamps;
 mod target_path;
 pub mod text_edit;
 pub mod updater;
@@ -69,6 +72,9 @@ pub fn run() {
             form::form_fields,
             form::missing_required_fields,
             form::fill_form_field,
+            form_create::create_form_text_field,
+            form_create::update_form_text_field,
+            form_create::delete_form_text_field,
             image_edit::insert_image,
             image_edit::page_images,
             image_edit::transform_image,
@@ -77,8 +83,10 @@ pub fn run() {
             annotations::create_note_annotation,
             annotations::create_ink_annotation,
             annotations::create_shape_annotation,
+            annotations::create_stamp_annotation,
             annotations::update_shape_geometry,
             annotations::update_shape_style,
+            annotations::transform_stamp_annotation,
             annotations::list_annotations,
             annotations::update_annotation_style,
             annotations::update_note_text,

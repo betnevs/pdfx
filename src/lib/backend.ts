@@ -45,6 +45,8 @@ export type CommandErrorCode =
   | "form_field_read_only"
   | "form_fill_not_permitted"
   | "form_value_invalid"
+  | "form_field_name_invalid"
+  | "form_field_name_duplicate"
   | "update_not_configured"
   | "update_check_failed"
   | "update_manifest_invalid"
@@ -389,6 +391,46 @@ export interface FormFieldView {
   radioGroup: string | null;
   /** The widget's export value for radio widgets. */
   exportValue: string | null;
+  /** `/TU` tooltip, when the field has one. */
+  tooltip: string | null;
+  /** Font size from the widget's `/DA`, when it can be read. */
+  fontSize: number | null;
+  /** True for a text field created in this session. */
+  created: boolean;
+}
+
+/** Places a new text Form Field on a page. */
+export interface CreateFormTextFieldRequest {
+  /** Display-space rectangle, top-left origin. */
+  rect: FormFieldRect;
+  /** `null` asks the backend for a generated `text_field_N` name. */
+  name: string | null;
+  tooltip: string | null;
+  required: boolean;
+  multiline: boolean;
+  fontSize: number | null;
+}
+
+/** The new field id, the refreshed widget list and the shared history. */
+export interface CreateFormTextFieldResult {
+  fieldId: string;
+  fields: FormFieldView[];
+  history: EditHistoryView;
+}
+
+/** The full desired state of a created field. */
+export interface UpdateFormTextFieldRequest {
+  name: string;
+  tooltip: string | null;
+  required: boolean;
+  multiline: boolean;
+  fontSize: number;
+}
+
+/** The refreshed widget list and shared history after a property change. */
+export interface FormStructureEditResult {
+  fields: FormFieldView[];
+  history: EditHistoryView;
 }
 
 /** A value the user committed for one widget. */
@@ -411,7 +453,7 @@ export type TextMarkupKind = "highlight" | "underline" | "strikeout";
 export type ShapeKind = "square" | "circle";
 
 /** Every annotation kind the list, overlays and style panel manage. */
-export type AnnotationKind = TextMarkupKind | ShapeKind | "note" | "ink";
+export type AnnotationKind = TextMarkupKind | ShapeKind | "note" | "ink" | "stamp";
 
 /** A display-space rectangle of a markup selection, note icon or ink bounds. */
 export interface TextMarkupRect {
@@ -437,6 +479,43 @@ export interface CreateTextMarkupRequest {
   opacity: number;
   /** Display-space rectangles; one per selected line. */
   rects: TextMarkupRect[];
+}
+
+/** The four built-in stamps. */
+export type StampKind = "approved" | "draft" | "confidential" | "rejected";
+
+/**
+ * A stamp frame in display-space page points: top-left origin and clockwise
+ * rotation in degrees, the same convention as the Text Box overlay.
+ */
+export interface StampFrameView {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  rotation: number;
+}
+
+/** The built-in design and editable frame of a stamp annotation. */
+export interface StampView {
+  kind: StampKind;
+  frame: StampFrameView;
+}
+
+/** Places one built-in stamp with the given opacity percentage. */
+export interface CreateStampRequest {
+  pageIndex: number;
+  kind: StampKind;
+  /** Constant opacity in percent (0-100); the ink colour comes from the kind. */
+  opacity: number;
+  /** Display-space frame. */
+  frame: StampFrameView;
+}
+
+/** Moves, resizes or rotates a stamp as one undoable action. */
+export interface TransformStampRequest {
+  name: string;
+  frame: StampFrameView;
 }
 
 /** Places a native sticky note with its icon box in display space. */
@@ -482,11 +561,14 @@ export interface AnnotationView {
   lineWidth: number | null;
   /** Sticky-note body; null for other kinds. */
   text: string | null;
+  /** Display-space boxes: one per markup quad, or the stamp's display bounds. */
   rects: TextMarkupRect[];
   /** Display-space ink strokes; empty for other kinds. */
   strokes: InkPoint[][];
   /** Shape geometry and style; null for every other kind. */
   shape: ShapeView | null;
+  /** Set only for stamp annotations. */
+  stamp: StampView | null;
 }
 
 /** A shape's unrotated display-space geometry plus clockwise rotation. */
@@ -614,6 +696,8 @@ const COMMAND_ERROR_CODES: ReadonlySet<string> = new Set<CommandErrorCode>([
   "form_field_read_only",
   "form_fill_not_permitted",
   "form_value_invalid",
+  "form_field_name_invalid",
+  "form_field_name_duplicate",
   "internal",
 ]);
 
@@ -1011,6 +1095,50 @@ export async function fillFormField(
 }
 
 /**
+ * Places a new text Form Field widget. Only documents whose permission set
+ * allows changing content accept the command; the returned list already
+ * contains the new field so the overlay can show and fill it immediately.
+ */
+export async function createFormTextField(
+  documentId: string,
+  pageIndex: number,
+  request: CreateFormTextFieldRequest,
+): Promise<CreateFormTextFieldResult> {
+  return invoke<CreateFormTextFieldResult>("create_form_text_field", {
+    documentId,
+    pageIndex,
+    request,
+  });
+}
+
+/**
+ * Replaces the properties of a field created in this session. A duplicate or
+ * invalid name is rejected without changing the field or the history.
+ */
+export async function updateFormTextField(
+  documentId: string,
+  fieldId: string,
+  request: UpdateFormTextFieldRequest,
+): Promise<FormStructureEditResult> {
+  return invoke<FormStructureEditResult>("update_form_text_field", {
+    documentId,
+    fieldId,
+    request,
+  });
+}
+
+/** Deletes a field created in this session; the action is undoable. */
+export async function deleteFormTextField(
+  documentId: string,
+  fieldId: string,
+): Promise<FormStructureEditResult> {
+  return invoke<FormStructureEditResult>("delete_form_text_field", {
+    documentId,
+    fieldId,
+  });
+}
+
+/**
  * Records that the current in-memory state was written to disk. The save
  * pipeline must call this after a successful write; it moves the clean
  * baseline without clearing undo/redo, so history survives Save Changes.
@@ -1035,6 +1163,31 @@ export async function createTextMarkupAnnotation(
   request: CreateTextMarkupRequest,
 ): Promise<AnnotationMutationView> {
   return invoke<AnnotationMutationView>("create_text_markup_annotation", {
+    documentId,
+    request,
+  });
+}
+
+/**
+ * Places one built-in stamp on a page as a native Stamp annotation. The author
+ * comes from the persisted settings on the Rust side.
+ */
+export async function createStampAnnotation(
+  documentId: string,
+  request: CreateStampRequest,
+): Promise<AnnotationMutationView> {
+  return invoke<AnnotationMutationView>("create_stamp_annotation", {
+    documentId,
+    request,
+  });
+}
+
+/** Moves, resizes or rotates a stamp in one undoable step. */
+export async function transformStampAnnotation(
+  documentId: string,
+  request: TransformStampRequest,
+): Promise<AnnotationMutationView> {
+  return invoke<AnnotationMutationView>("transform_stamp_annotation", {
     documentId,
     request,
   });

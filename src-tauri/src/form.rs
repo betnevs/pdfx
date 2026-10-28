@@ -74,6 +74,13 @@ pub struct FormFieldView {
     pub radio_group: Option<String>,
     /// The widget's export value for radio widgets.
     pub export_value: Option<String>,
+    /// `/TU` tooltip, when the field has one.
+    pub tooltip: Option<String>,
+    /// Font size from the field's `/DA`, when it can be read.
+    pub font_size: Option<f32>,
+    /// True for a field created by this session; only those fields expose the
+    /// property panel and can be deleted before saving.
+    pub created: bool,
 }
 
 fn read_error(context: &str, error: impl std::fmt::Debug) -> CommandError {
@@ -418,6 +425,9 @@ fn widget_view(
         multiline: false,
         radio_group: None,
         export_value: None,
+        tooltip: None,
+        font_size: None,
+        created: false,
     };
     let radio_state = match field {
         PdfFormField::RadioButton(_) => radio_cursor.next(&view.name),
@@ -476,16 +486,24 @@ pub(crate) fn discover_fields(
     Ok(fields)
 }
 
+/// Discovers PDFium widgets and merges the text fields this session created
+/// (which do not exist in the PDFium document until the next save).
+pub(crate) fn discover_all(entry: &OpenDocument) -> Result<Vec<FormFieldView>, CommandError> {
+    let existing = discover_fields(
+        &entry.document,
+        &radio_states(&entry.source_bytes),
+        &overlay_for(&entry.edit),
+    )?;
+    Ok(crate::form_create::merge_views(
+        existing,
+        &entry.edit.created_fields,
+    ))
+}
+
 /// The `form_fields` command. Returns every fillable or displayable widget.
 #[tauri::command]
 pub fn form_fields(document_id: String) -> Result<Vec<FormFieldView>, CommandError> {
-    with_open_document(&document_id, |entry| {
-        discover_fields(
-            &entry.document,
-            &radio_states(&entry.source_bytes),
-            &overlay_for(&entry.edit),
-        )
-    })
+    with_open_document(&document_id, |entry| discover_all(entry))
 }
 
 fn text_is_blank(value: Option<&str>) -> bool {
@@ -531,11 +549,7 @@ pub(crate) fn required_missing(fields: &[FormFieldView]) -> Vec<FormFieldView> {
 #[tauri::command]
 pub fn missing_required_fields(document_id: String) -> Result<Vec<FormFieldView>, CommandError> {
     with_open_document(&document_id, |entry| {
-        Ok(required_missing(&discover_fields(
-            &entry.document,
-            &radio_states(&entry.source_bytes),
-            &overlay_for(&entry.edit),
-        )?))
+        Ok(required_missing(&discover_all(entry)?))
     })
 }
 
@@ -703,9 +717,7 @@ fn fill_for(
 ) -> Result<FormFieldEditResultView, CommandError> {
     ensure_forms_editable(&entry.document)?;
 
-    let states = radio_states(&entry.source_bytes);
-    let overlay_before = overlay_for(&entry.edit);
-    let fields_before = discover_fields(&entry.document, &states, &overlay_before)?;
+    let fields_before = discover_all(entry)?;
     let field = fields_before
         .iter()
         .find(|field| field.field_id == field_id)
@@ -716,6 +728,42 @@ fn fill_for(
             CommandErrorCode::FormFieldReadOnly,
             format!("form field {} is read-only", field.name),
         ));
+    }
+    if field.created {
+        // Created text fields live in the session store until the save
+        // pipeline writes them; their value change is a content edit with a
+        // full-record snapshot, so undo restores the empty value.
+        let FormFieldValueInput::Text { text } = value else {
+            return Err(invalid_value("此表单字段只接受文本值。"));
+        };
+        let uid =
+            crate::form_create::created_uid(&field_id).ok_or_else(|| field_not_found(&field_id))?;
+        let before = entry
+            .edit
+            .created_fields
+            .find_by_uid(uid)
+            .cloned()
+            .ok_or_else(|| field_not_found(&field_id))?;
+        let history = if before.value == text {
+            entry.edit.history_view()
+        } else {
+            let mut after = before.clone();
+            after.value = text;
+            entry.edit.created_fields.restore(after.clone());
+            crate::text_edit::push_form_structure_action(
+                entry,
+                uid,
+                field.page_index,
+                Some(before.snapshot()),
+                Some(after.snapshot()),
+            )
+        };
+        let base_field = field_id.clone();
+        return Ok(FormFieldEditResultView {
+            field_id: base_field,
+            fields: discover_all(entry)?,
+            history,
+        });
     }
     let before =
         snapshot_for(&field).ok_or_else(|| invalid_value("this widget type cannot be filled"))?;
@@ -742,7 +790,7 @@ fn fill_for(
         }
         _ => {
             apply_input(&entry.document, &field, &value)?;
-            let fields_after = discover_fields(&entry.document, &states, &overlay_before)?;
+            let fields_after = discover_all(entry)?;
             let updated = fields_after
                 .iter()
                 .find(|candidate| candidate.field_id == field_id)
@@ -774,8 +822,7 @@ fn fill_for(
         entry.edit.current_state = after_state;
     }
 
-    let overlay_after = overlay_for(&entry.edit);
-    let fields_after = discover_fields(&entry.document, &states, &overlay_after)?;
+    let fields_after = discover_all(entry)?;
 
     Ok(FormFieldEditResultView {
         field_id,
