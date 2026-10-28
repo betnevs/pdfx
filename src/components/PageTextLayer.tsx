@@ -379,16 +379,20 @@ export function PageTextLayer({
   useEffect(
     () =>
       onDocumentChanged((detail) => {
-        if (detail.documentId === documentId && detail.pageIndex === pageIndex) {
+        if (detail.documentId !== documentId) {
+          return;
+        }
+        if (detail.pageIndex === pageIndex) {
           setReloadKey((key) => key + 1);
-          if (detail.source === "image") {
-            // Image actions change the shared undo availability without
-            // returning their history here; refresh it so the Text Box
-            // toolbar's undo/redo stay accurate.
-            editHistory(documentId)
-              .then((next) => setHistory(next))
-              .catch(() => {});
-          }
+        }
+        // The undo stack is document-wide: a form fill, an image edit or
+        // another tool's change alters the availability of this toolbar's
+        // undo/redo buttons. This layer's own commands already returned the
+        // new history, so their notification is only for the page content.
+        if (detail.source !== "text") {
+          editHistory(documentId)
+            .then((next) => setHistory(next))
+            .catch(() => {});
         }
       }),
     [documentId, pageIndex],
@@ -530,7 +534,7 @@ export function PageTextLayer({
             }
           : null,
       );
-      notifyDocumentChanged({ documentId, pageIndex });
+      notifyDocumentChanged({ documentId, pageIndex, source: "text" });
     } catch (error) {
       setNotice({ kind: "error", text: toCommandError(error).message });
     } finally {
@@ -566,7 +570,7 @@ export function PageTextLayer({
           item.boxId === result.target.boxId ? result.target : item,
         ),
       );
-      notifyDocumentChanged({ documentId, pageIndex });
+      notifyDocumentChanged({ documentId, pageIndex, source: "text" });
     } catch (error) {
       setNotice({ kind: "error", text: toCommandError(error).message });
     } finally {
@@ -594,7 +598,7 @@ export function PageTextLayer({
           item.boxId === result.target.boxId ? result.target : item,
         ),
       );
-      notifyDocumentChanged({ documentId, pageIndex });
+      notifyDocumentChanged({ documentId, pageIndex, source: "text" });
     } catch (error) {
       setNotice({ kind: "error", text: toCommandError(error).message });
     } finally {
@@ -617,7 +621,7 @@ export function PageTextLayer({
       );
       setSelectedBoxId(null);
       setEditor(null);
-      notifyDocumentChanged({ documentId, pageIndex });
+      notifyDocumentChanged({ documentId, pageIndex, source: "text" });
     } catch (error) {
       setNotice({ kind: "error", text: toCommandError(error).message });
     } finally {
@@ -701,7 +705,7 @@ export function PageTextLayer({
             }
           : null,
       );
-      notifyDocumentChanged({ documentId, pageIndex });
+      notifyDocumentChanged({ documentId, pageIndex, source: "text" });
     } catch (error) {
       setEditor({
         ...current,
@@ -729,7 +733,7 @@ export function PageTextLayer({
         setSelectedBoxId(null);
       }
       setNotice(null);
-      notifyDocumentChanged({ documentId, pageIndex });
+      notifyDocumentChanged({ documentId, pageIndex, source: "text" });
     } catch (error) {
       setEditor({
         ...current,
@@ -757,6 +761,7 @@ export function PageTextLayer({
       notifyDocumentChanged({
         documentId,
         pageIndex: step.pageIndex,
+        source: "text",
       });
     } catch (error) {
       setNotice({ kind: "error", text: toCommandError(error).message });

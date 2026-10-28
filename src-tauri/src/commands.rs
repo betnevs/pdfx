@@ -92,6 +92,14 @@ pub enum CommandErrorCode {
     UnencryptedOutputConfirmationRequired,
     /// Permission Restrictions forbid saving changes to this document.
     ReadOnlyDocument,
+    /// The requested form widget no longer exists in the open document.
+    FormFieldNotFound,
+    /// The form widget carries the ReadOnly field flag.
+    FormFieldReadOnly,
+    /// Permission Restrictions forbid filling existing form fields.
+    FormFillNotPermitted,
+    /// The value does not match the widget type or one of its options.
+    FormValueInvalid,
     UpdateNotConfigured,
     UpdateCheckFailed,
     UpdateManifestInvalid,

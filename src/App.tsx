@@ -29,6 +29,7 @@ import {
   type CommandError,
   type CommandErrorCode,
   type DocumentView,
+  type FormFieldView,
   type StampKind,
 } from "./lib/backend";
 import { scaleToPercent } from "./lib/pageGeometry";
@@ -162,11 +163,33 @@ export function App() {
     setSelectedAnnotation(annotation);
   }
 
+  // Required-field validation navigates to the page of the first empty widget
+  // and asks the form overlay to focus it.
+  const [formFocusFieldId, setFormFocusFieldId] = useState<string | null>(null);
+  const locateField = useCallback((field: FormFieldView) => {
+    viewerRef.current.goToPage(field.pageIndex);
+    setFormFocusFieldId(field.fieldId);
+  }, []);
+  const handleFormFocusHandled = useCallback(() => {
+    setFormFocusFieldId(null);
+  }, []);
+
   // Save state lives next to the viewer so the save buttons and menu actions
   // share the session's target and last result.
-  const save = useDocumentSave(openDocumentView);
+  const save = useDocumentSave(openDocumentView, {
+    onMissingRequired: (missing) => {
+      const first = missing[0];
+      if (first) {
+        locateField(first);
+      }
+    },
+  });
   const saveRef = useRef(save);
   saveRef.current = save;
+
+  useEffect(() => {
+    setFormFocusFieldId(null);
+  }, [openDocumentView?.documentId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -431,6 +454,33 @@ export function App() {
         </div>
       )}
 
+      {open && save.requiredFields && save.requiredFields.length > 0 && (
+        <div className="app-notice app-notice--error" role="alert">
+          <span>
+            有 {save.requiredFields.length} 个必填字段尚未填写，无法保存：
+            {save.requiredFields
+              .slice(0, 3)
+              .map((field) => `第 ${field.pageIndex + 1} 页「${field.name}」`)
+              .join("、")}
+            {save.requiredFields.length > 3 ? " 等" : ""}。已定位到第一个未填字段。
+          </span>
+          <button
+            type="button"
+            onClick={() => {
+              const first = save.requiredFields?.[0];
+              if (first) {
+                locateField(first);
+              }
+            }}
+          >
+            定位第一个未填字段
+          </button>
+          <button type="button" onClick={save.dismissRequired}>
+            关闭
+          </button>
+        </div>
+      )}
+
       {passwordPrompt && (
         <PasswordPrompt
           fileName={passwordPrompt.fileName}
@@ -542,6 +592,14 @@ export function App() {
                     onArmedStampChange={setArmedStamp}
                     onAnnotationsChanged={() => void annotations.reload()}
                     surfaceRef={viewer.surfaceRef}
+                    canFillForms={
+                      open.document.permissions.canFillForms &&
+                      !open.document.readOnly
+                    }
+                    formFocusFieldId={formFocusFieldId}
+                    onFormFocusHandled={handleFormFocusHandled}
+                    onSelectPage={viewer.goToPage}
+                    onFormFocusField={setFormFocusFieldId}
                   />
                 </div>
               </div>
