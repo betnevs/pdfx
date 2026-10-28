@@ -1,0 +1,35 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "fileAssociations": [
+      {
+        "ext": ["pdf"],
+        "name": "PDF document",
+        "description": "PDF document",
+        "mimeType": "application/pdf",
+        "role": "Editor",
+        "rank": "Default"
+      }
+    ],
+    "resources": {
+      "vendor/pdfium/bin/pdfium.dll": "pdfium.dll",
+      "vendor/pdfium/LICENSE": "pdfium-licenses/LICENSE",
+      "vendor/pdfium/licenses/": "pdfium-licenses/",
+      "../docs/install-windows.md": "INSTALL-windows.md"
+    },
+    "windows": {
+      "webviewInstallMode": {
+        "type": "offlineInstaller",
+        "silent": true
+      },
+      "wix": {
+        "language": "en-US",
+        "upgradeCode": "5b42853e-7b88-59d0-b9c4-7af5016a1dfd"
+      },
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico"
+      }
+    }
+  }
+}
