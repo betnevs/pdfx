@@ -220,6 +220,7 @@ face/weight, not per text box.
 | Font reuse across pages / many text boxes | Not probed at scale | Subset once per document per face; measure 500-page fixture |
 | 200 MB / 2,000-page memory ceiling | Not measured | Instrument save pipeline; avoid concurrent full copies |
 | \(pdfium-render\) thread-safe feature serializes all calls | Known | Dedicated engine thread; do not expect parallel rendering |
+| PDFium dylib bundling in Tauri | Not exercised (spike loads from `vendor/`) | macOS `bundle.macOS.frameworks` with minimum system 12.0; Windows `bundle.resources`; see research notes §4 |
 | RUSTSEC-2026-0192 (`ttf-parser` unmaintained) | Known, no memory-safety issue | Pin; run `cargo deny`; track `skrifa` |
 
 ## Exact commands that produced this verdict
