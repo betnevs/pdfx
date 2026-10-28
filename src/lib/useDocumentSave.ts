@@ -57,6 +57,10 @@ export interface DocumentSaveOptions {
 export interface DocumentSave {
   /** The document differs from the last written revision. */
   dirty: boolean;
+  /** The Edit Session can undo (and the document is editable). */
+  canUndo: boolean;
+  /** The Edit Session can redo (and the document is editable). */
+  canRedo: boolean;
   /** Save Changes is unavailable for a Permission-Restricted document. */
   canSaveChanges: boolean;
   busy: boolean;
@@ -78,6 +82,11 @@ export interface DocumentSave {
   saveForClose: () => Promise<SaveForCloseResult>;
   /** Resolves once no save is running (immediately when idle). */
   waitForIdle: () => Promise<void>;
+  /**
+   * Adopts the history returned by an undo/redo command, so the dirty marker
+   * and the native menu availability change without another backend read.
+   */
+  acceptHistory: (history: EditHistoryView) => void;
   /** Continues a pending save after accepting the unencrypted-output warning. */
   confirmUnencrypted: () => void;
   cancelConfirmation: () => void;
@@ -458,8 +467,14 @@ export function useDocumentSave(
     setRequiredFields(null);
   }, []);
 
+  const acceptHistory = useCallback((next: EditHistoryView) => {
+    setHistory(next);
+  }, []);
+
   return {
     dirty: history?.dirty ?? false,
+    canUndo: (history?.canUndo ?? false) && !(document?.readOnly ?? false),
+    canRedo: (history?.canRedo ?? false) && !(document?.readOnly ?? false),
     canSaveChanges: !(document?.readOnly ?? false),
     busy,
     progress,
@@ -471,6 +486,7 @@ export function useDocumentSave(
     saveAs,
     saveForClose,
     waitForIdle,
+    acceptHistory,
     confirmUnencrypted,
     cancelConfirmation,
     retry,

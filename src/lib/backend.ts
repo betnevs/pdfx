@@ -1846,6 +1846,23 @@ export function onMenuEvent(handler: (menuId: string) => void): Promise<Unlisten
   return listen<string>(MENU_EVENT, (event) => handler(event.payload));
 }
 
+/** One native menu item's enabled flag in a menu-state snapshot. */
+export interface MenuItemState {
+  id: string;
+  enabled: boolean;
+}
+
+/**
+ * Applies the workspace's menu availability to the native menu.
+ *
+ * The native menu lives in Rust; this is the only command that changes which
+ * items can fire. The workspace disables an item whenever its command would be
+ * invalid, and the menu layer releases that item's accelerator with it.
+ */
+export async function setMenuState(items: MenuItemState[]): Promise<void> {
+  return invoke<void>("set_menu_state", { state: { items } });
+}
+
 /** Subscribes to file paths dropped onto the window. */
 export function onFileDrop(handler: (paths: string[]) => void): Promise<UnlistenFn> {
   return getCurrentWebview().onDragDropEvent((event) => {

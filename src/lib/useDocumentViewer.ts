@@ -34,6 +34,7 @@ import {
   type ScrollViewport,
 } from "./pageGeometry";
 import { onDocumentChanged } from "./documentEvents";
+import { isEditableTarget } from "./keyboard";
 
 /** Extra page pixels rendered around the viewport at high zoom. */
 const REGION_OVERSCAN = 200;
@@ -493,7 +494,13 @@ export function useDocumentViewer(
 
   const handleViewportKeyDown = useCallback(
     (event: ReactKeyboardEvent<HTMLElement>) => {
-      if (event.metaKey || event.ctrlKey || event.altKey) {
+      if (
+        event.defaultPrevented ||
+        event.metaKey ||
+        event.ctrlKey ||
+        event.altKey ||
+        isEditableTarget(event.target)
+      ) {
         return;
       }
       const current = stateRef.current;

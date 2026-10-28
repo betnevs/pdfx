@@ -1,7 +1,8 @@
-import { renderHook, waitFor } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 
 import type { DocumentView } from "./backend";
 import { notifyDocumentChanged } from "./documentEvents";
@@ -96,5 +97,33 @@ describe("useDocumentViewer", () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
 
     expect(renderPageCalls()).toHaveLength(1);
+  });
+
+  it("leaves Home and End to a focused text control", async () => {
+    const multiPage = { ...document, pageCount: 3 };
+    const { result } = renderHook(() =>
+      useDocumentViewer(multiPage, vi.fn()),
+    );
+    await waitFor(() => expect(result.current.pageIndex).toBe(0));
+
+    const input = window.document.createElement("input");
+    window.document.body.appendChild(input);
+    const preventDefault = vi.fn();
+
+    act(() => {
+      result.current.handleViewportKeyDown({
+        key: "End",
+        metaKey: false,
+        ctrlKey: false,
+        altKey: false,
+        target: input,
+        defaultPrevented: false,
+        preventDefault,
+      } as unknown as ReactKeyboardEvent<HTMLElement>);
+    });
+
+    expect(result.current.pageIndex).toBe(0);
+    expect(preventDefault).not.toHaveBeenCalled();
+    input.remove();
   });
 });

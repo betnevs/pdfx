@@ -191,6 +191,7 @@ function installDocumentBackend(overrides: Record<string, CommandHandler> = {}) 
     edit_history: () => idleHistory,
     list_annotations: () => [],
     close_document: () => undefined,
+    set_menu_state: () => undefined,
     ...overrides,
   });
 }
@@ -232,6 +233,18 @@ function pageInfoCalls(): Array<{ documentId: string; pageIndex: number }> {
 
 function commandCalls(command: string) {
   return invokeMock.mock.calls.filter(([name]) => name === command);
+}
+
+/** The enabled flags from the latest snapshot pushed to the native menu. */
+function lastMenuState(): Map<string, boolean> {
+  const call = commandCalls("set_menu_state").at(-1);
+  if (!call) {
+    throw new Error("no menu state has been pushed");
+  }
+  const { state } = call[1] as {
+    state: { items: Array<{ id: string; enabled: boolean }> };
+  };
+  return new Map(state.items.map((item) => [item.id, item.enabled]));
 }
 
 function setViewportSize(width: number, height: number) {
@@ -974,6 +987,405 @@ describe("PDFX workspace", () => {
     expect(pageInfoCalls().map((call) => call.pageIndex).sort()).toEqual([
       0, 1, 2,
     ]);
+  });
+
+  it("publishes menu availability for the empty workspace and the open document", async () => {
+    installDocumentBackend({ edit_history: () => dirtyHistory });
+    openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+
+    await waitFor(() => {
+      const state = lastMenuState();
+      expect(state.get("file.open")).toBe(true);
+      expect(state.get("app.settings")).toBe(true);
+      expect(state.get("file.save")).toBe(false);
+      expect(state.get("file.save_as")).toBe(false);
+      expect(state.get("file.print")).toBe(false);
+      expect(state.get("edit.undo")).toBe(false);
+      expect(state.get("edit.redo")).toBe(false);
+      expect(state.get("view.zoom_in")).toBe(false);
+      expect(state.get("page.prev")).toBe(false);
+      expect(state.get("page.next")).toBe(false);
+    });
+
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("report.pdf");
+
+    await waitFor(() => {
+      const state = lastMenuState();
+      expect(state.get("file.save")).toBe(true);
+      expect(state.get("file.save_as")).toBe(true);
+      expect(state.get("file.print")).toBe(true);
+      expect(state.get("file.export_page")).toBe(true);
+      expect(state.get("edit.undo")).toBe(true);
+      expect(state.get("edit.redo")).toBe(false);
+      expect(state.get("view.zoom_in")).toBe(true);
+      // First page: backwards is unavailable, forwards is available.
+      expect(state.get("page.prev")).toBe(false);
+      expect(state.get("page.next")).toBe(true);
+    });
+
+    act(() => menuHandler?.({ payload: "page.next" }));
+    await waitFor(() => {
+      const state = lastMenuState();
+      expect(state.get("page.prev")).toBe(true);
+      expect(state.get("page.next")).toBe(true);
+    });
+    // The toolbar input and the thumbnail selection move with the shortcut.
+    const pageInput = screen.getByRole("spinbutton", { name: "当前页码" });
+    expect(pageInput).toHaveValue(2);
+    expect(screen.getByRole("button", { name: "第 2 页" })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+
+    // The last page disables the forward item immediately.
+    act(() => menuHandler?.({ payload: "page.next" }));
+    await waitFor(() => {
+      const state = lastMenuState();
+      expect(state.get("page.prev")).toBe(true);
+      expect(state.get("page.next")).toBe(false);
+    });
+    expect(pageInput).toHaveValue(3);
+    expect(screen.getByRole("button", { name: "第 3 页" })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+
+    // A past-the-end event cannot emit an invalid page command.
+    act(() => menuHandler?.({ payload: "page.next" }));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(pageInput).toHaveValue(3);
+    expect(screen.getByText("第 3 / 3 页 · 100%")).toBeInTheDocument();
+  });
+
+  it("runs menu undo and redo once against the unified edit history", async () => {
+    const undoable = {
+      canUndo: true,
+      canRedo: false,
+      revision: 2,
+      savedRevision: 2,
+      dirty: false,
+    };
+    const undone = {
+      canUndo: false,
+      canRedo: true,
+      revision: 1,
+      savedRevision: 2,
+      dirty: true,
+    };
+    const redone = {
+      canUndo: true,
+      canRedo: false,
+      revision: 2,
+      savedRevision: 2,
+      dirty: false,
+    };
+    let currentHistory = undoable;
+    installDocumentBackend({
+      edit_history: () => currentHistory,
+      undo_text_edit: () => {
+        currentHistory = undone;
+        return { pageIndex: 1, history: undone };
+      },
+      redo_text_edit: () => {
+        currentHistory = redone;
+        return { pageIndex: 1, history: redone };
+      },
+    });
+    openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("report.pdf");
+    await waitFor(() => {
+      const state = lastMenuState();
+      expect(state.get("edit.undo")).toBe(true);
+      expect(state.get("edit.redo")).toBe(false);
+    });
+
+    // Cmd/Ctrl+Z is the native menu's accelerator; the webview must not also
+    // handle it, or one key press would produce two history steps.
+    const viewport = screen.getByLabelText("页面视口");
+    const textLayer = screen.getByRole("region", { name: "文本层" });
+    fireEvent.keyDown(viewport, { key: "z", ctrlKey: true });
+    fireEvent.keyDown(textLayer, { key: "z", ctrlKey: true, shiftKey: true });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(commandCalls("undo_text_edit")).toHaveLength(0);
+    expect(commandCalls("redo_text_edit")).toHaveLength(0);
+
+    const rendersBefore = renderPageCalls().length;
+    act(() => menuHandler?.({ payload: "edit.undo" }));
+    await waitFor(() => expect(commandCalls("undo_text_edit")).toHaveLength(1));
+    // The unified history change repaints the page and refreshes availability.
+    await waitFor(() =>
+      expect(renderPageCalls().length).toBeGreaterThan(rendersBefore),
+    );
+    await waitFor(() => {
+      const state = lastMenuState();
+      expect(state.get("edit.undo")).toBe(false);
+      expect(state.get("edit.redo")).toBe(true);
+    });
+
+    act(() => menuHandler?.({ payload: "edit.redo" }));
+    await waitFor(() => expect(commandCalls("redo_text_edit")).toHaveLength(1));
+    await waitFor(() => {
+      const state = lastMenuState();
+      expect(state.get("edit.undo")).toBe(true);
+      expect(state.get("edit.redo")).toBe(false);
+    });
+    expect(commandCalls("undo_text_edit")).toHaveLength(1);
+  });
+
+  it("keeps page and history shortcuts out of focused text controls", async () => {
+    const undoable = {
+      canUndo: true,
+      canRedo: false,
+      revision: 1,
+      savedRevision: 0,
+      dirty: true,
+    };
+    const undone = {
+      canUndo: false,
+      canRedo: true,
+      revision: 0,
+      savedRevision: 0,
+      dirty: false,
+    };
+    let currentHistory = undoable;
+    installDocumentBackend({
+      edit_history: () => currentHistory,
+      undo_text_edit: () => {
+        currentHistory = undone;
+        return { pageIndex: 0, history: undone };
+      },
+    });
+    openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("report.pdf");
+    await waitFor(() => expect(lastMenuState().get("edit.undo")).toBe(true));
+
+    const pageInput = screen.getByRole("spinbutton", { name: "当前页码" });
+    act(() => pageInput.focus());
+
+    // While the input has focus its native text undo and page scrolling stay
+    // untouched: the items lose their accelerators and their commands.
+    await waitFor(() => {
+      const state = lastMenuState();
+      expect(state.get("page.prev")).toBe(false);
+      expect(state.get("page.next")).toBe(false);
+      expect(state.get("edit.undo")).toBe(false);
+      expect(state.get("edit.redo")).toBe(false);
+      // Saving is not an editing key and stays available.
+      expect(state.get("file.save")).toBe(true);
+      expect(state.get("file.save_as")).toBe(true);
+      expect(state.get("view.zoom_in")).toBe(true);
+    });
+
+    act(() => menuHandler?.({ payload: "page.next" }));
+    act(() => menuHandler?.({ payload: "edit.undo" }));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(pageInput).toHaveValue(1);
+    expect(commandCalls("undo_text_edit")).toHaveLength(0);
+
+    // The page canvas does not own text editing, so shortcuts work again.
+    act(() => {
+      pageInput.blur();
+      screen.getByLabelText("页面视口").focus();
+    });
+    await waitFor(() => {
+      const state = lastMenuState();
+      expect(state.get("page.next")).toBe(true);
+      expect(state.get("edit.undo")).toBe(true);
+    });
+
+    act(() => menuHandler?.({ payload: "page.next" }));
+    await waitFor(() => expect(pageInput).toHaveValue(2));
+    act(() => menuHandler?.({ payload: "edit.undo" }));
+    await waitFor(() => expect(commandCalls("undo_text_edit")).toHaveLength(1));
+  });
+
+  it("accepts Ctrl+Y for redo on Windows without a second menu accelerator", async () => {
+    const userAgent = vi
+      .spyOn(window.navigator, "userAgent", "get")
+      .mockReturnValue("Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
+    try {
+      const redoable = {
+        canUndo: true,
+        canRedo: true,
+        revision: 2,
+        savedRevision: 1,
+        dirty: true,
+      };
+      const redone = {
+        canUndo: true,
+        canRedo: false,
+        revision: 2,
+        savedRevision: 2,
+        dirty: false,
+      };
+      let currentHistory = redoable;
+      installDocumentBackend({
+        edit_history: () => currentHistory,
+        redo_text_edit: () => {
+          currentHistory = redone;
+          return { pageIndex: 0, history: redone };
+        },
+      });
+      openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+      const user = userEvent.setup();
+
+      render(<App />);
+      await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+      await screen.findByText("report.pdf");
+      await waitFor(() => expect(lastMenuState().get("edit.redo")).toBe(true));
+
+      const viewport = screen.getByLabelText("页面视口");
+      const pageInput = screen.getByRole("spinbutton", { name: "当前页码" });
+
+      // A focused text control keeps Ctrl+Y for its own native redo.
+      act(() => pageInput.focus());
+      fireEvent.keyDown(pageInput, { key: "y", ctrlKey: true });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(commandCalls("redo_text_edit")).toHaveLength(0);
+
+      act(() => {
+        pageInput.blur();
+        viewport.focus();
+      });
+      fireEvent.keyDown(viewport, { key: "y", ctrlKey: true });
+      await waitFor(() =>
+        expect(commandCalls("redo_text_edit")).toHaveLength(1),
+      );
+
+      // The fallback checks availability: once redo is exhausted it is inert.
+      fireEvent.keyDown(viewport, { key: "y", ctrlKey: true });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(commandCalls("redo_text_edit")).toHaveLength(1);
+    } finally {
+      userAgent.mockRestore();
+    }
+  });
+
+  it("keeps page navigation but disables editing menu items for a restricted document", async () => {
+    installDocumentBackend({
+      open_document: () => ({ ...documentView, readOnly: true }),
+      edit_history: () => dirtyHistory,
+    });
+    openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("report.pdf");
+
+    await waitFor(() => {
+      const state = lastMenuState();
+      expect(state.get("file.save")).toBe(false);
+      // Save As may still write a new copy of a restricted document.
+      expect(state.get("file.save_as")).toBe(true);
+      expect(state.get("edit.undo")).toBe(false);
+      expect(state.get("edit.redo")).toBe(false);
+      expect(state.get("page.prev")).toBe(false);
+      expect(state.get("page.next")).toBe(true);
+      expect(state.get("file.print")).toBe(true);
+    });
+
+    act(() => menuHandler?.({ payload: "page.next" }));
+    await waitFor(() =>
+      expect(screen.getByRole("spinbutton", { name: "当前页码" })).toHaveValue(
+        2,
+      ),
+    );
+    expect(commandCalls("undo_text_edit")).toHaveLength(0);
+  });
+
+  it("freezes every menu item while the close question is open", async () => {
+    installDocumentBackend({ edit_history: () => dirtyHistory });
+    openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("report.pdf");
+    await triggerWindowClose();
+    expect(closeConfirmDialog()).toBeInTheDocument();
+
+    await waitFor(() => {
+      const state = lastMenuState();
+      for (const id of [
+        "file.open",
+        "file.print",
+        "file.export_page",
+        "file.save",
+        "file.save_as",
+        "app.settings",
+        "edit.undo",
+        "edit.redo",
+        "view.actual_size",
+        "view.zoom_in",
+        "view.zoom_out",
+        "view.fit_width",
+        "view.fit_page",
+        "view.fullscreen",
+        "page.prev",
+        "page.next",
+      ]) {
+        expect(state.get(id), id).toBe(false);
+      }
+    });
+  });
+
+  it("re-publishes the app-wide menu when the window regains focus", async () => {
+    installDocumentBackend();
+    render(<App />);
+    await waitFor(() =>
+      expect(commandCalls("set_menu_state").length).toBeGreaterThan(0),
+    );
+    const callsBefore = commandCalls("set_menu_state").length;
+    const payloadBefore = commandCalls("set_menu_state").at(-1)?.[1];
+
+    act(() => {
+      window.dispatchEvent(new Event("focus"));
+    });
+
+    await waitFor(() =>
+      expect(commandCalls("set_menu_state").length).toBeGreaterThan(
+        callsBefore,
+      ),
+    );
+    // The same window state is pushed again so a menu changed by another
+    // document window cannot stay stale.
+    expect(commandCalls("set_menu_state").at(-1)?.[1]).toEqual(payloadBefore);
+  });
+
+  it("reports a failed menu undo without losing the undo affordance", async () => {
+    installDocumentBackend({
+      edit_history: () => dirtyHistory,
+      undo_text_edit: () => {
+        throw new Error("history unavailable");
+      },
+    });
+    openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("report.pdf");
+    await waitFor(() => expect(lastMenuState().get("edit.undo")).toBe(true));
+
+    act(() => menuHandler?.({ payload: "edit.undo" }));
+
+    expect(
+      await screen.findByText("操作失败，请重试。"),
+    ).toBeInTheDocument();
+    expect(lastMenuState().get("edit.undo")).toBe(true);
   });
 
   it("clamps zoom to 10%-4000% and supports fit width, fit page and actual size", async () => {

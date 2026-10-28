@@ -370,7 +370,7 @@ describe("PageTextLayer text editing", () => {
     });
   });
 
-  it("supports undo and redo keyboard shortcuts", async () => {
+  it("leaves undo and redo shortcuts to the native menu", async () => {
     mockCommands({
       edit_history: () => ({ ...editedHistory, canRedo: true }),
       undo_text_edit: () => ({
@@ -388,20 +388,22 @@ describe("PageTextLayer text editing", () => {
     );
     const region = screen.getByRole("region", { name: "文本层" });
 
+    // The native menu owns Cmd/Ctrl+Z and Cmd/Ctrl+Shift+Z so one key press
+    // produces exactly one history step. The layer must not run them a second
+    // time, and must not hijack the textarea's native undo while editing.
     fireEvent.keyDown(region, { key: "z", ctrlKey: true });
     fireEvent.keyDown(region, { key: "z", ctrlKey: true, shiftKey: true });
     fireEvent.keyDown(region, { key: "y", metaKey: true });
+    await new Promise((resolve) => setTimeout(resolve, 20));
 
-    await waitFor(() => {
-      const undo = invokeMock.mock.calls.filter(
-        ([command]) => command === "undo_text_edit",
-      );
-      const redo = invokeMock.mock.calls.filter(
-        ([command]) => command === "redo_text_edit",
-      );
-      expect(undo).toHaveLength(1);
-      expect(redo).toHaveLength(2);
-    });
+    const undo = invokeMock.mock.calls.filter(
+      ([command]) => command === "undo_text_edit",
+    );
+    const redo = invokeMock.mock.calls.filter(
+      ([command]) => command === "redo_text_edit",
+    );
+    expect(undo).toHaveLength(0);
+    expect(redo).toHaveLength(0);
   });
 
   it("disables text editing on scanned pages and explains why", async () => {
