@@ -9,6 +9,11 @@ import {
   type SettingsUpdateResult,
   type Theme,
 } from "../lib/settings";
+import {
+  checkForUpdates,
+  describeUpdateError,
+  openDownloadPage,
+} from "../lib/updater";
 
 interface SettingsPanelProps {
   open: boolean;
@@ -27,6 +32,13 @@ type ExportStatus =
   | { kind: "idle" }
   | { kind: "exporting" }
   | { kind: "done"; path: string }
+  | { kind: "error"; message: string };
+
+type UpdateCheckStatus =
+  | { kind: "idle" }
+  | { kind: "checking" }
+  | { kind: "available"; version: string; notes: string | null; downloadUrl: string }
+  | { kind: "up_to_date"; version: string }
   | { kind: "error"; message: string };
 
 function describeError(error: unknown): string {
@@ -64,6 +76,8 @@ export function SettingsPanel({ open, settings, onClose, onSave }: SettingsPanel
   const [saveStatus, setSaveStatus] = useState<SaveStatus>({ kind: "idle" });
   const [association, setAssociation] = useState<AssociationResult | null>(null);
   const [exportStatus, setExportStatus] = useState<ExportStatus>({ kind: "idle" });
+  const [updateCheck, setUpdateCheck] = useState<UpdateCheckStatus>({ kind: "idle" });
+  const [downloadError, setDownloadError] = useState<string | null>(null);
 
   useEffect(() => {
     if (open) {
@@ -102,7 +116,7 @@ export function SettingsPanel({ open, settings, onClose, onSave }: SettingsPanel
     };
   }
 
-  async function commit(next: Settings) {
+  async function commit(next: Settings): Promise<SettingsUpdateResult | null> {
     setDraft(next);
     setSaveStatus({ kind: "saving" });
     try {
@@ -110,6 +124,7 @@ export function SettingsPanel({ open, settings, onClose, onSave }: SettingsPanel
       setDraft(result.settings);
       setAssociation(result.association);
       setSaveStatus({ kind: "saved" });
+      return result;
     } catch (error) {
       setDraft(settings);
       setAssociation(null);
@@ -117,6 +132,7 @@ export function SettingsPanel({ open, settings, onClose, onSave }: SettingsPanel
         kind: "error",
         message: `保存失败：${describeError(error)}`,
       });
+      return null;
     }
   }
 
@@ -137,6 +153,61 @@ export function SettingsPanel({ open, settings, onClose, onSave }: SettingsPanel
       return;
     }
     void commit(nextSettings({ annotationAuthor: author }));
+  }
+
+  function commitManifestUrl() {
+    const url = draft.updateManifestUrl.trim();
+    if (url === settings.updateManifestUrl) {
+      setDraft({ ...draft, updateManifestUrl: url });
+      return;
+    }
+    void commit(nextSettings({ updateManifestUrl: url }));
+  }
+
+  /**
+   * Runs the update check the user asked for. A just-edited address is
+   * persisted first, so the command reads exactly the address shown. An empty
+   * address never invokes the command.
+   */
+  async function checkNow() {
+    const manifestUrl = draft.updateManifestUrl.trim();
+    if (manifestUrl.length === 0) {
+      setUpdateCheck({ kind: "idle" });
+      return;
+    }
+    if (manifestUrl !== settings.updateManifestUrl) {
+      const saved = await commit(nextSettings({ updateManifestUrl: manifestUrl }));
+      if (!saved) {
+        return;
+      }
+    }
+
+    setDownloadError(null);
+    setUpdateCheck({ kind: "checking" });
+    try {
+      const result = await checkForUpdates();
+      if (result.status === "update_available") {
+        setUpdateCheck({
+          kind: "available",
+          version: result.version,
+          notes: result.notes,
+          downloadUrl: result.downloadUrl,
+        });
+      } else {
+        setUpdateCheck({ kind: "up_to_date", version: result.version });
+      }
+    } catch (error) {
+      setUpdateCheck({ kind: "error", message: describeUpdateError(error) });
+    }
+  }
+
+  async function openDownload(downloadUrl: string) {
+    setDownloadError(null);
+    try {
+      await openDownloadPage(downloadUrl);
+    } catch (error) {
+      setDownloadError(describeUpdateError(error));
+    }
   }
 
   async function exportNow() {
@@ -269,9 +340,72 @@ export function SettingsPanel({ open, settings, onClose, onSave }: SettingsPanel
             <p className="settings-hint">
               PDFX 启动和后台都不会联网。更新检查只会在你主动点击时进行，不会自动下载或安装。
             </p>
-            <button type="button" className="secondary-button" disabled>
+            <label className="settings-field">
+              <span>版本清单地址</span>
+              <input
+                type="text"
+                maxLength={2048}
+                placeholder="https://example.com/pdfx/latest.json"
+                value={draft.updateManifestUrl}
+                onChange={(event) =>
+                  setDraft({ ...draft, updateManifestUrl: event.target.value })
+                }
+                onBlur={commitManifestUrl}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.currentTarget.blur();
+                  }
+                }}
+              />
+            </label>
+            {draft.updateManifestUrl.trim().length === 0 ? (
+              <p className="settings-hint">未配置更新地址</p>
+            ) : (
+              <p className="settings-hint">
+                检查更新会向该地址请求一次版本 JSON，不会上传文件内容或使用数据。
+              </p>
+            )}
+            <button
+              type="button"
+              className="secondary-button"
+              disabled={draft.updateManifestUrl.trim().length === 0 || updateCheck.kind === "checking"}
+              onClick={() => void checkNow()}
+            >
               检查更新
             </button>
+            {updateCheck.kind === "checking" && (
+              <p className="settings-hint" role="status">
+                正在检查更新…
+              </p>
+            )}
+            {updateCheck.kind === "available" && (
+              <div className="settings-guidance" role="status">
+                <p>发现新版本 {updateCheck.version}</p>
+                {updateCheck.notes && <p className="settings-notes">{updateCheck.notes}</p>}
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={() => void openDownload(updateCheck.downloadUrl)}
+                >
+                  打开下载页
+                </button>
+                {downloadError && (
+                  <p className="settings-error" role="alert">
+                    {downloadError}
+                  </p>
+                )}
+              </div>
+            )}
+            {updateCheck.kind === "up_to_date" && (
+              <p className="settings-guidance" role="status">
+                已是最新版本（{updateCheck.version}）
+              </p>
+            )}
+            {updateCheck.kind === "error" && (
+              <p className="settings-guidance" role="alert">
+                {updateCheck.message}
+              </p>
+            )}
           </section>
 
           <section className="settings-section">

@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::{Deserialize, Serialize};
 
 use crate::file_association::{AssociationResult, FileAssociationPlatform};
+use crate::updater;
 
 pub const SETTINGS_FILE_NAME: &str = "settings.json";
 pub const DEFAULT_ANNOTATION_AUTHOR: &str = "PDFX 用户";
@@ -51,6 +52,9 @@ pub struct Settings {
     pub theme: Theme,
     pub annotation_author: String,
     pub file_association_enabled: bool,
+    /// Address of the version manifest the user-initiated update check reads.
+    /// Empty means the check is not configured and no request is made.
+    pub update_manifest_url: String,
 }
 
 impl Default for Settings {
@@ -61,6 +65,7 @@ impl Default for Settings {
             annotation_author: DEFAULT_ANNOTATION_AUTHOR.to_owned(),
             // File associations stay off until the user opts in.
             file_association_enabled: false,
+            update_manifest_url: String::new(),
         }
     }
 }
@@ -85,8 +90,21 @@ impl Settings {
             ));
         }
 
+        let update_manifest_url = self.update_manifest_url.trim();
+        if update_manifest_url.chars().count() > updater::MAX_MANIFEST_URL_CHARS {
+            return Err(SettingsError::InvalidArgument(format!(
+                "更新地址不能超过 {} 个字符。",
+                updater::MAX_MANIFEST_URL_CHARS
+            )));
+        }
+        if !update_manifest_url.is_empty() {
+            updater::validate_manifest_url(update_manifest_url)
+                .map_err(SettingsError::InvalidArgument)?;
+        }
+
         Ok(Self {
             annotation_author: annotation_author.to_owned(),
+            update_manifest_url: update_manifest_url.to_owned(),
             ..self
         })
     }

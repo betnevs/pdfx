@@ -25,6 +25,19 @@ base64 = "0.22"
 pdfium-render = { version = "=0.9.4", default-features = false, features = ["pdfium_7881", "thread_safe"] }
 percent-encoding = "2"
 png = "0.18"
+# URL validation for the user-configured update manifest and download page.
+url = "2"
+# The update check needs exactly one plain GET with rustls and no async
+# runtime; ureq is the smallest maintained client that fits (MIT/Apache-2.0).
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+# Semantic-version comparison for the manifest, already in the dependency
+# graph through Tauri.
+semver = "1"
+# Opens the user-chosen download page in the system browser. `open` (MIT) is
+# the same launcher tauri-plugin-opener wraps, without the plugin's D-Bus
+# dependency graph; the Windows `shellexecute-on-windows` feature uses
+# ShellExecuteW instead of shell interpolation.
+open = { version = "5", features = ["shellexecute-on-windows"] }
 # Glyph coverage checks before rewriting text with an embedded font.
 ttf-parser = "0.25"
 
