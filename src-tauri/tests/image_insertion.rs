@@ -395,6 +395,83 @@ fn image_actions_keep_text_box_object_ranges_in_sync() {
     close_document(document_id).expect("close");
 }
 
+#[test]
+fn image_and_annotation_actions_share_one_undo_history() {
+    use pdfx_lib::annotations::{
+        create_text_markup_with_author, list_annotations, CreateTextMarkupRequest, TextMarkupKind,
+        TextMarkupRect,
+    };
+
+    let pdf = synthetic::single_line_pdf();
+    let document_id = open_synthetic(&pdf);
+    let dir = TempDir::new("image-annotation-history");
+    let path = write_image(&dir, "photo.png", &solid_png(200, 100, RED));
+
+    let inserted = insert_image(document_id.clone(), 0, path).expect("insert image");
+    let created = create_text_markup_with_author(
+        document_id.clone(),
+        "QA".to_owned(),
+        CreateTextMarkupRequest {
+            page_index: 0,
+            kind: TextMarkupKind::Highlight,
+            color: "#ffd400".to_owned(),
+            opacity: 100,
+            rects: vec![TextMarkupRect {
+                x: 72.0,
+                y: 72.0,
+                width: 80.0,
+                height: 12.0,
+            }],
+        },
+    )
+    .expect("create annotation");
+    assert_eq!(created.history.revision, 2);
+
+    // Both actions live on one stack, so they undo newest-first and never
+    // leak into a per-tool history.
+    let undone = undo_text_edit(document_id.clone()).expect("undo annotation");
+    assert_eq!(undone.history.revision, 1);
+    assert!(list_annotations(document_id.clone())
+        .expect("annotations")
+        .is_empty());
+    assert_eq!(
+        page_images(document_id.clone(), 0)
+            .expect("images after annotation undo")
+            .len(),
+        1,
+        "undoing the annotation must keep the image"
+    );
+
+    let undone = undo_text_edit(document_id.clone()).expect("undo image");
+    assert_eq!(undone.history.revision, 0);
+    assert!(!undone.history.can_undo);
+    assert!(undone.history.can_redo);
+    assert!(!undone.history.dirty);
+    assert!(page_images(document_id.clone(), 0)
+        .expect("images after image undo")
+        .is_empty());
+
+    let redone = redo_text_edit(document_id.clone()).expect("redo image");
+    assert_eq!(redone.history.revision, 1);
+    let images = page_images(document_id.clone(), 0).expect("images after redo");
+    assert_eq!(images.len(), 1);
+    assert_eq!(images[0].image_id, inserted.image.image_id);
+    assert!(list_annotations(document_id.clone())
+        .expect("annotations after image redo")
+        .is_empty());
+
+    let redone = redo_text_edit(document_id.clone()).expect("redo annotation");
+    assert_eq!(redone.history.revision, 2);
+    assert_eq!(
+        list_annotations(document_id.clone())
+            .expect("annotations after redo")
+            .len(),
+        1
+    );
+
+    close_document(document_id).expect("close");
+}
+
 /// Extracts the six operands of the `cm` operator that places the last image
 /// drawn on the page. This reads the saved file, not the in-memory document.
 fn last_image_matrix(content: &[u8]) -> [f32; 6] {

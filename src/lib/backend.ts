@@ -766,7 +766,7 @@ export async function insertImage(
   });
 }
 
-/** Lists the images placed on a page, including images from the source PDF. */
+/** Lists the images this editing session inserted on a page. */
 export async function pageImages(
   documentId: string,
   pageIndex: number,
