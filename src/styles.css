@@ -2156,7 +2156,10 @@ button {
 .password-overlay {
   position: fixed;
   inset: 0;
-  z-index: 20;
+  /* Password, save-confirmation and unsaved-changes dialogs are system-modal:
+   * the close guard can run while Settings (50) or Print/Export (30) is open,
+   * and the question must stay visible above those panels. */
+  z-index: 60;
   display: flex;
   align-items: center;
   justify-content: center;
