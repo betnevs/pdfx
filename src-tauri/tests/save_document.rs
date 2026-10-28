@@ -145,8 +145,8 @@ fn a_successful_save_is_logged_without_document_content() {
         .lines()
         .find(|line| line.contains("document.save") && line.contains(&path_string(&output)))
         .expect("a document.save event names the output path");
-    assert!(line.contains("outcome=success"), "logged outcome: {line}");
-    assert!(line.contains("kind=SaveAs"), "logged kind: {line}");
+    assert!(line.contains("outcome=ok"), "logged outcome: {line}");
+    assert!(line.contains("kind=save_as"), "logged kind: {line}");
     assert!(
         line.contains(&format!("documentId={}", document.document_id)),
         "logged document id: {line}"
@@ -161,6 +161,7 @@ fn a_successful_save_is_logged_without_document_content() {
     );
 
     close_document(document.document_id).expect("close source");
+    let _ = fs::remove_dir_all(logs);
 }
 
 #[test]
@@ -1215,37 +1216,4 @@ fn a_malformed_base_for_object_edits_reports_a_save_failure() {
     )
     .expect_err("a malformed base cannot be appended to");
     assert_eq!(error.code, pdfx_lib::commands::CommandErrorCode::SaveFailed);
-}
-
-#[test]
-fn a_successful_save_records_a_document_save_event() {
-    // The logger is process-wide; this binary initializes it once, into a
-    // temporary directory, so the event written by the save pipeline can be
-    // read back. Other tests in this binary may append their own events.
-    let dir = TempDir::new("save-log");
-    let log_dir = TempDir::new("save-log-events");
-    pdfx_lib::logging::initialize(log_dir.path()).expect("initialize the global logger");
-
-    let source = copy_fixture("text", &dir, "source.pdf");
-    let output = dir.path().join("output.pdf");
-    let document = open(&source);
-    create_box(&document.document_id, 72.0, 72.0, "Logged save");
-    save(&document.document_id, save_request(Some(&output)));
-    close_document(document.document_id).expect("close source");
-
-    let contents = fs::read_to_string(log_dir.path().join(pdfx_lib::logging::LOG_FILE_NAME))
-        .expect("read the local log file");
-    let expected_path = format!("path={}", output.display());
-    // Other tests in this binary save concurrently to the same global logger,
-    // so select this save's event by its output path.
-    let save_line = contents
-        .lines()
-        .find(|line| line.contains(" INFO document.save ") && line.contains(&expected_path))
-        .expect("a document.save event for this save");
-    assert!(save_line.contains("kind=save_as"), "line: {save_line}");
-    assert!(save_line.contains("outcome=ok"), "line: {save_line}");
-    assert!(
-        !save_line.contains("Logged save"),
-        "the log never contains document contents: {save_line}"
-    );
 }
