@@ -2,6 +2,8 @@ pub mod annotations;
 pub mod commands;
 pub mod engine;
 pub mod file_association;
+mod fonts;
+pub mod image_edit;
 pub mod logging;
 mod menu;
 pub mod pdfium_adapter;
@@ -64,6 +66,10 @@ pub fn run() {
             text_edit::undo_text_edit,
             text_edit::redo_text_edit,
             text_edit::mark_document_saved,
+            image_edit::insert_image,
+            image_edit::page_images,
+            image_edit::transform_image,
+            image_edit::delete_image,
             annotations::create_text_markup_annotation,
             annotations::create_stamp_annotation,
             annotations::transform_stamp_annotation,

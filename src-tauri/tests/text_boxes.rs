@@ -126,9 +126,13 @@ fn flattened(text: &str) -> String {
 }
 
 #[test]
-fn font_registry_lists_only_base14_families_with_metadata() {
+fn font_registry_lists_base14_and_the_bundled_cjk_family_with_metadata() {
     let fonts = text_box_fonts();
-    assert_eq!(fonts.len(), 12, "three families with four variants each");
+    assert_eq!(
+        fonts.len(),
+        13,
+        "three base-14 families with four variants each plus the bundled CJK font"
+    );
 
     for family in ["Helvetica", "Times", "Courier"] {
         let variants: Vec<_> = fonts.iter().filter(|font| font.family == family).collect();
@@ -143,10 +147,12 @@ fn font_registry_lists_only_base14_families_with_metadata() {
         assert!(variants.iter().any(|font| font.bold && font.italic));
     }
 
-    for font in &fonts {
-        // The registry tells ticket 11 how to extend the list without claiming
-        // these base-14 fonts are embedded TrueType programs.
-        assert_eq!(font.source, "base14");
+    let base14: Vec<_> = fonts
+        .iter()
+        .filter(|font| font.source == "base14")
+        .collect();
+    assert_eq!(base14.len(), 12);
+    for font in base14 {
         assert!(
             font.embeddable,
             "base-14 fonts need no embedding permission"
@@ -155,6 +161,27 @@ fn font_registry_lists_only_base14_families_with_metadata() {
         assert_eq!(font.coverage, "win_ansi");
         assert!(!font.postscript_name.is_empty());
     }
+
+    // The bundled font advertises what the embedding pipeline can rely on:
+    // a real TrueType program under a freely embeddable licence with CJK
+    // coverage. It has one upright face; bold is synthesised from its weight
+    // axis and italic is refused.
+    let bundled: Vec<_> = fonts
+        .iter()
+        .filter(|font| font.source == "embedded")
+        .collect();
+    assert_eq!(bundled.len(), 1);
+    let bundled = bundled[0];
+    assert_eq!(bundled.family, "Noto Sans SC");
+    assert_eq!(bundled.label, "Noto Sans SC");
+    assert_eq!(bundled.postscript_name, "NotoSansSC");
+    assert!(bundled.embedded && bundled.embeddable);
+    assert_eq!(bundled.coverage, "cjk");
+    assert!(!bundled.italic, "the bundled font has no italic face");
+    assert!(
+        !bundled.bold,
+        "the registry lists the upright face; bold is a style flag"
+    );
 
     assert!(fonts
         .iter()
@@ -373,19 +400,25 @@ fn style_and_text_rejections_do_not_mutate_the_document() {
     apply_text_edit(document_id.clone(), 0, box_id, "Plain".to_owned()).expect("type");
     let revision = edit_history(document_id.clone()).expect("history").revision;
 
-    // CJK cannot be written with a base-14 font and is refused before any
-    // page object or history entry changes.
-    let error = apply_text_edit(document_id.clone(), 0, box_id, "你好".to_owned())
-        .expect_err("CJK must be rejected");
+    // Chinese is covered by the bundled font and now succeeds; a character the
+    // bundled font lacks is still refused before any page object or history
+    // entry changes.
+    let error = apply_text_edit(document_id.clone(), 0, box_id, "😀".to_owned())
+        .expect_err("a missing glyph must be rejected");
     assert_eq!(error.code, CommandErrorCode::UnsupportedFont);
     assert!(
-        error.message.contains("CJK"),
-        "the error should explain the limitation: {}",
+        error.message.contains("Noto Sans SC") && error.message.contains("no glyphs"),
+        "the error should name the bundled font and the missing coverage: {}",
         error.message
     );
 
-    let error = apply_text_box_style(document_id.clone(), 0, box_id, styled("Noto Sans SC", 18.0))
-        .expect_err("unknown font must be rejected");
+    let error = apply_text_box_style(
+        document_id.clone(),
+        0,
+        box_id,
+        styled("Comic Sans MS", 18.0),
+    )
+    .expect_err("unknown font must be rejected");
     assert_eq!(error.code, CommandErrorCode::UnsupportedFont);
     assert!(
         error.message.contains("Helvetica"),
@@ -416,7 +449,7 @@ fn style_and_text_rejections_do_not_mutate_the_document() {
     );
     let layer = extract_text_layer(document_id.clone(), 0).expect("layer");
     assert!(layer.text.contains("Plain"));
-    assert!(!layer.text.contains("你好"));
+    assert!(!layer.text.contains("😀"));
 
     let target = text_boxes(document_id.clone(), 0).expect("boxes")[0].clone();
     assert_eq!(target.text, "Plain");

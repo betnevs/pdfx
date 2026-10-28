@@ -70,23 +70,36 @@ const editedHistory: EditHistoryView = {
   dirty: true,
 };
 
-const FONTS: TextBoxFontView[] = ["Helvetica", "Times", "Courier"].flatMap(
-  (family, familyIndex) =>
-    [
-      { bold: false, italic: false, postscriptName: family },
-      { bold: true, italic: false, postscriptName: `${family}-Bold` },
-      { bold: false, italic: true, postscriptName: `${family}-Italic` },
-      { bold: true, italic: true, postscriptName: `${family}-BoldItalic` },
-    ].map((variant, variantIndex) => ({
-      family,
-      label: familyIndex === 0 && variantIndex === 0 ? family : `${family} ${variantIndex}`,
-      ...variant,
-      source: "base14",
-      embedded: false,
-      embeddable: true,
-      coverage: "win_ansi",
-    })),
-);
+const FONTS: TextBoxFontView[] = [
+  ...["Helvetica", "Times", "Courier"].flatMap(
+    (family, familyIndex) =>
+      [
+        { bold: false, italic: false, postscriptName: family },
+        { bold: true, italic: false, postscriptName: `${family}-Bold` },
+        { bold: false, italic: true, postscriptName: `${family}-Italic` },
+        { bold: true, italic: true, postscriptName: `${family}-BoldItalic` },
+      ].map((variant, variantIndex) => ({
+        family,
+        label: familyIndex === 0 && variantIndex === 0 ? family : `${family} ${variantIndex}`,
+        ...variant,
+        source: "base14",
+        embedded: false,
+        embeddable: true,
+        coverage: "win_ansi",
+      })),
+  ),
+  {
+    family: "Noto Sans SC",
+    label: "Noto Sans SC",
+    bold: false,
+    italic: false,
+    postscriptName: "NotoSansSC",
+    source: "embedded",
+    embedded: true,
+    embeddable: true,
+    coverage: "cjk",
+  },
+];
 
 function makeBox(overrides: Partial<TextBoxTargetView> = {}): TextBoxTargetView {
   return {
@@ -653,9 +666,9 @@ describe("PageTextLayer text boxes", () => {
     const family = await screen.findByRole("combobox", { name: "字体" });
     expect(
       [...(family as HTMLSelectElement).options].map((option) => option.value),
-    ).toEqual(["Helvetica", "Times", "Courier"]);
-    expect(screen.getByText(/仅支持 PDF 基础字体/)).toBeInTheDocument();
-    expect(screen.queryByText(/TrueType/)).not.toBeInTheDocument();
+    ).toEqual(["Helvetica", "Times", "Courier", "Noto Sans SC"]);
+    expect(screen.getByText(/支持 PDF 基础字体/)).toBeInTheDocument();
+    expect(screen.getByText(/内置中文字体/)).toBeInTheDocument();
 
     fireEvent.change(family, { target: { value: "Times" } });
     await waitFor(() => expect(styleCalls).toHaveLength(1));

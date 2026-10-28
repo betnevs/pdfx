@@ -27,6 +27,9 @@ export type CommandErrorCode =
   | "invalid_argument"
   | "no_editable_text"
   | "unsupported_font"
+  | "unsupported_image_format"
+  | "image_decode_failed"
+  | "image_too_large"
   | "render_failed"
   | "file_write_failed"
   | "print_failed"
@@ -202,8 +205,9 @@ export interface TextBoxStyleView {
  *
  * `source` distinguishes PDF base-14 fonts from embedded font programs;
  * `embedded` says whether a program is written into the saved PDF and
- * `coverage` states which characters the font can render. Ticket 11 adds
- * embedded families without changing this shape.
+ * `coverage` states which characters the font can render. The registry lists
+ * the base-14 families plus the bundled Noto Sans SC CJK family; embedded
+ * source fonts in an opened document are reused without appearing here.
  */
 export interface TextBoxFontView {
   family: string;
@@ -287,6 +291,46 @@ export interface TextEditResultView {
 export interface EditStepView {
   /** Page whose content changed, so only that page needs refreshing. */
   pageIndex: number;
+  history: EditHistoryView;
+}
+
+/**
+ * One image placed on a Page.
+ *
+ * Geometry is in display-space points (top-left origin, CropBox and intrinsic
+ * rotation already applied), exactly like Text Box geometry. `rotation` is
+ * clockwise around the rectangle's center. The rectangle may extend beyond
+ * the page; the page clips it when rendering and saving.
+ */
+export interface ImageObjectView {
+  imageId: number;
+  pageIndex: number;
+  /** File name, shown on the overlay label. */
+  name: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  /** Clockwise rotation in degrees in display space. */
+  rotation: number;
+  pixelWidth: number;
+  pixelHeight: number;
+}
+
+/** Move, resize or rotate an image around its center. */
+export interface ImageTransformRequest {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  /** Clockwise rotation in degrees in display space. */
+  rotation: number;
+}
+
+/** The outcome of inserting or transforming an image. */
+export interface ImageEditResultView {
+  pageIndex: number;
+  image: ImageObjectView;
   history: EditHistoryView;
 }
 
@@ -443,6 +487,9 @@ const COMMAND_ERROR_CODES: ReadonlySet<string> = new Set<CommandErrorCode>([
   "invalid_argument",
   "no_editable_text",
   "unsupported_font",
+  "unsupported_image_format",
+  "image_decode_failed",
+  "image_too_large",
   "render_failed",
   "file_write_failed",
   "print_failed",
@@ -471,6 +518,19 @@ export async function choosePdfFile(): Promise<string | null> {
     multiple: false,
     directory: false,
     filters: [{ name: "PDF", extensions: ["pdf"] }],
+  });
+  return typeof selection === "string" ? selection : null;
+}
+
+/**
+ * Opens a native file dialog filtered to the image formats the backend
+ * accepts. Returns null when cancelled.
+ */
+export async function chooseImageFile(): Promise<string | null> {
+  const selection = await openDialog({
+    multiple: false,
+    directory: false,
+    filters: [{ name: "图片", extensions: ["png", "jpg", "jpeg"] }],
   });
   return typeof selection === "string" ? selection : null;
 }
@@ -670,9 +730,9 @@ export async function deleteTextBox(
 }
 
 /**
- * Lists the fonts the Text Box editor may use. Until the subset-embedding
- * pipeline lands these are the PDF base-14 Latin families only; the metadata
- * already carries `source`, `embedded` and `coverage` for later families.
+ * Lists the fonts the Text Box editor may use: the PDF base-14 Latin families
+ * and the bundled Noto Sans SC CJK family. The metadata carries `source`,
+ * `embedded` and `coverage` so the panel can describe each family honestly.
  */
 export async function textBoxFonts(): Promise<TextBoxFontView[]> {
   return invoke<TextBoxFontView[]>("text_box_fonts");
@@ -729,6 +789,59 @@ export async function transformTextBox(
     pageIndex,
     boxId,
     transform,
+  });
+}
+
+/**
+ * Inserts a PNG or JPEG image on a Page. The backend decodes and validates the
+ * file before touching the document; a rejected file leaves it unchanged. The
+ * image is centered and fitted inside the page on insertion.
+ */
+export async function insertImage(
+  documentId: string,
+  pageIndex: number,
+  path: string,
+): Promise<ImageEditResultView> {
+  return invoke<ImageEditResultView>("insert_image", {
+    documentId,
+    pageIndex,
+    path,
+  });
+}
+
+/** Lists the images this editing session inserted on a page. */
+export async function pageImages(
+  documentId: string,
+  pageIndex: number,
+): Promise<ImageObjectView[]> {
+  return invoke<ImageObjectView[]>("page_images", { documentId, pageIndex });
+}
+
+/** Moves, resizes or rotates an image as one undoable document action. */
+export async function transformImage(
+  documentId: string,
+  pageIndex: number,
+  imageId: number,
+  transform: ImageTransformRequest,
+): Promise<ImageEditResultView> {
+  return invoke<ImageEditResultView>("transform_image", {
+    documentId,
+    pageIndex,
+    imageId,
+    transform,
+  });
+}
+
+/** Removes an image from the page; undo restores it exactly. */
+export async function deleteImage(
+  documentId: string,
+  pageIndex: number,
+  imageId: number,
+): Promise<EditStepView> {
+  return invoke<EditStepView>("delete_image", {
+    documentId,
+    pageIndex,
+    imageId,
   });
 }
 

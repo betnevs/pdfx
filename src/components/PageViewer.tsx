@@ -24,6 +24,7 @@ import {
   type FitMode,
 } from "../lib/pageGeometry";
 import type { PageRender, ZoomMode } from "../lib/useDocumentViewer";
+import { PageImageLayer } from "./PageImageLayer";
 import { PageTextLayer } from "./PageTextLayer";
 import { StampLayer } from "./StampLayer";
 
@@ -477,6 +478,16 @@ export function PageSurface({
         selectedAnnotation={selectedAnnotation}
         scale={scale}
       />
+      {info && (
+        <PageImageLayer
+          key={`${documentId}:${pageIndex}:images`}
+          documentId={documentId}
+          pageIndex={pageIndex}
+          pageWidth={info.width}
+          pageHeight={info.height}
+          readOnly={readOnly}
+        />
+      )}
       {info && (
         <StampLayer
           documentId={documentId}

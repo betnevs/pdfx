@@ -381,6 +381,14 @@ export function PageTextLayer({
       onDocumentChanged((detail) => {
         if (detail.documentId === documentId && detail.pageIndex === pageIndex) {
           setReloadKey((key) => key + 1);
+          if (detail.source === "image") {
+            // Image actions change the shared undo availability without
+            // returning their history here; refresh it so the Text Box
+            // toolbar's undo/redo stay accurate.
+            editHistory(documentId)
+              .then((next) => setHistory(next))
+              .catch(() => {});
+          }
         }
       }),
     [documentId, pageIndex],

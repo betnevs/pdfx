@@ -8,7 +8,7 @@
 
 - [x] 设置修改后立即生效并在重启后保留。
 - [ ] 文件关联开关能注册/取消 PDFX 为系统 PDF 打开方式（macOS/Windows 各自实现）。
-- [ ] Annotation 显示名修改后，新建 Annotation 使用新作者名。
+- [x] Annotation 显示名修改后，新建 Annotation 使用新作者名。
 - [x] 本地滚动日志包含打开、保存、错误等关键事件；诊断包由用户手动导出，不自动上传。
 - [x] 设置页不包含遥测开关或任何自动上传选项。
 
@@ -17,7 +17,7 @@
 - 合并提交 `afd0012`（`ticket/16-settings-logs` `aa39f0b`，feature `aaac0bc`，merge base `2850770`），`git merge --no-ff`。仅 `src-tauri/src/lib.rs` 冲突：同时保留 `settings` 与 `text_edit` 模块及两组 command 注册（`get_settings`/`update_settings`/`export_diagnostics` 与 text edit 的 12 个命令）。预期冲突（`src/App.tsx`、`src/lib/backend.ts`、`src/lib/useDocumentViewer.ts`、`src/styles.css`）均未发生：ticket 16 基于 `2850770`、08/09 在其后落地，但改动文件不重叠，`App.tsx`/`App.test.tsx` 由 git 自动合并；合并后设置、主题、密码流程、导航/缩略图、文字选择/编辑与保存 UI 的前后端测试全部通过。未修改 spec、ADR、打包配置或其他 ticket。
 - 勾选 1：`SettingsStore::save` 采用同目录临时文件 + `sync_all` + rename 原子写入（`saving_is_atomic_and_leaves_no_temporary_files` 断言无临时文件残留）；`settings_survive_a_restart_through_a_new_store` 断言重新构造 store 后语言/主题/作者/文件关联全部保留；缺失、损坏、字段缺失的 `settings.json` 均回退默认值。前端 `useSettings` 在加载与每次保存后用后端返回值调用 `applySettings`：主题写入 `:root[data-theme]`（`src/settings.css` 提供深色 token；`system` 时移除属性并由 `prefers-color-scheme` 接管），语言写入 `<html lang>`；设置面板除显示名（失焦/回车提交）外均即改即存。已知限制：界面文案尚未国际化，选择 English 只改变 `lang` 属性，可见文案仍为中文；当前无 i18n 资源或后续 ticket，建议单独排期。
 - 勾选 2 未验证：实现已存在但真实 OS 行为未验证。macOS 通过 `/System/.../lsregister -f|-u <PDFX.app>` 注册/移除，bundle 由 resource dir 推导，非打包构建返回 `unsupported` 并给出 Finder“显示简介”指引；Windows 以 `HKCU\Software\Classes\PDFX.Document` + `.pdf\OpenWithProgids` 注册并只删除自己的项，不写 `.pdf` 默认值（避免与系统默认应用哈希保护冲突）。两端成功注册均返回 `user_action_required` 并说明用户仍需在系统默认应用 UI 确认；平台失败保留偏好并返回 `failed`。自动化只覆盖 mock 平台、unsupported 路径与（仅在 Windows 上编译的）命令构造；真实 LaunchServices / 注册表往返仅由 `#[ignore]` 的 `manual_real_platform_registration_round_trip` 手动执行，本次未在打包应用上运行。
-- 勾选 3 未验证：设置项已持久化并校验（trim、非空、≤64 字符、禁止控制字符），`SettingsUpdateResult` 与前端 `Settings.annotationAuthor` 已作为契约暴露；但当前集成分支尚无 Annotation 创建功能（ticket 12/13 未合并），无法断言“新建 Annotation 使用新作者名”。ticket 12/13 需从 settings 读取该字段作为作者。
+- 勾选 3 已验证（2026-10-28 补记）：ticket 12 合并后，Highlight/Underline/StrikeOut 创建时从 `settings.annotationAuthor` 读取作者（默认系统用户名，带回退），测试证明 Alice→Bob 的修改只影响新注释。票据 13/25 应沿用同一来源。
 - 勾选 4 已验证（2026-10-28 补记）：打开/关闭/错误日志与诊断包已验证；保存事件已由 ticket 10 在成功写盘后接入，记录 `document.save`（documentId/kind/outcome/路径/字节数，不含内容），并有进程级日志测试 `a_successful_save_is_logged_without_document_content` 断言不含文档文字。详见 ticket 10 验证记录。`Logger` 写入 `app_log_dir()/pdfx.log`（1 MB 软上限、保留 3 个滚动文件、UTC 毫秒时间戳、每个事件一行、换行转义）；已接入 `app.start`、`engine.unavailable`、`document.open`（名称/页数/路径）、`document.open.failed`（代码/消息）、`document.close`、`settings.update`（刻意不记录作者名）、`diagnostics.export`。`export_diagnostics` 只把版本、平台与全部保留日志拼接为文本，写到用户通过原生保存对话框选择的路径；源码中没有 HTTP/网络调用，设置页也无自动上传入口。- 勾选 5：设置面板只有一个复选框（文件关联），`SettingsPanel.test.tsx` 断言仅一个 checkbox、无“遥测”文案、无自动上传项；“检查更新”为禁用占位按钮，真实检查由 ticket 19 实现。诊断导出为显式用户操作。
 - 依赖/许可审查：本 ticket 未新增任何 Cargo 或 npm 依赖（`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock`、`package.json`、`package-lock.json` 相对 `6526771` 无变化），仅复用既有 `serde`/`serde_json`/`tauri`/`tauri-plugin-dialog`，无新增许可证或 advisory。`dialog:default` 已包含 `allow-save`，诊断导出所需的保存对话框权限无需改配置。
 - 打包配置审查：`src-tauri/tauri.conf.json`、`src-tauri/tauri.macos.conf.json`、`src-tauri/tauri.windows.conf.json`、`src-tauri/capabilities/default.json`、`scripts/` 均未修改。
