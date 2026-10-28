@@ -479,7 +479,9 @@ export function PageSurface({
         pageIndex={pageIndex}
         readOnly={readOnly}
         canAnnotate={canAnnotate}
+        annotations={annotations}
         selectedAnnotation={selectedAnnotation}
+        onSelectAnnotation={onSelectAnnotation}
         scale={scale}
       />
       {info && (

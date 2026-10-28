@@ -550,6 +550,7 @@ fn style_changes_are_undoable_and_saved_as_native_colour_and_opacity() {
         created.name.clone(),
         "#00ff00".to_owned(),
         70,
+        None,
     )
     .expect("restyle highlight")
     .annotation
@@ -858,6 +859,7 @@ fn read_only_documents_refuse_annotation_changes_but_still_list_them() {
         "missing".to_owned(),
         "#00ff00".to_owned(),
         50,
+        None,
     )
     .expect_err("restyling is denied");
     assert_eq!(update_error.code, CommandErrorCode::PermissionDenied);
@@ -969,6 +971,7 @@ fn invalid_annotation_requests_are_rejected_without_dirtying_the_document() {
             "missing".to_owned(),
             "#00ff00".to_owned(),
             50,
+            None,
         )
         .expect_err("unknown annotation")
         .code,

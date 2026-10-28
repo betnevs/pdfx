@@ -36,6 +36,9 @@ const createdRectangle: AnnotationView = {
   createdAt: "D:20261028123456Z",
   color: "#000000",
   opacity: 100,
+  lineWidth: null,
+  text: null,
+  strokes: [],
   rects: [],
   shape: {
     kind: "square",
@@ -52,6 +55,9 @@ const selectedRectangle: AnnotationView = {
   createdAt: "D:20261028123456Z",
   color: "#000000",
   opacity: 80,
+  lineWidth: null,
+  text: null,
+  strokes: [],
   rects: [],
   shape: {
     kind: "square",

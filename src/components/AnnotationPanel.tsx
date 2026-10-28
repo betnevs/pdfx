@@ -4,6 +4,7 @@ import {
   deleteAnnotation,
   toCommandError,
   updateAnnotationStyle,
+  updateNoteText,
   updateShapeStyle,
   type AnnotationKind,
   type AnnotationView,
@@ -17,6 +18,8 @@ const KIND_LABELS: Record<AnnotationKind, string> = {
   strikeout: "删除线",
   square: "矩形",
   circle: "椭圆",
+  note: "便签",
+  ink: "手绘",
 };
 
 const DEFAULT_SHAPE_FILL = "#3366cc";
@@ -56,9 +59,10 @@ export interface AnnotationPanelProps {
  * Document-wide annotation list, grouped by page.
  *
  * Selecting an entry asks the workspace to navigate to its page and draws the
- * selection outline on the page. The selected entry exposes colour, opacity and
- * delete controls; every mutation goes through the unified history, so the
- * page's undo/redo buttons restore it.
+ * selection outline on the page. The selected entry exposes colour, opacity,
+ * note body, ink line width, shape style and delete controls; every mutation
+ * goes through the unified history, so the page's undo/redo buttons restore
+ * it.
  */
 export function AnnotationPanel({
   documentId,
@@ -75,14 +79,18 @@ export function AnnotationPanel({
     annotations.find((annotation) => annotation.name === selectedName) ?? null;
   const [colorDraft, setColorDraft] = useState(selected?.color ?? "#ffd400");
   const [opacityDraft, setOpacityDraft] = useState(selected?.opacity ?? 50);
+  const [lineWidthDraft, setLineWidthDraft] = useState(
+    selected?.lineWidth ?? 3,
+  );
+  const [textDraft, setTextDraft] = useState(selected?.text ?? "");
   const [shapeFillEnabled, setShapeFillEnabled] = useState(
-    selected?.shape?.style.fillColor !== null,
+    selected?.shape ? selected.shape.style.fillColor !== null : true,
   );
   const [shapeFillColor, setShapeFillColor] = useState(
     selected?.shape?.style.fillColor ?? DEFAULT_SHAPE_FILL,
   );
   const [shapeStrokeEnabled, setShapeStrokeEnabled] = useState(
-    selected?.shape?.style.strokeColor !== null,
+    selected?.shape ? selected.shape.style.strokeColor !== null : true,
   );
   const [shapeStrokeColor, setShapeStrokeColor] = useState(
     selected?.shape?.style.strokeColor ?? DEFAULT_SHAPE_STROKE,
@@ -90,7 +98,7 @@ export function AnnotationPanel({
   const [shapeLineWidth, setShapeLineWidth] = useState(
     selected?.shape?.style.lineWidth ?? 2,
   );
-  const [busy, setBusy] = useState<"style" | "delete" | null>(null);
+  const [busy, setBusy] = useState<"style" | "text" | "delete" | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
   const shapeStyle = selected?.shape?.style ?? null;
@@ -98,6 +106,8 @@ export function AnnotationPanel({
   useEffect(() => {
     setColorDraft(selected?.color ?? "#ffd400");
     setOpacityDraft(selected?.opacity ?? 50);
+    setLineWidthDraft(selected?.lineWidth ?? 3);
+    setTextDraft(selected?.text ?? "");
     setShapeFillEnabled(shapeStyle ? shapeStyle.fillColor !== null : true);
     setShapeFillColor(shapeStyle?.fillColor ?? DEFAULT_SHAPE_FILL);
     setShapeStrokeEnabled(shapeStyle ? shapeStyle.strokeColor !== null : true);
@@ -108,6 +118,8 @@ export function AnnotationPanel({
     selected?.name,
     selected?.color,
     selected?.opacity,
+    selected?.lineWidth,
+    selected?.text,
     shapeStyle?.fillColor,
     shapeStyle?.strokeColor,
     shapeStyle?.lineWidth,
@@ -127,10 +139,16 @@ export function AnnotationPanel({
   }, [annotations]);
 
   const editable = canAnnotate && !readOnly;
+  const lineWidthChanged =
+    selected?.kind === "ink" && lineWidthDraft !== selected.lineWidth;
   const styleChanged =
     selected !== null &&
     selected.shape === null &&
-    (colorDraft !== selected.color || opacityDraft !== selected.opacity);
+    (colorDraft !== selected.color ||
+      opacityDraft !== selected.opacity ||
+      lineWidthChanged);
+  const textChanged =
+    selected?.kind === "note" && textDraft !== (selected.text ?? "");
   const shapeDraft: ShapeStyle | null = shapeStyle
     ? {
         fillColor: shapeFillEnabled ? shapeFillColor : null,
@@ -148,10 +166,11 @@ export function AnnotationPanel({
       shapeDraft.opacity !== shapeStyle.opacity ||
       shapeDraft.lineWidth !== shapeStyle.lineWidth);
   const canApply =
-    selected !== null &&
-    selected.shape === null
-      ? styleChanged
-      : shapeStyleChanged && shapeDraftValid;
+    selected === null
+      ? false
+      : selected.shape !== null
+        ? shapeStyleChanged && shapeDraftValid
+        : styleChanged;
 
   async function applyStyle() {
     if (!selected || !canApply || busy) {
@@ -168,6 +187,7 @@ export function AnnotationPanel({
           selected.name,
           colorDraft,
           opacityDraft,
+          selected.kind === "ink" ? lineWidthDraft : null,
         );
       }
       onChanged();
@@ -175,6 +195,26 @@ export function AnnotationPanel({
         documentId,
         pageIndex: selected.pageIndex,
         source: "annotation",
+      });
+    } catch (error) {
+      setActionError(toCommandError(error).message);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function applyText() {
+    if (!selected || !textChanged || busy) {
+      return;
+    }
+    setBusy("text");
+    setActionError(null);
+    try {
+      await updateNoteText(documentId, selected.name, textDraft);
+      onChanged();
+      notifyDocumentChanged({
+        documentId,
+        pageIndex: selected.pageIndex,
       });
     } catch (error) {
       setActionError(toCommandError(error).message);
@@ -230,7 +270,7 @@ export function AnnotationPanel({
         <div className="annotation-empty">
           <p>还没有注释</p>
           <p>
-            选择页面文字即可添加高亮、下划线或删除线；使用页面上的形状工具绘制矩形或椭圆。
+            选择页面文字即可添加高亮、下划线或删除线；使用页面上的形状工具绘制矩形或椭圆，也可以放置便签或手绘。
           </p>
         </div>
       ) : (
@@ -271,6 +311,18 @@ export function AnnotationPanel({
                           <span className="annotation-meta">
                             {annotation.author ?? "未知作者"}
                           </span>
+                          {annotation.kind === "note" &&
+                            annotation.text !== null && (
+                              <span className="annotation-preview">
+                                {annotation.text.trim() || "（空白便签）"}
+                              </span>
+                            )}
+                          {annotation.kind === "ink" && (
+                            <span className="annotation-preview">
+                              {annotation.strokes.length} 笔 ·{" "}
+                              {annotation.lineWidth ?? 3} pt
+                            </span>
+                          )}
                           <span className="annotation-time">
                             {created ?? "时间未知"}
                           </span>
@@ -287,6 +339,19 @@ export function AnnotationPanel({
 
       {selected && editable && (
         <div className="annotation-properties" aria-label="注释属性">
+          {selected.kind === "note" && (
+            <label className="annotation-control annotation-note-text">
+              <span>便签内容</span>
+              <textarea
+                aria-label="便签内容"
+                value={textDraft}
+                maxLength={5000}
+                rows={4}
+                disabled={busy !== null}
+                onChange={(event) => setTextDraft(event.target.value)}
+              />
+            </label>
+          )}
           {selected.shape ? (
             <>
               <p className="annotation-shape-meta">
@@ -406,9 +471,36 @@ export function AnnotationPanel({
                 />
                 <span>{opacityDraft}%</span>
               </label>
+              {selected.kind === "ink" && (
+                <label className="annotation-control">
+                  <span>线宽</span>
+                  <input
+                    type="range"
+                    aria-label="手绘线宽"
+                    min={0.5}
+                    max={32}
+                    step={0.5}
+                    value={lineWidthDraft}
+                    disabled={busy !== null}
+                    onChange={(event) =>
+                      setLineWidthDraft(Number.parseFloat(event.target.value))
+                    }
+                  />
+                  <span>{lineWidthDraft} pt</span>
+                </label>
+              )}
             </>
           )}
           <div className="annotation-actions">
+            {selected.kind === "note" && (
+              <button
+                type="button"
+                disabled={!textChanged || busy !== null}
+                onClick={() => void applyText()}
+              >
+                保存便签
+              </button>
+            )}
             <button
               type="button"
               disabled={!canApply || busy !== null}

@@ -15,7 +15,7 @@ type AnnotationListState =
   | { status: "error"; annotations: AnnotationView[]; error: CommandError };
 
 /**
- * Loads the document's text markup annotations and keeps them current.
+ * Loads the document's native annotations and keeps them current.
  *
  * Creating, restyling, deleting, undo and redo all announce a page change on
  * the in-window event bus; this hook refetches the list without dropping the
