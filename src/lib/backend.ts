@@ -34,6 +34,10 @@ export type CommandErrorCode =
   | "no_output_document"
   | "unencrypted_output_confirmation_required"
   | "read_only_document"
+  | "update_not_configured"
+  | "update_check_failed"
+  | "update_manifest_invalid"
+  | "update_open_failed"
   | "internal";
 
 /** A structured error crossing the Tauri command boundary. */

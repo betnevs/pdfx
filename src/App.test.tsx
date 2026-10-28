@@ -150,6 +150,7 @@ function installBackend(overrides: Record<string, CommandHandler> = {}) {
         theme: "system",
         annotationAuthor: "PDFX 用户",
         fileAssociationEnabled: false,
+        updateManifestUrl: "",
       };
     }
     const handler = overrides[command];

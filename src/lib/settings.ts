@@ -18,6 +18,11 @@ export interface Settings {
   theme: Theme;
   annotationAuthor: string;
   fileAssociationEnabled: boolean;
+  /**
+   * Address of the version manifest the user-initiated update check reads.
+   * Empty means the check is not configured and no request is made.
+   */
+  updateManifestUrl: string;
 }
 
 /**
@@ -29,6 +34,7 @@ export const DEFAULT_SETTINGS: Settings = {
   theme: "system",
   annotationAuthor: "PDFX 用户",
   fileAssociationEnabled: false,
+  updateManifestUrl: "",
 };
 
 /**
