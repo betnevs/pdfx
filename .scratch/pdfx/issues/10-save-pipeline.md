@@ -2,7 +2,7 @@
 
 **What to build:** 首次保存走 Save As，之后 Save Changes 覆盖当前 Output Document；Source Document 永不修改。保存使用分阶段增量保存，保留书签、链接、元数据、已有 Form Field 与未改动页面内容；覆盖前自动备份，失败时源文件与已有输出保持完整。
 
-**Blocked by:** 08 (编辑已有文字 + 撤销/重做), 09 (新增 Text Box 与样式)
+**Blocked by:** 08 (编辑已有文字 + 撤销/重做), 09 (新增 Text Box 与样式), 41 (PDFium 增量保存与注释底层适配)
 
 **Status:** ready-for-agent
 
