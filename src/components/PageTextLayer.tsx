@@ -231,7 +231,7 @@ function TextEditToolbar({
               ? SCANNED_REASON
               : boxMode
                 ? "退出文本框编辑"
-                : "在页面上点击或拖动以添加文本框"
+                : "点击原有文字以选中，或在空白处拖动以添加文本框"
         }
         onClick={onToggleBoxMode}
       >
@@ -869,6 +869,39 @@ export function PageTextLayer({
     }
   }
 
+  // Clicking an existing Text Object in Text Box mode turns it into a Text Box
+  // that starts with the object's own geometry, font, size and colour, so the
+  // first transform or style change edits the original text instead of
+  // covering it with a new empty box.
+  async function selectExistingBox(charIndex: number) {
+    if (readOnly) {
+      return;
+    }
+    const requestId = targetRequest.current + 1;
+    targetRequest.current = requestId;
+    setBoxBusy(true);
+    setNotice(null);
+    try {
+      const target = await textEditTarget(documentId, pageIndex, charIndex);
+      if (targetRequest.current === requestId) {
+        setBoxes((current) => [
+          ...current.filter((box) => box.boxId !== target.boxId),
+          target,
+        ]);
+        setSelectedBoxId(target.boxId);
+        setEditor(null);
+      }
+    } catch (error) {
+      if (targetRequest.current === requestId) {
+        setNotice({ kind: "error", text: toCommandError(error).message });
+      }
+    } finally {
+      if (targetRequest.current === requestId) {
+        setBoxBusy(false);
+      }
+    }
+  }
+
   function openBoxEditor(box: TextBoxTargetView) {
     if (readOnly || boxBusy) {
       return;
@@ -1339,6 +1372,11 @@ export function PageTextLayer({
       }
       event.preventDefault();
       surfaceRef.current?.focus({ preventScroll: true });
+      const index = findCharAt(textLayer, point);
+      if (index !== null) {
+        void selectExistingBox(index);
+        return;
+      }
       setBoxInteraction({ kind: "create", anchor: point, current: point });
       try {
         surfaceRef.current?.setPointerCapture?.(event.pointerId);
