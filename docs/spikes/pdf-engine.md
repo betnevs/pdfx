@@ -1,6 +1,6 @@
 # PDF engine technical spike — go/no-go
 
-- **Status:** GO, conditional on one `pdfium-render` patch (see "Required M1 work")
+- **Status:** GO, conditional on one `pdfium-render` patch (see "M1 decisions")
 - **Ticket:** 03 — M0→M1 technical verification
 - **Branch:** `ticket/03-technical-spike`
 - **Date:** 2026-10-28
@@ -197,9 +197,9 @@ face/weight, not per text box.
 
 - Use Type0 / Identity-H with a CIDFontType2 descendant, FontDescriptor,
   FontFile2 and ToUnicode — **not** CIDFontType0/CFF.
-- Use Noto Sans SC / Noto Serif SC **variable TrueType** builds. The spec's
-  Source Han Sans/Serif files are CFF; ADR-0006 wording should be updated to the
-  Noto TrueType equivalents for M1–M3.
+- Use Noto Sans SC / Noto Serif SC **variable TrueType** builds. ADR-0006 now
+  specifies these TrueType builds; Adobe's Source Han OTF releases are CFF and
+  would require a separate CIDFontType0/CFF pipeline.
 - Shape with `rustybuzz`, subset with `subsetter`, and treat the old→new GID map
   as the single source of truth for content codes, `/W` and ToUnicode.
 - Use `subset_with_variations` for non-default weights (bold/opsz). The probe
