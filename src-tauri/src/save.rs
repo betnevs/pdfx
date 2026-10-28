@@ -164,7 +164,11 @@ pub fn save_document_with_progress(
     progress: &mut dyn FnMut(SaveProgress),
 ) -> Result<SaveResultView, CommandError> {
     with_open_document(document_id, |entry| {
-        let (encrypted, read_only, _) = crate::commands::document_permissions(&entry.document);
+        // Use the Source Document's remembered security: a Document restored
+        // from a Recovery File is already decrypted in PDFium, but ADR-0007
+        // and the Source's Permission Restrictions still apply to its saves.
+        let encrypted = entry.source_security.encrypted;
+        let read_only = entry.source_security.read_only;
 
         // Save Changes is disabled for a Permission-Restricted document; Save
         // As remains available so the user can keep an unencrypted copy.
@@ -220,6 +224,11 @@ pub fn save_document_with_progress(
         // state and the previous target untouched.
         entry.save.output_path = Some(target.clone());
         entry.edit.mark_document_saved();
+
+        // The unsaved edits are now on disk, so the Recovery File is stale.
+        // The successful Output Document also enters the recent-files list.
+        crate::recovery::clear_for_entry(entry);
+        crate::recovery::record_recent_document(&target);
 
         emit(document_id, SaveStage::Done, 4, progress);
 
