@@ -10,7 +10,9 @@ import {
   choosePdfFile,
   chooseSaveFile,
   closeDocument,
+  createFormField,
   createFormTextField,
+  deleteFormField,
   deleteFormTextField,
   exportPage,
   extractTextLayer,
@@ -35,6 +37,7 @@ import {
   setFullscreen,
   setWindowTitle,
   toCommandError,
+  updateFormField,
   updateFormTextField,
 } from "./backend";
 
@@ -551,6 +554,79 @@ describe("backend command seam", () => {
     expect(invokeMock).toHaveBeenCalledWith("delete_form_text_field", {
       documentId: "doc-1",
       fieldId: "new:1",
+    });
+  });
+
+  it("maps checkbox and radio field commands to the shared generic seam", async () => {
+    const history = {
+      canUndo: true,
+      canRedo: false,
+      revision: 1,
+      savedRevision: 0,
+      dirty: true,
+    };
+    const field = {
+      fieldId: "new:2",
+      name: "terms",
+      kind: "checkbox",
+      pageIndex: 0,
+      order: 0,
+      rect: { x: 72, y: 100, width: 16, height: 16 },
+      value: "Off",
+      checked: false,
+      options: [],
+      selectedIndex: null,
+      required: false,
+      readOnly: false,
+      multiline: false,
+      radioGroup: null,
+      exportValue: "Yes",
+    };
+    const createResult = { fieldId: "new:2", fields: [field], history };
+    const checkboxRequest = {
+      kind: "checkbox" as const,
+      rect: { x: 72, y: 100, width: 16, height: 16 },
+      name: null,
+      tooltip: null,
+      required: false,
+      checked: false,
+    };
+    invokeMock.mockResolvedValue(createResult);
+    await expect(
+      createFormField("doc-1", 0, checkboxRequest),
+    ).resolves.toEqual(createResult);
+    expect(invokeMock).toHaveBeenLastCalledWith("create_form_field", {
+      documentId: "doc-1",
+      pageIndex: 0,
+      request: checkboxRequest,
+    });
+
+    const radioRequest = {
+      kind: "radio" as const,
+      name: "gender",
+      tooltip: "请选择性别",
+      required: true,
+      options: ["男", "女"],
+      selectedIndex: 1,
+    };
+    const structureResult = { fields: [field], history };
+    invokeMock.mockResolvedValue(structureResult);
+    await expect(
+      updateFormField("doc-1", "new:2", radioRequest),
+    ).resolves.toEqual(structureResult);
+    expect(invokeMock).toHaveBeenLastCalledWith("update_form_field", {
+      documentId: "doc-1",
+      fieldId: "new:2",
+      request: radioRequest,
+    });
+
+    invokeMock.mockResolvedValue(structureResult);
+    await expect(deleteFormField("doc-1", "new:2")).resolves.toEqual(
+      structureResult,
+    );
+    expect(invokeMock).toHaveBeenLastCalledWith("delete_form_field", {
+      documentId: "doc-1",
+      fieldId: "new:2",
     });
   });
 

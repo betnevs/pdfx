@@ -135,11 +135,11 @@ pub enum ObjectEdit {
     SetRadioGroup { field_name: String, state: String },
     /// Sets a choice field's `/V` and, when the label is one of `/Opt`, `/I`.
     SetChoiceValue { field_name: String, label: String },
-    /// Writes the AcroForm text fields created in this session: `/AcroForm`,
-    /// `/Fields`, `/DA`, `/DR`, widget dictionaries, appearance streams and
-    /// the embedded CJK font subset.
-    CreateTextFields {
-        fields: Vec<crate::form_create::TextFieldSpec>,
+    /// Writes the AcroForm fields created in this session: `/AcroForm`,
+    /// `/Fields`, `/DA`, `/DR`, widget dictionaries, appearance streams and —
+    /// when text fields exist — the embedded CJK font subset.
+    CreateFormFields {
+        fields: Vec<crate::form_create::FormFieldSpec>,
     },
 }
 
@@ -428,7 +428,7 @@ fn apply_object_edit(
         ObjectEdit::SetChoiceValue { field_name, label } => {
             apply_choice_value(incremental, field_name, label)
         }
-        ObjectEdit::CreateTextFields { fields } => {
+        ObjectEdit::CreateFormFields { fields } => {
             crate::form_create::apply_created_fields(incremental, fields)
         }
     }
