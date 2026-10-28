@@ -537,6 +537,7 @@ fn a_transformed_signature_saves_its_position_size_and_rotation() {
         SaveDocumentRequest {
             save_as_path: Some(output.to_string_lossy().into_owned()),
             confirm_unencrypted_output: false,
+            confirm_signature_invalidation: false,
             password: None,
         },
         &mut |_| {},
@@ -710,6 +711,7 @@ fn a_transparent_signature_keeps_its_alpha_through_save_and_reopen() {
     let request = |path: Option<String>| SaveDocumentRequest {
         save_as_path: path,
         confirm_unencrypted_output: false,
+        confirm_signature_invalidation: false,
         password: None,
     };
     save_document_with_progress(

@@ -1100,6 +1100,7 @@ fn target_from_record(
             )
         })
         .unwrap_or(0.0);
+    let (x, y, width, height) = legacy_box_rect(x, y, width, height, rotation);
 
     Ok(TextBoxTargetView {
         box_id: record.box_id,
@@ -1117,9 +1118,31 @@ fn target_from_record(
         underline: false,
         alignment: TextAlignment::Left,
         rotation,
-        auto_height: false,
+        // A legacy Text Object is sized by its own glyphs; moving or rotating
+        // it must keep every line painted instead of clipping at the loose
+        // text-layer height.
+        auto_height: true,
         created: record.created,
     })
+}
+
+/// A legacy Text Object is measured as an axis-aligned display rect, while a
+/// Text Box stores its geometry in its own rotated frame. For quarter turns
+/// the two are the same rectangle expressed around a different corner, so
+/// convert the rect: its width and height swap at 90/270 and the origin moves
+/// to the corner the model rotates about. Other angles keep the axis-aligned
+/// approximation the text editor overlay already used.
+fn legacy_box_rect(x: f32, y: f32, width: f32, height: f32, rotation: f32) -> (f32, f32, f32, f32) {
+    let angle = normalize_angle(rotation);
+    if (angle - 90.0).abs() < 0.01 {
+        (x + width, y, height, width)
+    } else if (angle + 90.0).abs() < 0.01 {
+        (x, y + height, height, width)
+    } else if (angle.abs() - 180.0).abs() < 0.01 {
+        (x + width, y + height, width, height)
+    } else {
+        (x, y, width, height)
+    }
 }
 
 fn target_for(
@@ -3173,7 +3196,9 @@ fn boxes_for(
         .map(|records| {
             records
                 .iter()
-                .filter(|record| record.created && !record.deleted)
+                // Legacy Text Objects enter the list once they are resolved
+                // by a click, so selecting one survives a page reload.
+                .filter(|record| !record.deleted)
                 .map(|record| record.box_id)
                 .collect()
         })
@@ -3501,8 +3526,9 @@ pub fn create_text_box(
     })
 }
 
-/// The `text_boxes` command: every Text Box this session created on the page,
-/// including empty ones, in creation order. Deleted boxes are excluded.
+/// The `text_boxes` command: every Text Box on the page in registration
+/// order, including empty created boxes and existing Text Objects that were
+/// resolved by a click this session. Deleted boxes are excluded.
 #[tauri::command]
 pub fn text_boxes(
     document_id: String,

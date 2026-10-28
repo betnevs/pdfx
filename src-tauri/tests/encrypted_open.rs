@@ -175,6 +175,7 @@ fn document_view_serializes_encryption_and_permissions_for_the_frontend() {
         output_path: None,
         output_encrypted: false,
         recovered: false,
+        signature: None,
     };
 
     let json = serde_json::to_value(view).expect("DocumentView must serialize");
@@ -184,6 +185,7 @@ fn document_view_serializes_encryption_and_permissions_for_the_frontend() {
     assert_eq!(json["outputPath"], serde_json::Value::Null);
     assert_eq!(json["outputEncrypted"], false);
     assert_eq!(json["recovered"], false);
+    assert_eq!(json["signature"], serde_json::Value::Null);
     assert_eq!(json["permissions"]["canModifyContent"], false);
     assert_eq!(json["permissions"]["canAnnotate"], false);
     assert_eq!(json["permissions"]["canAssemble"], false);

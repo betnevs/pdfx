@@ -16,8 +16,9 @@ use pdfx_lib::commands::{
     save_document_bytes, CommandErrorCode, TextLayerView,
 };
 use pdfx_lib::text_edit::{
-    apply_text_edit, delete_text_box, edit_history, mark_document_saved, redo_text_edit,
-    text_edit_target, undo_text_edit,
+    apply_text_box_style, apply_text_edit, delete_text_box, edit_history, mark_document_saved,
+    redo_text_edit, text_edit_target, transform_text_box, undo_text_edit, TextAlignment,
+    TextBoxStyleView, TextBoxTransformRequest,
 };
 
 fn open_fixture(category: &str) -> String {
@@ -1018,6 +1019,37 @@ fn read_only_documents_reject_text_editing() {
         .expect_err("read-only edit");
     assert_eq!(error.code, CommandErrorCode::PermissionDenied);
     let error = delete_text_box(document_id.clone(), 0, 1).expect_err("read-only delete");
+    assert_eq!(error.code, CommandErrorCode::PermissionDenied);
+    let error = transform_text_box(
+        document_id.clone(),
+        0,
+        1,
+        TextBoxTransformRequest {
+            x: 10.0,
+            y: 20.0,
+            width: 200.0,
+            height: 40.0,
+            auto_height: true,
+            rotation: 0.0,
+        },
+    )
+    .expect_err("read-only transform");
+    assert_eq!(error.code, CommandErrorCode::PermissionDenied);
+    let error = apply_text_box_style(
+        document_id.clone(),
+        0,
+        1,
+        TextBoxStyleView {
+            font_family: "Times".to_owned(),
+            font_size: 20.0,
+            bold: true,
+            italic: false,
+            underline: true,
+            color: "#c0392b".to_owned(),
+            alignment: TextAlignment::Left,
+        },
+    )
+    .expect_err("read-only style");
     assert_eq!(error.code, CommandErrorCode::PermissionDenied);
 
     let history = edit_history(document_id.clone()).expect("history");

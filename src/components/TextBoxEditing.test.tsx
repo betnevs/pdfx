@@ -1,7 +1,8 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { DOCUMENT_CHANGED_EVENT } from "../lib/documentEvents";
 import type {
   EditHistoryView,
   TextBoxFontView,
@@ -717,5 +718,325 @@ describe("PageTextLayer text boxes", () => {
     fireEvent.click(screen.getByRole("button", { name: "居中" }));
     await waitFor(() => expect(styleCalls).toHaveLength(7));
     expect(styleCalls[6]).toMatchObject({ style: { alignment: "center" } });
+  });
+
+  it("selects an existing Text Object when clicking it in Text Box mode", async () => {
+    let store: TextBoxTargetView[] = [];
+    const targetCalls: Record<string, unknown>[] = [];
+    const createCalls: Record<string, unknown>[] = [];
+    const legacy = makeBox({
+      boxId: 7,
+      text: "Original",
+      created: false,
+      x: 72,
+      y: 72,
+      width: 58,
+      height: 20,
+      fontSize: 18,
+      autoHeight: true,
+    });
+
+    mockCommands({
+      text_boxes: () => [...store],
+      text_edit_target: (args) => {
+        targetCalls.push(args);
+        store = [legacy];
+        return legacy;
+      },
+      create_text_box: (args) => {
+        createCalls.push(args);
+        return {
+          pageIndex: 2,
+          target: makeBox(),
+          font: null,
+          history: editedHistory,
+        };
+      },
+    });
+
+    await renderLayer();
+    await enterBoxMode();
+
+    const region = screen.getByRole("region", { name: "文本层" });
+    fireEvent.pointerDown(region, {
+      clientX: 76,
+      clientY: 80,
+      button: 0,
+      pointerId: 1,
+    });
+    fireEvent.pointerUp(region, {
+      clientX: 76,
+      clientY: 80,
+      button: 0,
+      pointerId: 1,
+    });
+
+    await waitFor(() => expect(targetCalls).toHaveLength(1));
+    expect(targetCalls[0]).toEqual({
+      documentId: "doc-1",
+      pageIndex: 2,
+      charIndex: 0,
+    });
+    expect(createCalls).toHaveLength(0);
+    expect(
+      await screen.findByRole("group", { name: "文本框 1" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId("text-box-editor")).not.toBeInTheDocument();
+    expect(
+      await screen.findByRole("combobox", { name: "字体" }),
+    ).toBeInTheDocument();
+
+    // A page refresh keeps the selected legacy box because text_boxes now
+    // lists resolved Text Objects too.
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent(DOCUMENT_CHANGED_EVENT, {
+          detail: { documentId: "doc-1", pageIndex: 2, source: "shape" },
+        }),
+      );
+    });
+    await waitFor(() =>
+      expect(
+        screen.getByRole("group", { name: "文本框 1" }),
+      ).toBeInTheDocument(),
+    );
+  });
+
+  it("moves a selected existing Text Box through transform_text_box", async () => {
+    let store: TextBoxTargetView[] = [];
+    const transformCalls: Record<string, unknown>[] = [];
+    const legacy = makeBox({
+      boxId: 7,
+      text: "Original",
+      created: false,
+      x: 72,
+      y: 72,
+      width: 58,
+      height: 20,
+      fontSize: 18,
+      autoHeight: true,
+    });
+
+    mockCommands({
+      text_boxes: () => [...store],
+      text_edit_target: () => {
+        store = [legacy];
+        return legacy;
+      },
+      transform_text_box: (args) => {
+        transformCalls.push(args);
+        const transform = args.transform as Record<string, unknown>;
+        store[0] = { ...store[0], ...transform };
+        return {
+          pageIndex: 2,
+          target: store[0],
+          font: null,
+          history: editedHistory,
+        };
+      },
+    });
+
+    await renderLayer();
+    await enterBoxMode();
+    const region = screen.getByRole("region", { name: "文本层" });
+    fireEvent.pointerDown(region, {
+      clientX: 76,
+      clientY: 80,
+      button: 0,
+      pointerId: 1,
+    });
+    fireEvent.pointerUp(region, {
+      clientX: 76,
+      clientY: 80,
+      button: 0,
+      pointerId: 1,
+    });
+    const outline = await screen.findByRole("group", { name: "文本框 1" });
+
+    fireEvent.pointerDown(outline, {
+      clientX: 100,
+      clientY: 80,
+      button: 0,
+      pointerId: 1,
+    });
+    fireEvent.pointerMove(region, {
+      clientX: 140,
+      clientY: 120,
+      button: 0,
+      pointerId: 1,
+    });
+    fireEvent.pointerUp(region, {
+      clientX: 140,
+      clientY: 120,
+      button: 0,
+      pointerId: 1,
+    });
+
+    await waitFor(() => expect(transformCalls).toHaveLength(1));
+    expect(transformCalls[0]).toEqual({
+      documentId: "doc-1",
+      pageIndex: 2,
+      boxId: 7,
+      transform: {
+        x: 112,
+        y: 112,
+        width: 58,
+        height: 20,
+        autoHeight: true,
+        rotation: 0,
+      },
+    });
+  });
+
+  it("applies a whole-box style to a selected existing Text Box", async () => {
+    let store: TextBoxTargetView[] = [];
+    const styleCalls: Record<string, unknown>[] = [];
+    const legacy = makeBox({
+      boxId: 7,
+      text: "Original",
+      created: false,
+      x: 72,
+      y: 72,
+      width: 58,
+      height: 20,
+      fontSize: 18,
+      autoHeight: true,
+    });
+
+    mockCommands({
+      text_boxes: () => [...store],
+      text_edit_target: () => {
+        store = [legacy];
+        return legacy;
+      },
+      apply_text_box_style: (args) => {
+        styleCalls.push(args);
+        const style = args.style as Record<string, unknown>;
+        store[0] = {
+          ...store[0],
+          fontFamily: style.fontFamily as string,
+          fontSize: style.fontSize as number,
+          bold: style.bold as boolean,
+          italic: style.italic as boolean,
+          underline: style.underline as boolean,
+          color: style.color as string,
+          alignment: style.alignment as TextBoxTargetView["alignment"],
+        };
+        return {
+          pageIndex: 2,
+          target: store[0],
+          font: null,
+          history: editedHistory,
+        };
+      },
+    });
+
+    await renderLayer();
+    await enterBoxMode();
+    const region = screen.getByRole("region", { name: "文本层" });
+    fireEvent.pointerDown(region, {
+      clientX: 76,
+      clientY: 80,
+      button: 0,
+      pointerId: 1,
+    });
+    fireEvent.pointerUp(region, {
+      clientX: 76,
+      clientY: 80,
+      button: 0,
+      pointerId: 1,
+    });
+
+    const family = await screen.findByRole("combobox", { name: "字体" });
+    fireEvent.change(family, { target: { value: "Times" } });
+    await waitFor(() => expect(styleCalls).toHaveLength(1));
+    expect(styleCalls[0]).toEqual({
+      documentId: "doc-1",
+      pageIndex: 2,
+      boxId: 7,
+      style: {
+        fontFamily: "Times",
+        fontSize: 18,
+        bold: false,
+        italic: false,
+        underline: false,
+        color: "#000000",
+        alignment: "left",
+      },
+    });
+
+    fireEvent.change(screen.getByRole("spinbutton", { name: "字号" }), {
+      target: { value: "24" },
+    });
+    await waitFor(() => expect(styleCalls).toHaveLength(2));
+    expect(styleCalls[1]).toMatchObject({
+      boxId: 7,
+      style: { fontFamily: "Times", fontSize: 24 },
+    });
+  });
+
+  it("restyles a legacy box whose original font is not offered", async () => {
+    let store: TextBoxTargetView[] = [];
+    const styleCalls: Record<string, unknown>[] = [];
+    const legacy = makeBox({
+      boxId: 7,
+      text: "Original",
+      created: false,
+      fontFamily: "PDFXMissingFont",
+      x: 72,
+      y: 72,
+      width: 58,
+      height: 20,
+      fontSize: 18,
+      autoHeight: true,
+    });
+
+    mockCommands({
+      text_boxes: () => [...store],
+      text_edit_target: () => {
+        store = [legacy];
+        return legacy;
+      },
+      apply_text_box_style: (args) => {
+        styleCalls.push(args);
+        const style = args.style as Record<string, unknown>;
+        store[0] = { ...store[0], ...style };
+        return {
+          pageIndex: 2,
+          target: store[0],
+          font: null,
+          history: editedHistory,
+        };
+      },
+    });
+
+    await renderLayer();
+    await enterBoxMode();
+    const region = screen.getByRole("region", { name: "文本层" });
+    fireEvent.pointerDown(region, {
+      clientX: 76,
+      clientY: 80,
+      button: 0,
+      pointerId: 1,
+    });
+    fireEvent.pointerUp(region, {
+      clientX: 76,
+      clientY: 80,
+      button: 0,
+      pointerId: 1,
+    });
+
+    // The panel cannot offer the original family, so it starts from the first
+    // built-in one instead of sending a family the backend would reject.
+    const family = await screen.findByRole("combobox", { name: "字体" });
+    expect((family as HTMLSelectElement).value).toBe("Helvetica");
+    fireEvent.click(screen.getByRole("button", { name: "粗体" }));
+    await waitFor(() => expect(styleCalls).toHaveLength(1));
+    expect(styleCalls[0]).toMatchObject({
+      documentId: "doc-1",
+      pageIndex: 2,
+      boxId: 7,
+      style: { fontFamily: "Helvetica", bold: true },
+    });
   });
 });

@@ -141,6 +141,7 @@ fn added_attachment_is_written_to_the_saved_pdf_and_extractable() {
         SaveDocumentRequest {
             save_as_path: Some(path_string(&output)),
             confirm_unencrypted_output: false,
+            confirm_signature_invalidation: false,
             password: None,
         },
         &mut |_| {},
@@ -187,6 +188,7 @@ fn saved_attachment_is_listed_after_reopening_the_output() {
         SaveDocumentRequest {
             save_as_path: Some(path_string(&output)),
             confirm_unencrypted_output: false,
+            confirm_signature_invalidation: false,
             password: None,
         },
         &mut |_| {},
@@ -239,6 +241,7 @@ fn save_attachment_as_extracts_exact_bytes_before_and_after_reopening() {
         SaveDocumentRequest {
             save_as_path: Some(path_string(&output)),
             confirm_unencrypted_output: false,
+            confirm_signature_invalidation: false,
             password: None,
         },
         &mut |_| {},
@@ -284,6 +287,7 @@ fn save_attachment_as_refuses_the_source_and_output_documents() {
         SaveDocumentRequest {
             save_as_path: Some(path_string(&output)),
             confirm_unencrypted_output: false,
+            confirm_signature_invalidation: false,
             password: None,
         },
         &mut |_| {},
@@ -332,6 +336,7 @@ fn deleting_an_attachment_updates_the_saved_tree_and_undo_restores_it() {
         SaveDocumentRequest {
             save_as_path: Some(path_string(&output)),
             confirm_unencrypted_output: false,
+            confirm_signature_invalidation: false,
             password: None,
         },
         &mut |_| {},
@@ -366,6 +371,7 @@ fn deleting_an_attachment_updates_the_saved_tree_and_undo_restores_it() {
         SaveDocumentRequest {
             save_as_path: None,
             confirm_unencrypted_output: false,
+            confirm_signature_invalidation: false,
             password: None,
         },
         &mut |_| {},
@@ -418,6 +424,7 @@ fn undo_and_redo_cover_adding_an_attachment() {
         SaveDocumentRequest {
             save_as_path: Some(path_string(&output)),
             confirm_unencrypted_output: false,
+            confirm_signature_invalidation: false,
             password: None,
         },
         &mut |_| {},
@@ -443,6 +450,7 @@ fn undo_and_redo_cover_adding_an_attachment() {
         SaveDocumentRequest {
             save_as_path: None,
             confirm_unencrypted_output: false,
+            confirm_signature_invalidation: false,
             password: None,
         },
         &mut |_| {},
@@ -536,6 +544,7 @@ fn hostile_attachment_names_cannot_escape_or_corrupt_the_saved_pdf() {
         SaveDocumentRequest {
             save_as_path: Some(path_string(&output)),
             confirm_unencrypted_output: false,
+            confirm_signature_invalidation: false,
             password: None,
         },
         &mut |_| {},
@@ -615,6 +624,7 @@ fn duplicate_attachment_names_get_a_stable_suffix() {
         SaveDocumentRequest {
             save_as_path: Some(path_string(&output)),
             confirm_unencrypted_output: false,
+            confirm_signature_invalidation: false,
             password: None,
         },
         &mut |_| {},
@@ -673,6 +683,7 @@ fn repeated_saves_stay_stable_and_leave_the_source_untouched() {
         SaveDocumentRequest {
             save_as_path: Some(path_string(&output)),
             confirm_unencrypted_output: false,
+            confirm_signature_invalidation: false,
             password: None,
         },
         &mut |_| {},
@@ -685,6 +696,7 @@ fn repeated_saves_stay_stable_and_leave_the_source_untouched() {
         SaveDocumentRequest {
             save_as_path: None,
             confirm_unencrypted_output: false,
+            confirm_signature_invalidation: false,
             password: None,
         },
         &mut |_| {},
@@ -736,6 +748,7 @@ fn existing_corpus_attachment_survives_saving_an_added_attachment() {
         SaveDocumentRequest {
             save_as_path: Some(path_string(&output)),
             confirm_unencrypted_output: false,
+            confirm_signature_invalidation: false,
             password: None,
         },
         &mut |_| {},
@@ -775,6 +788,7 @@ fn unrelated_name_trees_survive_attachment_saves() {
         SaveDocumentRequest {
             save_as_path: Some(path_string(&output)),
             confirm_unencrypted_output: false,
+            confirm_signature_invalidation: false,
             password: None,
         },
         &mut |_| {},
@@ -870,6 +884,7 @@ fn encrypted_source_save_as_requires_unencrypted_confirmation_and_keeps_attachme
         SaveDocumentRequest {
             save_as_path: Some(path_string(&output)),
             confirm_unencrypted_output: false,
+            confirm_signature_invalidation: false,
             password: None,
         },
         &mut |_| {},
@@ -886,6 +901,7 @@ fn encrypted_source_save_as_requires_unencrypted_confirmation_and_keeps_attachme
         SaveDocumentRequest {
             save_as_path: Some(path_string(&output)),
             confirm_unencrypted_output: true,
+            confirm_signature_invalidation: false,
             password: None,
         },
         &mut |_| {},
@@ -971,6 +987,7 @@ fn deleting_a_pdfdocencoding_named_attachment_removes_it_from_the_saved_tree() {
         SaveDocumentRequest {
             save_as_path: Some(path_string(&output)),
             confirm_unencrypted_output: false,
+            confirm_signature_invalidation: false,
             password: None,
         },
         &mut |_| {},
@@ -1074,6 +1091,7 @@ fn an_attachment_save_appends_one_pdfium_and_one_lopdf_revision() {
         SaveDocumentRequest {
             save_as_path: Some(path_string(&output)),
             confirm_unencrypted_output: false,
+            confirm_signature_invalidation: false,
             password: None,
         },
         &mut |_| {},

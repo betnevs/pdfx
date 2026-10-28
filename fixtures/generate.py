@@ -593,6 +593,204 @@ def fill_appearance_pdf() -> bytes:
         27: b"<< /Title (PDFX fill appearance fixture) /Author (PDFX QA) >>",
     }
     return build_pdf(objects, root_ref=b"1 0 R", info_ref=b"27 0 R")
+def _signature_appearance(width: int, height: int, label: bytes) -> bytes:
+    return stream_object(
+        b"/Type /XObject /Subtype /Form /BBox [0 0 "
+        + str(width).encode("ascii")
+        + b" "
+        + str(height).encode("ascii")
+        + b"] /Resources << /Font << /Helv 4 0 R >> >>",
+        b"BT /Helv 12 Tf 4 14 Td " + label + b" Tj ET\n",
+    )
+
+
+def _signature_dictionary() -> bytes:
+    """A structurally valid placeholder signature dictionary.
+
+    The contents are not a real PKCS#7 signature. `/Name` and `/Reason` carry
+    canary text the editor and its logs must never surface.
+    """
+    contents = bytes(range(64))
+    return (
+        b"<< /Type /Sig /Filter /Adobe.PPKLite /SubFilter /adbe.pkcs7.detached "
+        b"/ByteRange [0 1234 5678 9012] /Contents "
+        + hex_string(contents)
+        + b" /Name (PDFX SIGNER CANARY) /Reason (PDFX REASON CANARY) "
+        b"/M (D:20260101000000Z) >>"
+    )
+
+
+def signature_signed_pdf() -> bytes:
+    """One signed signature field and one empty hierarchical signature field.
+
+    The signed widget stores `/V` as an indirect signature dictionary. The
+    second field is a non-terminal `/FT /Sig` parent whose widget kid inherits
+    `/FT` through `/Parent`; the text field guards against over-counting.
+    """
+    content = content_lines(
+        [
+            "PDFX digital signature fixture",
+            "This document contains a signature and a signature field.",
+            "PDFX only warns; it never signs and never edits signature objects.",
+        ],
+        size=16,
+    )
+    objects = {
+        1: (
+            b"<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [6 0 R 9 0 R 12 0 R] "
+            b"/DA (/Helv 0 Tf 0 g) /DR << /Font << /Helv 4 0 R >> >> /SigFlags 1 >> >>"
+        ),
+        2: b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        3: (
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+            b"/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R "
+            b"/Annots [6 0 R 10 0 R 12 0 R] >>"
+        ),
+        4: HELVETICA,
+        5: stream_object(b"", content),
+        # Merged signed signature field; /V points at the signature dictionary.
+        6: (
+            b"<< /Type /Annot /Subtype /Widget /FT /Sig /T "
+            + hex_string(b"Approval")
+            + b" /V 7 0 R /Rect [72 650 300 690] /P 3 0 R /F 4 "
+            b"/AP << /N 8 0 R >> >>"
+        ),
+        7: _signature_dictionary(),
+        8: _signature_appearance(228, 40, b"(Signed)"),
+        # Non-terminal empty signature field; the widget inherits /FT but has
+        # no /T, so it is part of this field rather than a second one.
+        9: (
+            b"<< /FT /Sig /T "
+            + hex_string(b"countersign_group")
+            + b" /Kids [10 0 R] >>"
+        ),
+        10: (
+            b"<< /Type /Annot /Subtype /Widget /Parent 9 0 R "
+            b"/Rect [72 560 300 600] /P 3 0 R /F 4 >>"
+        ),
+        11: b"<< /Title (PDFX signature fixture) /Author (PDFX QA) >>",
+        # An ordinary text field must not be mistaken for a signature field.
+        12: (
+            b"<< /Type /Annot /Subtype /Widget /FT /Tx /T "
+            + hex_string(b"name")
+            + b" /Rect [72 480 300 504] /P 3 0 R /F 4 /DA (/Helv 12 Tf 0 g) >>"
+        ),
+    }
+    return build_pdf(objects, root_ref=b"1 0 R", info_ref=b"11 0 R")
+
+
+def signature_field_only_pdf() -> bytes:
+    """Two empty signature fields, one merged and one inherited from /Parent."""
+    content = content_lines(
+        [
+            "PDFX signature field fixture",
+            "This document has signature fields but no signature value.",
+        ],
+        size=16,
+    )
+    objects = {
+        1: (
+            b"<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [6 0 R 9 0 R] "
+            b"/DA (/Helv 0 Tf 0 g) /DR << /Font << /Helv 4 0 R >> >> /SigFlags 1 >> >>"
+        ),
+        2: b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        3: (
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+            b"/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R "
+            b"/Annots [6 0 R 10 0 R] >>"
+        ),
+        4: HELVETICA,
+        5: stream_object(b"", content),
+        6: (
+            b"<< /Type /Annot /Subtype /Widget /FT /Sig /T "
+            + hex_string(b"sign_here")
+            + b" /Rect [72 650 300 690] /P 3 0 R /F 4 /AP << /N 8 0 R >> >>"
+        ),
+        8: _signature_appearance(228, 40, b"(Sign here)"),
+        9: (
+            b"<< /FT /Sig /T "
+            + hex_string(b"witness_group")
+            + b" /Kids [10 0 R] >>"
+        ),
+        10: (
+            b"<< /Type /Annot /Subtype /Widget /Parent 9 0 R "
+            b"/Rect [72 560 300 600] /P 3 0 R /F 4 >>"
+        ),
+        11: b"<< /Title (PDFX signature field fixture) /Author (PDFX QA) >>",
+    }
+    return build_pdf(objects, root_ref=b"1 0 R", info_ref=b"11 0 R")
+
+
+def encrypted_signature_restricted_pdf() -> bytes:
+    """An owner-restricted encrypted document with a signed signature field.
+
+    The empty user password lets the editor open it read-only; Save As must
+    still confirm both the signature and ADR-0007 unencrypted-output warnings.
+    Strings are encrypted with the Standard Security Handler, matching
+    `encrypted_text_pdf`.
+    """
+    handler = SecurityHandler(b"", b"pdfx-owner", -3900, DOC_ID)
+    content = content_lines(
+        [
+            "PDFX encrypted signature fixture.",
+            "Owner restrictions deny modification, copying and annotation.",
+        ],
+        size=16,
+    )
+    contents = bytes(range(1, 65))
+    signature_number = 7
+    objects = {
+        1: (
+            b"<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [6 0 R 9 0 R] "
+            b"/DA (/Helv 0 Tf 0 g) /DR << /Font << /Helv 4 0 R >> >> /SigFlags 1 >> >>"
+        ),
+        2: b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        3: (
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+            b"/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R "
+            b"/Annots [6 0 R 10 0 R] >>"
+        ),
+        4: HELVETICA,
+        5: stream_object(b"", handler.encrypt(5, content)),
+        6: (
+            b"<< /Type /Annot /Subtype /Widget /FT /Sig /T "
+            + hex_string(handler.encrypt(6, b"approval"))
+            + b" /V 7 0 R /Rect [72 650 300 690] /P 3 0 R /F 4 >>"
+        ),
+        7: (
+            b"<< /Type /Sig /Filter /Adobe.PPKLite /SubFilter /adbe.pkcs7.detached "
+            b"/ByteRange [0 1234 5678 9012] /Contents "
+            + hex_string(handler.encrypt(signature_number, contents))
+            + b" /Name "
+            + hex_string(handler.encrypt(signature_number, b"PDFX SIGNER CANARY"))
+            + b" >>"
+        ),
+        9: (
+            b"<< /FT /Sig /T "
+            + hex_string(handler.encrypt(9, b"witness_group"))
+            + b" /Kids [10 0 R] >>"
+        ),
+        10: (
+            b"<< /Type /Annot /Subtype /Widget /Parent 9 0 R "
+            b"/Rect [72 560 300 600] /P 3 0 R /F 4 >>"
+        ),
+        11: (
+            b"<< /Title "
+            + hex_string(
+                handler.encrypt(11, b"PDFX encrypted signature fixture")
+            )
+            + b" /Author " + hex_string(handler.encrypt(11, b"PDFX QA"))
+            + b" >>"
+        ),
+        12: handler.dictionary(),
+    }
+    return build_pdf(
+        objects,
+        root_ref=b"1 0 R",
+        info_ref=b"11 0 R",
+        doc_id=DOC_ID,
+        extra_trailer=b" /Encrypt 12 0 R",
+    )
 
 
 def structure_pdf() -> bytes:
@@ -771,6 +969,9 @@ def build_all(large_pages: int) -> Tuple[Dict[str, bytes], List[FixtureSpec]]:
         ),
         "form-acroform.pdf": form_pdf(),
         "form-fill-appearance.pdf": fill_appearance_pdf(),
+        "signature-signed.pdf": signature_signed_pdf(),
+        "signature-field-only.pdf": signature_field_only_pdf(),
+        "encrypted-signature-restricted.pdf": encrypted_signature_restricted_pdf(),
         "structure-metadata.pdf": structure_pdf(),
         f"large-{large_pages}-pages.pdf": large_pdf(large_pages),
         "rotated-mixed-size.pdf": rotated_pdf(),
@@ -835,6 +1036,31 @@ def build_all(large_pages: int) -> Tuple[Dict[str, bytes], List[FixtureSpec]]:
             "红色外观流，用于填写后外观保真测试。",
             2,
             True,
+        ),
+        FixtureSpec(
+            "signature-signed.pdf",
+            "signature",
+            "一个已签名的签名字段（/V 指向含 /ByteRange、/Contents 的签名字典）"
+            "与一个通过 /Parent 继承 /FT 的空签名字段；另含普通文本字段。",
+            1,
+            True,
+        ),
+        FixtureSpec(
+            "signature-field-only.pdf",
+            "signature",
+            "两个空签名字段：终态 widget 与通过 /Parent 继承 /FT 的嵌套字段；无 /V。",
+            1,
+            True,
+        ),
+        FixtureSpec(
+            "encrypted-signature-restricted.pdf",
+            "signature",
+            "用户密码为空可直接打开；所有者密码 pdfx-owner 限制修改、复制与注释；"
+            "含已签名与空签名字段，用于只读 + Save As 的签名确认组合。",
+            1,
+            True,
+            password="",
+            owner_password="pdfx-owner",
         ),
         FixtureSpec(
             "structure-metadata.pdf",

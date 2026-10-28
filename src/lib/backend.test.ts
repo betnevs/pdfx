@@ -558,6 +558,7 @@ describe("backend command seam", () => {
       "save_target_is_source",
       "no_output_document",
       "unencrypted_output_confirmation_required",
+      "signature_invalidation_confirmation_required",
       "read_only_document",
     ] as const) {
       expect(toCommandError({ code, message: "detail" })).toEqual({
