@@ -39,3 +39,7 @@ test-results/
 
 # Local research notes
 .research/
+
+# Technical spike native assets and outputs (fetched by scripts/setup-native.sh)
+spikes/pdf-engine/vendor/
+spikes/pdf-engine/out/
