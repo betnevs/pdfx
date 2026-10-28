@@ -36,6 +36,7 @@ import {
   SAVE_PROGRESS_EVENT,
   saveDocument,
   setFullscreen,
+  setMenuState,
   setWindowTitle,
   toCommandError,
   updateFormField,
@@ -364,6 +365,19 @@ describe("backend command seam", () => {
     await destroyWindow();
 
     expect(destroy).toHaveBeenCalledTimes(1);
+  });
+
+  it("pushes native menu availability through one command", async () => {
+    const items = [
+      { id: "file.save", enabled: true },
+      { id: "edit.undo", enabled: false },
+    ];
+
+    await setMenuState(items);
+
+    expect(invokeMock).toHaveBeenCalledWith("set_menu_state", {
+      state: { items },
+    });
   });
 
   it("forwards menu payloads and unsubscribes", async () => {

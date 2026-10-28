@@ -113,6 +113,7 @@ pub fn run() {
             commands::export_diagnostics,
             commands::check_for_updates,
             commands::open_download_page,
+            menu::set_menu_state,
         ])
         .setup(|app| {
             // Logging is local-only and must never prevent the shell from

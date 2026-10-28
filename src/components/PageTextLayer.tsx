@@ -1646,17 +1646,9 @@ export function PageTextLayer({
       // The textarea owns typing keys, including its own undo while composing.
       return;
     }
-    const modifier = event.metaKey || event.ctrlKey;
-    if (modifier && event.key.toLowerCase() === "z") {
-      event.preventDefault();
-      void runHistory(event.shiftKey ? "redo" : "undo");
-      return;
-    }
-    if (modifier && event.key.toLowerCase() === "y") {
-      event.preventDefault();
-      void runHistory("redo");
-      return;
-    }
+    // Undo/redo and page shortcuts belong to the native menu. The layer must
+    // not also handle Cmd/Ctrl+Z here or one press would produce two history
+    // steps; the textarea above keeps the platform's native text undo.
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "c") {
       event.preventDefault();
       void copySelection();

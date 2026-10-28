@@ -24,8 +24,11 @@ import {
   onWindowCloseRequested,
   openDocument,
   openDocumentInNewWindow,
+  redoTextEdit,
+  setMenuState,
   setWindowTitle,
   toCommandError,
+  undoTextEdit,
   ZOOM_STEP,
   type AnnotationView,
   type AppInfo,
@@ -37,6 +40,9 @@ import {
   type StampKind,
 } from "./lib/backend";
 import { scaleToPercent } from "./lib/pageGeometry";
+import { notifyDocumentChanged } from "./lib/documentEvents";
+import { isEditableTarget, isWindowsPlatform } from "./lib/keyboard";
+import { menuItemStates, menuStateSignature } from "./lib/menu";
 import { useAnnotations } from "./lib/useAnnotations";
 import { useDocumentSave } from "./lib/useDocumentSave";
 import { useDocumentViewer } from "./lib/useDocumentViewer";
@@ -84,8 +90,10 @@ const ERROR_MESSAGES: Partial<Record<CommandErrorCode, string>> = {
   password_required: "此 PDF 需要密码。",
   invalid_password: "密码不正确。",
   corrupt_document: "文件已损坏或格式不受支持。",
+  document_not_found: "文档已关闭。",
   render_failed: "无法渲染页面。",
   window_failed: "无法打开新窗口。",
+  internal: "操作失败，请重试。",
 };
 
 function errorMessage(code: CommandErrorCode): string {
@@ -200,6 +208,135 @@ export function App() {
   });
   const saveRef = useRef(save);
   saveRef.current = save;
+
+  // A focused text control owns Cmd/Ctrl+Z, PageUp/PageDown and Home/End. The
+  // menu state below disables those items, which also releases their native
+  // accelerators, so the keys reach the control and the platform's own undo.
+  const [textInputFocused, setTextInputFocused] = useState(false);
+  useEffect(() => {
+    const onFocusIn = (event: FocusEvent) => {
+      setTextInputFocused(isEditableTarget(event.target));
+    };
+    const onFocusOut = () => {
+      setTextInputFocused(false);
+    };
+    document.addEventListener("focusin", onFocusIn);
+    document.addEventListener("focusout", onFocusOut);
+    return () => {
+      document.removeEventListener("focusin", onFocusIn);
+      document.removeEventListener("focusout", onFocusOut);
+    };
+  }, []);
+
+  // The native menu lives in Rust. This snapshot is the single source of truth
+  // for which items can act; see `src/lib/menu.ts` for the rules. `menuEnabled`
+  // is also read when a menu event arrives, so an event that raced ahead of a
+  // state push can never run a command that is currently unavailable.
+  const menuState = menuItemStates({
+    hasDocument: openDocumentView !== null,
+    readOnly: openDocumentView?.readOnly ?? false,
+    canPrint: openDocumentView?.permissions.canPrint ?? false,
+    canUndo: save.canUndo,
+    canRedo: save.canRedo,
+    saving: save.busy,
+    modalOpen:
+      closePrompt !== null ||
+      passwordPrompt !== null ||
+      save.confirmation !== null,
+    textInputFocused,
+    pageIndex: viewer.pageIndex,
+    pageCount: openDocumentView?.pageCount ?? 0,
+  });
+  const menuSignature = menuStateSignature(menuState);
+  const menuEnabledRef = useRef<Map<string, boolean>>(new Map());
+  menuEnabledRef.current = new Map(
+    menuState.map((item) => [item.id, item.enabled]),
+  );
+  // The native menu is app-wide, so two document windows can disagree about
+  // what is available. Re-publishing when this window gains focus makes the
+  // menu reflect the window the user is actually working in.
+  const [menuPushRevision, setMenuPushRevision] = useState(0);
+  useEffect(() => {
+    const onWindowFocus = () => setMenuPushRevision((value) => value + 1);
+    window.addEventListener("focus", onWindowFocus);
+    return () => window.removeEventListener("focus", onWindowFocus);
+  }, []);
+
+  const lastMenuPushRef = useRef<string | null>(null);
+  useEffect(() => {
+    const pushKey = `${menuSignature}:${menuPushRevision}`;
+    if (lastMenuPushRef.current === pushKey) {
+      return;
+    }
+    lastMenuPushRef.current = pushKey;
+    void setMenuState(menuState).catch(() => {
+      // Outside the Tauri shell the command does not exist; a later state
+      // change retries so a transient failure cannot leave the menu stale.
+      lastMenuPushRef.current = null;
+    });
+    // `menuState` is rebuilt every render; the signature guard decides whether
+    // anything actually changed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [menuSignature, menuPushRevision]);
+
+  const historyActionInFlightRef = useRef(false);
+  const runHistoryAction = useCallback(async (kind: "undo" | "redo") => {
+    if (historyActionInFlightRef.current) {
+      return;
+    }
+    const current = editorRef.current;
+    if (current.status !== "open") {
+      return;
+    }
+    const documentId = current.document.documentId;
+    const currentSave = saveRef.current;
+    if (
+      currentSave.busy ||
+      (kind === "undo" ? !currentSave.canUndo : !currentSave.canRedo)
+    ) {
+      return;
+    }
+    historyActionInFlightRef.current = true;
+    try {
+      const step =
+        kind === "undo"
+          ? await undoTextEdit(documentId)
+          : await redoTextEdit(documentId);
+      currentSave.acceptHistory(step.history);
+      // The Edit Session is document-wide: refresh every overlay, the page
+      // bitmap and the dirty marker, not just the page that changed.
+      notifyDocumentChanged({ documentId, pageIndex: step.pageIndex });
+    } catch (error) {
+      setNotice(toCommandError(error));
+    } finally {
+      historyActionInFlightRef.current = false;
+    }
+  }, []);
+
+  // Windows also accepts Ctrl+Y for redo. The menu item carries a single
+  // accelerator (CmdOrCtrl+Shift+Z); this fallback only acts when the item is
+  // enabled, so it cannot redo twice or steal the key from a text control.
+  useEffect(() => {
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (
+        event.defaultPrevented ||
+        !isWindowsPlatform() ||
+        !event.ctrlKey ||
+        event.metaKey ||
+        event.altKey ||
+        event.shiftKey ||
+        event.key.toLowerCase() !== "y" ||
+        isEditableTarget(event.target) ||
+        !menuEnabledRef.current.get("edit.redo")
+      ) {
+        return;
+      }
+      event.preventDefault();
+      void runHistoryAction("redo");
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [runHistoryAction]);
 
   // Story 10: the native title carries the Document name and an unsaved
   // marker. The marker comes from the backend's dirty flag only; the save
@@ -454,9 +591,10 @@ export function App() {
   }
 
   function handleMenu(menuId: string) {
-    // The close question is modal: native accelerators must not start a save
-    // or replace the document while the user is answering it.
-    if (closePromptRef.current) {
+    // Native menus do not fire disabled items, but an event can arrive while a
+    // state push is in flight. The current availability is the same snapshot
+    // the menu was built from, so a disabled command is ignored here too.
+    if (!menuEnabledRef.current.get(menuId)) {
       return;
     }
     const current = viewerRef.current;
@@ -475,6 +613,18 @@ export function App() {
         break;
       case "file.save_as":
         saveRef.current.saveAs();
+        break;
+      case "edit.undo":
+        void runHistoryAction("undo");
+        break;
+      case "edit.redo":
+        void runHistoryAction("redo");
+        break;
+      case "page.prev":
+        current.goToPage(current.pageIndex - 1);
+        break;
+      case "page.next":
+        current.goToPage(current.pageIndex + 1);
         break;
       case "view.zoom_in":
         current.zoomBy(ZOOM_STEP);
