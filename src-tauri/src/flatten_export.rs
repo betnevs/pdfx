@@ -213,8 +213,10 @@ struct FlattenedDocument {
 struct Drawing {
     name: Vec<u8>,
     xobject: lopdf::Object,
-    /// Placement matrix to apply before `Do`, or `None` when the stream's own
-    /// `/Matrix` already places it.
+    /// Matrix that maps the form's transformed bounding box onto the
+    /// annotation `/Rect`, applied before `Do`; the form's own `/Matrix` is
+    /// applied by `Do` itself. `None` when the appearance has no usable `/Rect`
+    /// mapping, in which case the form is painted at its own `/Matrix`.
     matrix: Option<[f32; 6]>,
 }
 
@@ -545,6 +547,11 @@ fn is_form_xobject(dictionary: &lopdf::Dictionary) -> bool {
 /// the annotation rectangle, as viewers do, or `None` when the appearance has
 /// no usable `/BBox`.
 ///
+/// The form's own `/Matrix` takes part in that mapping by transforming the
+/// `/BBox`, but it must not be part of the returned matrix: the form is painted
+/// with the `Do` operator, and `Do` concatenates the form's `/Matrix` itself.
+/// Including it here would rotate, scale or translate the appearance twice.
+///
 /// PDFium's own appearance streams use `/BBox` equal to `/Rect` and no
 /// `/Matrix`, which makes the result the identity matrix.
 fn placement_for(
@@ -593,10 +600,9 @@ fn placement_for(
     let to_origin = [1.0, 0.0, 0.0, 1.0, -bounds[0], -bounds[1]];
     let scale = [scale_x, 0.0, 0.0, scale_y, 0.0, 0.0];
     let to_rect = [1.0, 0.0, 0.0, 1.0, rect[0], rect[1]];
-    Some(Some(multiply(
-        to_rect,
-        multiply(scale, multiply(to_origin, matrix)),
-    )))
+    // Maps the transformed bounding box onto `/Rect`; `Do` applies the form's
+    // own `/Matrix` on top of this.
+    Some(Some(multiply(to_rect, multiply(scale, to_origin))))
 }
 
 const IDENTITY: [f32; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
