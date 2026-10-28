@@ -399,9 +399,7 @@ fn collect_values(edit: &EditSession, include_pdfium_written: bool) -> FormOverl
                 overlay.text.insert(action.field_name.clone(), text.clone());
             }
             FieldValueSnapshot::Checked(checked) => {
-                overlay
-                    .checked
-                    .insert(action.field_name.clone(), *checked);
+                overlay.checked.insert(action.field_name.clone(), *checked);
             }
             _ => {}
         }
@@ -1181,10 +1179,7 @@ fn fill_for(
     // checkbox values only go through Pdfium when the annotation setter can
     // actually reach the field object.
     let pdfium_write = !is_copy
-        && matches!(
-            field.kind,
-            FormFieldKind::Text | FormFieldKind::Checkbox
-        )
+        && matches!(field.kind, FormFieldKind::Text | FormFieldKind::Checkbox)
         && pdfium_can_write_field(&entry.source_bytes, &field.raw_name);
 
     let after = match field.kind {

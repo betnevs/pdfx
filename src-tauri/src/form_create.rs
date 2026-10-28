@@ -3179,10 +3179,8 @@ fn write_existing_appearances(
                         ),
                         None,
                     )?;
-                    let normal = state_appearance(&[
-                        (b"Off".as_slice(), off),
-                        (on_state.as_slice(), on),
-                    ]);
+                    let normal =
+                        state_appearance(&[(b"Off".as_slice(), off), (on_state.as_slice(), on)]);
                     let state = if *checked {
                         on_state.clone()
                     } else {
@@ -3219,10 +3217,8 @@ fn write_existing_appearances(
                         ),
                         None,
                     )?;
-                    let normal = state_appearance(&[
-                        (b"Off".as_slice(), off),
-                        (on_state.as_slice(), on),
-                    ]);
+                    let normal =
+                        state_appearance(&[(b"Off".as_slice(), off), (on_state.as_slice(), on)]);
                     let state = if selected.as_bytes() == on_state.as_slice() {
                         on_state
                     } else {
@@ -3480,14 +3476,14 @@ pub(crate) fn apply_created_fields(
     }
 
     if !prepared.is_empty() {
-        let appearance_font =
-            font.as_ref()
-                .map(|(name, id, subset, metrics, _)| AppearanceFont {
-                    name: name.as_str(),
-                    id: *id,
-                    subset,
-                    metrics,
-                });
+        let appearance_font = font
+            .as_ref()
+            .map(|(name, id, subset, metrics, _)| AppearanceFont {
+                name: name.as_str(),
+                id: *id,
+                subset,
+                metrics,
+            });
         write_existing_appearances(incremental, &prepared, appearance_font.as_ref())?;
     }
 

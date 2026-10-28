@@ -12,9 +12,12 @@ mod support;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use pdfx_lib::commands::{close_document, open_document, CommandErrorCode};
-use pdfx_lib::form::{fill_form_field, form_fields, FormFieldKind, FormFieldView, FormFieldValueInput};
+use pdfx_lib::commands::{close_document, open_document, render_page, CommandErrorCode};
+use pdfx_lib::form::{
+    fill_form_field, form_fields, FormFieldKind, FormFieldValueInput, FormFieldView,
+};
 use pdfx_lib::save::{save_document_with_progress, SaveDocumentRequest};
+use pdfx_lib::text_edit::{redo_text_edit, undo_text_edit};
 
 fn fixture_path(id: &str) -> PathBuf {
     let manifest = support::fixtures::load_manifest();
@@ -82,9 +85,12 @@ fn resolved<'a>(document: &'a lopdf::Document, object: &'a lopdf::Object) -> &'a
 }
 
 fn acroform(document: &lopdf::Document) -> &lopdf::Dictionary {
-    resolved(document, catalog(document).get(b"AcroForm").expect("/AcroForm"))
-        .as_dict()
-        .expect("AcroForm dictionary")
+    resolved(
+        document,
+        catalog(document).get(b"AcroForm").expect("/AcroForm"),
+    )
+    .as_dict()
+    .expect("AcroForm dictionary")
 }
 
 fn decode_pdf_text(bytes: &[u8]) -> String {
@@ -224,10 +230,401 @@ fn appearance_content(document: &lopdf::Document, widget: &lopdf::Dictionary) ->
     .into_owned()
 }
 
+/// Content of the first widget's normal appearance for a field name, whether
+/// the field is merged with its widget or keeps widgets in `/Kids`.
+fn field_appearance_content(document: &lopdf::Document, field_name: &str) -> String {
+    let field = find_field(document, field_name);
+    let widget_id = widget_ids(document, &field, field_name)[0];
+    appearance_content(document, widget(document, widget_id))
+}
+
 fn widget(document: &lopdf::Document, id: lopdf::ObjectId) -> &lopdf::Dictionary {
-    document
-        .get_dictionary(id)
-        .expect("widget dictionary")
+    document.get_dictionary(id).expect("widget dictionary")
+}
+
+fn name_of(object: &lopdf::Object) -> String {
+    String::from_utf8_lossy(object.as_name().expect("name")).into_owned()
+}
+
+/// `/AP /N` of a button widget: a dictionary of appearance states.
+fn state_appearances<'a>(
+    document: &'a lopdf::Document,
+    widget: &'a lopdf::Dictionary,
+) -> &'a lopdf::Dictionary {
+    let appearance = resolved(document, widget.get(b"AP").expect("/AP"))
+        .as_dict()
+        .expect("/AP dictionary");
+    resolved(document, appearance.get(b"N").expect("/N"))
+        .as_dict()
+        .expect("/N state dictionary")
+}
+
+fn state_stream_content(document: &lopdf::Document, state: &lopdf::Object) -> String {
+    String::from_utf8_lossy(
+        &resolved(document, state)
+            .as_stream()
+            .expect("state appearance stream")
+            .decompressed_content()
+            .expect("state appearance content"),
+    )
+    .into_owned()
+}
+
+struct DecodedPng {
+    width: u32,
+    rgba: Vec<u8>,
+}
+
+fn render_pixels(document_id: &str, page_index: u32, scale: f32) -> DecodedPng {
+    use base64::Engine as _;
+
+    let image = render_page(document_id.to_owned(), page_index, scale).expect("render page");
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(&image.png_base64)
+        .expect("render payload should be base64");
+    let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+    let mut reader = decoder.read_info().expect("PNG header should parse");
+    let mut buffer = vec![0; reader.output_buffer_size().expect("output buffer size")];
+    let info = reader
+        .next_frame(&mut buffer)
+        .expect("PNG frame should decode");
+    buffer.truncate(info.buffer_size());
+    DecodedPng {
+        width: info.width,
+        rgba: buffer,
+    }
+}
+
+/// Pixels that are strongly red: the colour of every stale appearance in the
+/// fixture. A saved page must contain none of them.
+fn red_pixels(pixels: &DecodedPng) -> usize {
+    pixels
+        .rgba
+        .chunks_exact(4)
+        .filter(|pixel| pixel[0] > 180 && pixel[1] < 110 && pixel[2] < 110)
+        .count()
+}
+
+/// Non-white pixels inside a display-point region.
+fn ink_in_region(pixels: &DecodedPng, scale: f32, region: (f32, f32, f32, f32)) -> usize {
+    let mut count = 0;
+    for (index, pixel) in pixels.rgba.chunks_exact(4).enumerate() {
+        if pixel[0] >= 245 && pixel[1] >= 245 && pixel[2] >= 245 {
+            continue;
+        }
+        let x = (index as u32 % pixels.width) as f32 / scale;
+        let y = (index as u32 / pixels.width) as f32 / scale;
+        if x < region.0 || x > region.2 || y < region.1 || y > region.3 {
+            continue;
+        }
+        count += 1;
+    }
+    count
+}
+
+fn fill_all_fields(document_id: &str) {
+    let fields = form_fields(document_id.to_owned()).expect("fields");
+    fill(
+        document_id,
+        field_named(&fields, "membership_id").field_id.clone(),
+        FormFieldValueInput::Text {
+            text: "MEM-2026-0001".to_owned(),
+        },
+    );
+    fill(
+        document_id,
+        field_named(&fields, "person.name").field_id.clone(),
+        FormFieldValueInput::Text {
+            text: "Katherine Johnson".to_owned(),
+        },
+    );
+    fill(
+        document_id,
+        field_named(&fields, "subscribe").field_id.clone(),
+        FormFieldValueInput::Checked { checked: true },
+    );
+    let gender: Vec<FormFieldView> = fields
+        .iter()
+        .filter(|field| field.name == "gender")
+        .cloned()
+        .collect();
+    fill(
+        document_id,
+        gender[1].field_id.clone(),
+        FormFieldValueInput::Checked { checked: true },
+    );
+    fill(
+        document_id,
+        field_named(&fields, "country").field_id.clone(),
+        FormFieldValueInput::Choice {
+            value: "Japan".to_owned(),
+        },
+    );
+    fill(
+        document_id,
+        field_named(&fields, "comments").field_id.clone(),
+        FormFieldValueInput::Text {
+            text: "合同已审阅".to_owned(),
+        },
+    );
+    fill(
+        document_id,
+        field_named(&fields, "department").field_id.clone(),
+        FormFieldValueInput::Choice {
+            value: "Design".to_owned(),
+        },
+    );
+}
+
+#[test]
+fn saved_pages_render_the_new_values_and_never_the_stale_appearances() {
+    let dir = support::temp::TempDir::new("fill-appearance-pixels");
+    let source = dir.path().join("source.pdf");
+    fs::copy(fixture_path("form-fill-appearance"), &source).expect("copy fixture");
+
+    // The fixture really does carry red stale appearances: rendering the
+    // source proves the colour check below can fail.
+    let source_document = open_at(&source);
+    let source_pixels = render_pixels(&source_document, 0, 2.0);
+    assert!(
+        red_pixels(&source_pixels) > 0,
+        "the source fixture's stale appearances are visible"
+    );
+    close_document(source_document).expect("close source preview");
+
+    let document_id = open_at(&source);
+    fill_all_fields(&document_id);
+    let output = dir.path().join("output.pdf");
+    save_as(&document_id, &output);
+    close_document(document_id).expect("close source");
+
+    // Independent lopdf: the rotated page's appearance compensates /Rotate,
+    // and the CJK value is a UTF-16BE string.
+    let parsed = lopdf::Document::load(&output).expect("parse output");
+    let comments = find_field(&parsed, "comments");
+    assert_eq!(text_of(comments.get(b"V").expect("/V")), "合同已审阅");
+    let comments_appearance = appearance_content(&parsed, &comments);
+    assert!(
+        comments_appearance.starts_with("q 0 1 -1 0 400 600 cm"),
+        "the appearance compensates a 90-degree page rotation: {comments_appearance:?}"
+    );
+    assert!(
+        comments_appearance.contains("Tj"),
+        "the CJK value is drawn in the appearance: {comments_appearance:?}"
+    );
+
+    let reopened = open_at(&output);
+    let fields = form_fields(reopened.clone()).expect("reopened fields");
+    assert_eq!(
+        field_named(&fields, "comments").value.as_deref(),
+        Some("合同已审阅")
+    );
+    assert_eq!(
+        field_named(&fields, "department").value.as_deref(),
+        Some("Design")
+    );
+
+    // Fixed-DPI rendering: page 0 and the rotated page 1 draw the new values
+    // and no stale red pixel survives anywhere.
+    let page_one = render_pixels(&reopened, 0, 2.0);
+    assert_eq!(
+        red_pixels(&page_one),
+        0,
+        "page 1 must not keep any stale source appearance"
+    );
+    let page_two = render_pixels(&reopened, 1, 2.0);
+    assert_eq!(
+        page_two.width,
+        (792.0 * 2.0) as u32,
+        "the rotated page renders in display orientation"
+    );
+    assert_eq!(
+        red_pixels(&page_two),
+        0,
+        "page 2 must not keep any stale source appearance"
+    );
+    // Display-space regions of the comments and department widgets on the
+    // 90-degree page: user (x, y) maps to display (y, x).
+    let comments_ink = ink_in_region(&page_two, 2.0, (600.0, 72.0, 680.0, 400.0));
+    assert!(
+        comments_ink > 200,
+        "the filled comments widget draws its text, found {comments_ink} ink pixels"
+    );
+    let department_ink = ink_in_region(&page_two, 2.0, (500.0, 72.0, 524.0, 300.0));
+    assert!(
+        department_ink > 100,
+        "the filled combo widget draws its label, found {department_ink} ink pixels"
+    );
+    close_document(reopened).expect("close reopened");
+}
+
+#[test]
+fn fills_checkbox_radio_and_choice_with_matching_appearance_states() {
+    let dir = support::temp::TempDir::new("fill-appearance-buttons");
+    let source = dir.path().join("source.pdf");
+    fs::copy(fixture_path("form-fill-appearance"), &source).expect("copy fixture");
+
+    let document_id = open_at(&source);
+    let fields = form_fields(document_id.clone()).expect("discover fields");
+
+    let subscribe = field_named(&fields, "subscribe");
+    assert!(!subscribe.checked);
+    fill(
+        &document_id,
+        subscribe.field_id.clone(),
+        FormFieldValueInput::Checked { checked: true },
+    );
+
+    let gender: Vec<FormFieldView> = fields
+        .iter()
+        .filter(|field| field.name == "gender")
+        .cloned()
+        .collect();
+    assert_eq!(gender.len(), 3);
+    fill(
+        &document_id,
+        gender[1].field_id.clone(),
+        FormFieldValueInput::Checked { checked: true },
+    );
+
+    let country = field_named(&fields, "country");
+    assert_eq!(country.value.as_deref(), Some("China"));
+    fill(
+        &document_id,
+        country.field_id.clone(),
+        FormFieldValueInput::Choice {
+            value: "Japan".to_owned(),
+        },
+    );
+
+    let department = field_named(&fields, "department");
+    fill(
+        &document_id,
+        department.field_id.clone(),
+        FormFieldValueInput::Choice {
+            value: "Design".to_owned(),
+        },
+    );
+
+    let after = form_fields(document_id.clone()).expect("fields after fill");
+    assert!(field_named(&after, "subscribe").checked);
+    assert!(after
+        .iter()
+        .filter(|field| field.name == "gender")
+        .any(|field| field.checked));
+    assert_eq!(
+        field_named(&after, "country").value.as_deref(),
+        Some("Japan")
+    );
+    assert_eq!(
+        field_named(&after, "department").value.as_deref(),
+        Some("Design")
+    );
+
+    let output = dir.path().join("output.pdf");
+    save_as(&document_id, &output);
+    let parsed = lopdf::Document::load(&output).expect("parse output");
+
+    // Checkbox: /V and /AS agree, and the appearance dictionary carries both
+    // states with fresh streams.
+    let subscribe = find_field(&parsed, "subscribe");
+    assert_eq!(name_of(subscribe.get(b"V").expect("/V")), "Yes");
+    assert_eq!(name_of(subscribe.get(b"AS").expect("/AS")), "Yes");
+    let states = state_appearances(&parsed, &subscribe);
+    assert!(states.has(b"Off"), "the Off appearance state survives");
+    for state in [b"Off".as_slice(), b"Yes".as_slice()] {
+        let content = state_stream_content(&parsed, states.get(state).expect("appearance state"));
+        assert!(
+            content.contains("1 1 1 rg"),
+            "checkbox {state:?} appearance is regenerated: {content:?}"
+        );
+    }
+
+    // Radio group: /V on the parent, /AS only on the selected kid.
+    let gender = find_field(&parsed, "gender");
+    assert_eq!(name_of(gender.get(b"V").expect("/V")), "female");
+    let kids = gender
+        .get(b"Kids")
+        .expect("/Kids")
+        .as_array()
+        .expect("kid array");
+    let mut appearance_states = Vec::new();
+    for (index, kid) in kids.iter().enumerate() {
+        let kid = resolved(&parsed, kid).as_dict().expect("kid dictionary");
+        appearance_states.push(name_of(kid.get(b"AS").expect("/AS")));
+        let states = state_appearances(&parsed, kid);
+        let on_state = ["male", "female", "other"][index];
+        assert!(
+            states.has(on_state.as_bytes()),
+            "kid {index} keeps its on-state {on_state}"
+        );
+        let content =
+            state_stream_content(&parsed, states.get(on_state.as_bytes()).expect("on state"));
+        assert!(
+            content.contains("1 1 1 rg"),
+            "radio kid {index} appearance is regenerated: {content:?}"
+        );
+        let content = state_stream_content(&parsed, states.get(b"Off".as_slice()).expect("Off"));
+        assert!(
+            content.contains("1 1 1 rg"),
+            "radio kid {index} Off appearance is regenerated: {content:?}"
+        );
+    }
+    assert_eq!(appearance_states, ["Off", "female", "Off"]);
+
+    // List box: /V and /I select the second label; the selected row and the
+    // other options are drawn, not the stale text.
+    let country = find_field(&parsed, "country");
+    assert_eq!(text_of(country.get(b"V").expect("/V")), "Japan");
+    let indexes: Vec<i64> = country
+        .get(b"I")
+        .expect("/I")
+        .as_array()
+        .expect("index array")
+        .iter()
+        .map(|index| index.as_i64().expect("integer"))
+        .collect();
+    assert_eq!(indexes, [1]);
+    let country_appearance = appearance_content(&parsed, &country);
+    assert!(
+        country_appearance.contains("0.20 0.45 0.85 rg"),
+        "the selected list row is drawn: {country_appearance:?}"
+    );
+    assert!(
+        !country_appearance.contains("STALE"),
+        "the stale list appearance is replaced"
+    );
+
+    // Combo box: the selected label is drawn inside the field, with the
+    // dropdown affordance and a fresh stream.
+    let department = find_field(&parsed, "department");
+    assert_eq!(text_of(department.get(b"V").expect("/V")), "Design");
+    let department_appearance = appearance_content(&parsed, &department);
+    assert!(
+        department_appearance.contains("BT") && !department_appearance.contains("STALE"),
+        "the combo appearance draws its label: {department_appearance:?}"
+    );
+
+    // PDFium reopen agrees with the saved values.
+    let reopened = open_at(&output);
+    let fields = form_fields(reopened.clone()).expect("reopened fields");
+    assert!(field_named(&fields, "subscribe").checked);
+    assert_eq!(
+        field_named(&fields, "country").value.as_deref(),
+        Some("Japan")
+    );
+    assert_eq!(
+        field_named(&fields, "department").value.as_deref(),
+        Some("Design")
+    );
+    let selected: Vec<_> = fields
+        .iter()
+        .filter(|field| field.name == "gender" && field.checked)
+        .collect();
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0].export_value.as_deref(), Some("female"));
+    close_document(reopened).expect("close reopened");
+    close_document(document_id).expect("close source");
 }
 
 #[test]
@@ -348,13 +745,14 @@ fn fills_a_kids_terminal_and_a_nested_field_with_fresh_appearances() {
         .expect("embedded Noto font in /DR");
     let noto = resolved(&parsed, noto).as_dict().expect("font dictionary");
     assert_eq!(
-        noto.get(b"Subtype").and_then(|object| object.as_name()).ok(),
+        noto.get(b"Subtype")
+            .and_then(|object| object.as_name())
+            .ok(),
         Some(b"Type0".as_slice())
     );
     let descendants = resolved(
         &parsed,
-        noto.get(b"DescendantFonts")
-            .expect("/DescendantFonts"),
+        noto.get(b"DescendantFonts").expect("/DescendantFonts"),
     )
     .as_array()
     .expect("descendant fonts");
@@ -363,9 +761,7 @@ fn fills_a_kids_terminal_and_a_nested_field_with_fresh_appearances() {
         .expect("descendant font");
     let descriptor = resolved(
         &parsed,
-        descendant
-            .get(b"FontDescriptor")
-            .expect("/FontDescriptor"),
+        descendant.get(b"FontDescriptor").expect("/FontDescriptor"),
     )
     .as_dict()
     .expect("font descriptor");
@@ -413,4 +809,406 @@ fn read_only_fields_still_refuse_filling() {
     .expect_err("read-only fields cannot be filled");
     assert_eq!(error.code, CommandErrorCode::FormFieldReadOnly);
     close_document(document_id).expect("close document");
+}
+
+#[test]
+fn undo_then_save_omits_the_reverted_appearance_and_redo_restores_it() {
+    let dir = support::temp::TempDir::new("fill-appearance-undo");
+    let source = dir.path().join("source.pdf");
+    fs::copy(fixture_path("form-fill-appearance"), &source).expect("copy fixture");
+    let source_parsed = lopdf::Document::load(&source).expect("parse source");
+    let stale_membership = field_appearance_content(&source_parsed, "membership_id");
+    let stale_comments = field_appearance_content(&source_parsed, "comments");
+    assert!(stale_membership.contains("STALE"));
+    assert!(stale_comments.contains("STALE"));
+
+    let document_id = open_at(&source);
+    let fields = form_fields(document_id.clone()).expect("fields");
+    let membership_id = field_named(&fields, "membership_id").field_id.clone();
+
+    // Fill, undo, redo on a terminal field whose value lives on the parent.
+    fill(
+        &document_id,
+        membership_id,
+        FormFieldValueInput::Text {
+            text: "MEM-1".to_owned(),
+        },
+    );
+    let filled = dir.path().join("membership-filled.pdf");
+    save_as(&document_id, &filled);
+    let parsed = lopdf::Document::load(&filled).expect("parse filled");
+    assert_eq!(
+        text_of(find_field(&parsed, "membership_id").get(b"V").expect("/V")),
+        "MEM-1"
+    );
+    let fresh_membership = field_appearance_content(&parsed, "membership_id");
+    assert!(!fresh_membership.contains("STALE"));
+    assert!(fresh_membership.contains("1 1 1 rg"));
+
+    undo_text_edit(document_id.clone()).expect("undo membership fill");
+    let live = form_fields(document_id.clone()).expect("fields after undo");
+    assert_eq!(
+        field_named(&live, "membership_id").value.as_deref(),
+        Some("OLD-0001")
+    );
+    let undone = dir.path().join("membership-undone.pdf");
+    save_as(&document_id, &undone);
+    let parsed = lopdf::Document::load(&undone).expect("parse undone");
+    assert_eq!(
+        text_of(find_field(&parsed, "membership_id").get(b"V").expect("/V")),
+        "OLD-0001"
+    );
+    assert_eq!(
+        field_appearance_content(&parsed, "membership_id"),
+        stale_membership,
+        "a reverted fill must not emit the reverted appearance"
+    );
+
+    redo_text_edit(document_id.clone()).expect("redo membership fill");
+    let redone = dir.path().join("membership-redone.pdf");
+    save_as(&document_id, &redone);
+    let parsed = lopdf::Document::load(&redone).expect("parse redone");
+    assert_eq!(
+        text_of(find_field(&parsed, "membership_id").get(b"V").expect("/V")),
+        "MEM-1"
+    );
+    assert_eq!(
+        field_appearance_content(&parsed, "membership_id"),
+        fresh_membership,
+        "redo restores the same appearance as the original fill"
+    );
+
+    // The same history contract holds for a field Pdfium writes directly.
+    let comments_id = field_named(&fields, "comments").field_id.clone();
+    fill(
+        &document_id,
+        comments_id,
+        FormFieldValueInput::Text {
+            text: "合同已审阅".to_owned(),
+        },
+    );
+    let comments_filled = dir.path().join("comments-filled.pdf");
+    save_as(&document_id, &comments_filled);
+    let parsed = lopdf::Document::load(&comments_filled).expect("parse comments");
+    assert_eq!(
+        text_of(find_field(&parsed, "comments").get(b"V").expect("/V")),
+        "合同已审阅"
+    );
+    let fresh_comments = field_appearance_content(&parsed, "comments");
+    assert!(!fresh_comments.contains("STALE"));
+    assert!(fresh_comments.contains("Tj"));
+
+    undo_text_edit(document_id.clone()).expect("undo comments fill");
+    let live = form_fields(document_id.clone()).expect("fields after undo");
+    assert_eq!(
+        field_named(&live, "comments").value.as_deref(),
+        Some("Old comment")
+    );
+    let comments_undone = dir.path().join("comments-undone.pdf");
+    save_as(&document_id, &comments_undone);
+    let parsed = lopdf::Document::load(&comments_undone).expect("parse undone comments");
+    assert_eq!(
+        text_of(find_field(&parsed, "comments").get(b"V").expect("/V")),
+        "Old comment"
+    );
+    assert_eq!(
+        field_appearance_content(&parsed, "comments"),
+        stale_comments,
+        "the reverted CJK value is not drawn"
+    );
+
+    redo_text_edit(document_id.clone()).expect("redo comments fill");
+    let comments_redone = dir.path().join("comments-redone.pdf");
+    save_as(&document_id, &comments_redone);
+    let parsed = lopdf::Document::load(&comments_redone).expect("parse redone comments");
+    assert_eq!(
+        text_of(find_field(&parsed, "comments").get(b"V").expect("/V")),
+        "合同已审阅"
+    );
+    assert_eq!(
+        field_appearance_content(&parsed, "comments"),
+        fresh_comments
+    );
+
+    close_document(document_id).expect("close document");
+}
+
+#[test]
+fn copied_pages_get_independent_field_names_annotation_names_and_appearances() {
+    use pdfx_lib::page_ops::copy_page;
+
+    let dir = support::temp::TempDir::new("fill-appearance-copy");
+    let source = dir.path().join("source.pdf");
+    fs::copy(fixture_path("form-fill-appearance"), &source).expect("copy fixture");
+
+    let document_id = open_at(&source);
+    let fields = form_fields(document_id.clone()).expect("fields");
+    fill(
+        &document_id,
+        field_named(&fields, "membership_id").field_id.clone(),
+        FormFieldValueInput::Text {
+            text: "SOURCE-1".to_owned(),
+        },
+    );
+    copy_page(document_id.clone(), 0).expect("copy page 1");
+
+    let fields = form_fields(document_id.clone()).expect("fields after copy");
+    let copied_name = "membership_id__copy_p2";
+    let copied = fields
+        .iter()
+        .find(|field| field.name == copied_name)
+        .unwrap_or_else(|| panic!("copied field {copied_name}: {fields:?}"));
+    fill(
+        &document_id,
+        copied.field_id.clone(),
+        FormFieldValueInput::Text {
+            text: "COPY-1".to_owned(),
+        },
+    );
+    // Copied buttons keep independent values too.
+    fill(
+        &document_id,
+        field_named(&fields, "subscribe__copy_p2").field_id.clone(),
+        FormFieldValueInput::Checked { checked: true },
+    );
+    let copied_gender: Vec<FormFieldView> = fields
+        .iter()
+        .filter(|field| field.name == "gender__copy_p2")
+        .cloned()
+        .collect();
+    assert_eq!(copied_gender.len(), 3);
+    fill(
+        &document_id,
+        copied_gender[1].field_id.clone(),
+        FormFieldValueInput::Checked { checked: true },
+    );
+
+    let output = dir.path().join("output.pdf");
+    save_as(&document_id, &output);
+    close_document(document_id).expect("close source");
+
+    let parsed = lopdf::Document::load(&output).expect("parse output");
+    let source_field = find_field(&parsed, "membership_id");
+    let copy_field = find_field(&parsed, copied_name);
+    assert_eq!(text_of(source_field.get(b"V").expect("/V")), "SOURCE-1");
+    assert_eq!(text_of(copy_field.get(b"V").expect("/V")), "COPY-1");
+
+    let source_widget_id = widget_ids(&parsed, &source_field, "membership_id")[0];
+    let copy_widget_id = widget_ids(&parsed, &copy_field, copied_name)[0];
+    assert_ne!(
+        source_widget_id, copy_widget_id,
+        "the copy owns its own widget object"
+    );
+    let source_widget = widget(&parsed, source_widget_id);
+    let copy_widget = widget(&parsed, copy_widget_id);
+
+    // Independent annotation names: the source keeps its /NM, the copy is
+    // suffixed so no name-addressed lookup can reach across pages.
+    assert_eq!(
+        text_of(source_widget.get(b"NM").expect("/NM")),
+        "w-membership"
+    );
+    assert_eq!(
+        text_of(copy_widget.get(b"NM").expect("/NM")),
+        "w-membership__copy_p2"
+    );
+
+    // Independent appearance objects with the matching values drawn.
+    let appearance_of = |widget: &lopdf::Dictionary| {
+        resolved(&parsed, widget.get(b"AP").expect("/AP"))
+            .as_dict()
+            .expect("/AP dictionary")
+            .get(b"N")
+            .expect("/N")
+            .as_reference()
+            .expect("/N reference")
+    };
+    let source_appearance_id = appearance_of(source_widget);
+    let copy_appearance_id = appearance_of(copy_widget);
+    assert_ne!(
+        source_appearance_id, copy_appearance_id,
+        "the copy's appearance is a new object, never the source's"
+    );
+    let source_content = field_appearance_content(&parsed, "membership_id");
+    let copy_content = field_appearance_content(&parsed, copied_name);
+    assert!(source_content.contains("1 1 1 rg"));
+    assert!(copy_content.contains("1 1 1 rg"));
+    assert_ne!(
+        source_content, copy_content,
+        "the two appearances draw different values"
+    );
+
+    // The copy's checkbox and radio group are independent of the source's.
+    let source_subscribe = find_field(&parsed, "subscribe");
+    assert_eq!(name_of(source_subscribe.get(b"V").expect("/V")), "Off");
+    assert_eq!(name_of(source_subscribe.get(b"AS").expect("/AS")), "Off");
+    let copy_subscribe = find_field(&parsed, "subscribe__copy_p2");
+    assert_eq!(name_of(copy_subscribe.get(b"V").expect("/V")), "Yes");
+    assert_eq!(name_of(copy_subscribe.get(b"AS").expect("/AS")), "Yes");
+
+    assert_eq!(
+        name_of(find_field(&parsed, "gender").get(b"V").expect("/V")),
+        "Off"
+    );
+    let copy_gender = find_field(&parsed, "gender__copy_p2");
+    assert_eq!(name_of(copy_gender.get(b"V").expect("/V")), "female");
+    let states: Vec<String> = copy_gender
+        .get(b"Kids")
+        .expect("/Kids")
+        .as_array()
+        .expect("kid array")
+        .iter()
+        .map(|kid| {
+            name_of(
+                resolved(&parsed, kid)
+                    .as_dict()
+                    .expect("kid")
+                    .get(b"AS")
+                    .expect("/AS"),
+            )
+        })
+        .collect();
+    assert_eq!(states, ["Off", "female", "Off"]);
+
+    // PDFium reopen sees both values, each on its own page.
+    let reopened = open_at(&output);
+    let fields = form_fields(reopened.clone()).expect("reopened fields");
+    assert_eq!(
+        field_named(&fields, "membership_id").value.as_deref(),
+        Some("SOURCE-1")
+    );
+    assert_eq!(
+        field_named(&fields, copied_name).value.as_deref(),
+        Some("COPY-1")
+    );
+    assert!(field_named(&fields, "subscribe__copy_p2").checked);
+    assert!(!field_named(&fields, "subscribe").checked);
+    close_document(reopened).expect("close reopened");
+}
+
+fn byte_count(haystack: &[u8], needle: &[u8]) -> usize {
+    haystack
+        .windows(needle.len())
+        .filter(|window| *window == needle)
+        .count()
+}
+
+#[derive(Debug, PartialEq)]
+struct ObjectProfile {
+    objects: usize,
+    type0_fonts: usize,
+    embedded_fonts: usize,
+    form_xobjects: usize,
+}
+
+fn object_profile(document: &lopdf::Document) -> ObjectProfile {
+    fn named(dictionary: &lopdf::Dictionary, key: &[u8], expected: &[u8]) -> bool {
+        dictionary
+            .get(key)
+            .ok()
+            .and_then(|value| value.as_name().ok())
+            .is_some_and(|name| name == expected)
+    }
+    let mut profile = ObjectProfile {
+        objects: document.objects.len(),
+        type0_fonts: 0,
+        embedded_fonts: 0,
+        form_xobjects: 0,
+    };
+    for object in document.objects.values() {
+        // Appearance streams are stream objects; their dictionaries hold the
+        // `/Subtype /Form` and font descriptors we count here.
+        let dictionary = match object {
+            lopdf::Object::Dictionary(dictionary) => dictionary,
+            lopdf::Object::Stream(stream) => &stream.dict,
+            _ => continue,
+        };
+        if named(dictionary, b"Type", b"Font") && named(dictionary, b"Subtype", b"Type0") {
+            profile.type0_fonts += 1;
+        }
+        if dictionary.get(b"FontFile2").is_ok() {
+            profile.embedded_fonts += 1;
+        }
+        if named(dictionary, b"Subtype", b"Form") {
+            profile.form_xobjects += 1;
+        }
+    }
+    profile
+}
+
+fn default_font_names(document: &lopdf::Document) -> Vec<String> {
+    let dr = acroform(document)
+        .get(b"DR")
+        .expect("/DR")
+        .as_dict()
+        .expect("/DR dictionary");
+    let fonts = resolved(document, dr.get(b"Font").expect("/Font"))
+        .as_dict()
+        .expect("/Font dictionary");
+    fonts
+        .iter()
+        .map(|(name, _)| String::from_utf8_lossy(name).into_owned())
+        .collect()
+}
+
+#[test]
+fn repeated_saves_append_one_revision_and_never_grow_fonts_or_appearances() {
+    let dir = support::temp::TempDir::new("fill-appearance-repeat");
+    let source = dir.path().join("source.pdf");
+    fs::copy(fixture_path("form-fill-appearance"), &source).expect("copy fixture");
+    let source_bytes = fs::read(&source).expect("source bytes");
+    // The fixture is one revision with six stale appearance streams.
+    assert_eq!(byte_count(&source_bytes, b"startxref"), 1);
+    assert_eq!(byte_count(&source_bytes, b"%%EOF"), 1);
+
+    let document_id = open_at(&source);
+    fill_all_fields(&document_id);
+    let first_path = dir.path().join("first.pdf");
+    let second_path = dir.path().join("second.pdf");
+    save_as(&document_id, &first_path);
+    save_as(&document_id, &second_path);
+    close_document(document_id).expect("close");
+
+    assert_eq!(
+        fs::read(&source).expect("source after saves"),
+        source_bytes,
+        "saving never rewrites the source document"
+    );
+
+    let first_bytes = fs::read(&first_path).expect("first bytes");
+    let second_bytes = fs::read(&second_path).expect("second bytes");
+    for (label, bytes) in [("first", &first_bytes), ("second", &second_bytes)] {
+        // The source revision, PDFium's incremental one, and at most one
+        // appended lopdf revision: a save never appends a second lopdf update.
+        assert_eq!(byte_count(bytes, b"startxref"), 3, "{label} revision count");
+        assert_eq!(byte_count(bytes, b"%%EOF"), 3, "{label} eof count");
+        assert_eq!(
+            byte_count(bytes, b"/NeedAppearances"),
+            0,
+            "{label} never asks the viewer to regenerate appearances"
+        );
+    }
+
+    let first = lopdf::Document::load(&first_path).expect("parse first");
+    let second = lopdf::Document::load(&second_path).expect("parse second");
+    let first_profile = object_profile(&first);
+    let second_profile = object_profile(&second);
+    assert_eq!(
+        first_profile, second_profile,
+        "a second save must not add objects"
+    );
+    // One Noto subset: Type0 font, descendant CIDFontType2's FontFile2 stream.
+    assert_eq!(first_profile.type0_fonts, 1);
+    assert_eq!(first_profile.embedded_fonts, 1);
+    // Thirteen fresh appearances (membership, person.name, checkbox's two
+    // states, radio's three widgets x two states, country, comments,
+    // department) replace the fixture's six stale streams, which survive as
+    // unreferenced source objects: 19 in all, and no more after a second save.
+    assert_eq!(first_profile.form_xobjects, 19);
+
+    // The default resources hold the source Helvetica plus our single subset.
+    let font_names = default_font_names(&first);
+    assert_eq!(font_names.len(), 2, "fonts: {font_names:?}");
+    assert!(font_names.iter().any(|name| name == "Helv"));
+    assert_eq!(default_font_names(&second), font_names);
 }
