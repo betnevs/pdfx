@@ -6,21 +6,11 @@ import {
   updateAnnotationStyle,
   updateNoteText,
   updateShapeStyle,
-  type AnnotationKind,
   type AnnotationView,
   type ShapeStyle,
 } from "../lib/backend";
 import { notifyDocumentChanged } from "../lib/documentEvents";
-
-const KIND_LABELS: Record<AnnotationKind, string> = {
-  highlight: "高亮",
-  underline: "下划线",
-  strikeout: "删除线",
-  square: "矩形",
-  circle: "椭圆",
-  note: "便签",
-  ink: "手绘",
-};
+import { annotationLabel, STAMP_LABELS } from "../lib/stampCatalog";
 
 const DEFAULT_SHAPE_FILL = "#3366cc";
 const DEFAULT_SHAPE_STROKE = "#000000";
@@ -139,12 +129,13 @@ export function AnnotationPanel({
   }, [annotations]);
 
   const editable = canAnnotate && !readOnly;
+  const isStamp = selected?.kind === "stamp";
   const lineWidthChanged =
     selected?.kind === "ink" && lineWidthDraft !== selected.lineWidth;
   const styleChanged =
     selected !== null &&
     selected.shape === null &&
-    (colorDraft !== selected.color ||
+    ((!isStamp && colorDraft !== selected.color) ||
       opacityDraft !== selected.opacity ||
       lineWidthChanged);
   const textChanged =
@@ -185,7 +176,7 @@ export function AnnotationPanel({
         await updateAnnotationStyle(
           documentId,
           selected.name,
-          colorDraft,
+          selected.kind === "stamp" ? selected.color : colorDraft,
           opacityDraft,
           selected.kind === "ink" ? lineWidthDraft : null,
         );
@@ -270,7 +261,7 @@ export function AnnotationPanel({
         <div className="annotation-empty">
           <p>还没有注释</p>
           <p>
-            选择页面文字即可添加高亮、下划线或删除线；使用页面上的形状工具绘制矩形或椭圆，也可以放置便签或手绘。
+            选择页面文字即可添加高亮、下划线或删除线；使用页面上的形状工具绘制矩形或椭圆，也可以放置便签、手绘或图章。
           </p>
         </div>
       ) : (
@@ -287,7 +278,7 @@ export function AnnotationPanel({
               </div>
               <ul className="annotation-items">
                 {pageAnnotations.map((annotation) => {
-                  const label = KIND_LABELS[annotation.kind];
+                  const label = annotationLabel(annotation);
                   const created = formatAnnotationTime(annotation.createdAt);
                   return (
                     <li key={annotation.name}>
@@ -352,10 +343,33 @@ export function AnnotationPanel({
               />
             </label>
           )}
-          {selected.shape ? (
+          {selected.kind === "stamp" ? (
+            <>
+              <p className="annotation-stamp-summary">
+                图章：
+                {selected.stamp ? STAMP_LABELS[selected.stamp.kind] : "内置"}
+              </p>
+              <label className="annotation-control">
+                <span>透明度</span>
+                <input
+                  type="range"
+                  aria-label="注释透明度"
+                  min={0}
+                  max={100}
+                  step={1}
+                  value={opacityDraft}
+                  disabled={busy !== null}
+                  onChange={(event) =>
+                    setOpacityDraft(Number.parseInt(event.target.value, 10))
+                  }
+                />
+                <span>{opacityDraft}%</span>
+              </label>
+            </>
+          ) : selected.shape ? (
             <>
               <p className="annotation-shape-meta">
-                {KIND_LABELS[selected.kind]} · 尺寸{" "}
+                {annotationLabel(selected)} · 尺寸{" "}
                 {Math.round(selected.shape.geometry.width)} ×{" "}
                 {Math.round(selected.shape.geometry.height)} pt · 旋转{" "}
                 {Math.round(selected.shape.geometry.rotation)}°

@@ -80,6 +80,7 @@ const created: AnnotationView = {
   strokes: [],
   rects: [{ x: 100, y: 100, width: 12, height: 20 }],
   shape: null,
+  stamp: null,
 };
 
 function mockCommands(overrides: Record<string, (args: Record<string, unknown>) => unknown> = {}) {

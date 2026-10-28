@@ -409,7 +409,7 @@ export type TextMarkupKind = "highlight" | "underline" | "strikeout";
 export type ShapeKind = "square" | "circle";
 
 /** Every annotation kind the list, overlays and style panel manage. */
-export type AnnotationKind = TextMarkupKind | ShapeKind | "note" | "ink";
+export type AnnotationKind = TextMarkupKind | ShapeKind | "note" | "ink" | "stamp";
 
 /** A display-space rectangle of a markup selection, note icon or ink bounds. */
 export interface TextMarkupRect {
@@ -435,6 +435,43 @@ export interface CreateTextMarkupRequest {
   opacity: number;
   /** Display-space rectangles; one per selected line. */
   rects: TextMarkupRect[];
+}
+
+/** The four built-in stamps. */
+export type StampKind = "approved" | "draft" | "confidential" | "rejected";
+
+/**
+ * A stamp frame in display-space page points: top-left origin and clockwise
+ * rotation in degrees, the same convention as the Text Box overlay.
+ */
+export interface StampFrameView {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  rotation: number;
+}
+
+/** The built-in design and editable frame of a stamp annotation. */
+export interface StampView {
+  kind: StampKind;
+  frame: StampFrameView;
+}
+
+/** Places one built-in stamp with the given opacity percentage. */
+export interface CreateStampRequest {
+  pageIndex: number;
+  kind: StampKind;
+  /** Constant opacity in percent (0-100); the ink colour comes from the kind. */
+  opacity: number;
+  /** Display-space frame. */
+  frame: StampFrameView;
+}
+
+/** Moves, resizes or rotates a stamp as one undoable action. */
+export interface TransformStampRequest {
+  name: string;
+  frame: StampFrameView;
 }
 
 /** Places a native sticky note with its icon box in display space. */
@@ -480,11 +517,14 @@ export interface AnnotationView {
   lineWidth: number | null;
   /** Sticky-note body; null for other kinds. */
   text: string | null;
+  /** Display-space boxes: one per markup quad, or the stamp's display bounds. */
   rects: TextMarkupRect[];
   /** Display-space ink strokes; empty for other kinds. */
   strokes: InkPoint[][];
   /** Shape geometry and style; null for every other kind. */
   shape: ShapeView | null;
+  /** Set only for stamp annotations. */
+  stamp: StampView | null;
 }
 
 /** A shape's unrotated display-space geometry plus clockwise rotation. */
@@ -1031,6 +1071,31 @@ export async function createTextMarkupAnnotation(
   request: CreateTextMarkupRequest,
 ): Promise<AnnotationMutationView> {
   return invoke<AnnotationMutationView>("create_text_markup_annotation", {
+    documentId,
+    request,
+  });
+}
+
+/**
+ * Places one built-in stamp on a page as a native Stamp annotation. The author
+ * comes from the persisted settings on the Rust side.
+ */
+export async function createStampAnnotation(
+  documentId: string,
+  request: CreateStampRequest,
+): Promise<AnnotationMutationView> {
+  return invoke<AnnotationMutationView>("create_stamp_annotation", {
+    documentId,
+    request,
+  });
+}
+
+/** Moves, resizes or rotates a stamp in one undoable step. */
+export async function transformStampAnnotation(
+  documentId: string,
+  request: TransformStampRequest,
+): Promise<AnnotationMutationView> {
+  return invoke<AnnotationMutationView>("transform_stamp_annotation", {
     documentId,
     request,
   });
