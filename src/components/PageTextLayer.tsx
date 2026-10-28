@@ -9,20 +9,38 @@ import {
 } from "react";
 
 import {
+  applyTextBoxStyle,
   applyTextEdit,
+  createTextBox,
   deleteTextBox,
   editHistory,
   extractTextLayer,
   redoTextEdit,
+  textBoxFonts,
+  textBoxes,
   textEditTarget,
   toCommandError,
+  transformTextBox,
   undoTextEdit,
   type CommandError,
   type EditHistoryView,
+  type TextBoxFontView,
+  type TextBoxStyleView,
   type TextBoxTargetView,
   type TextLayerView,
 } from "../lib/backend";
 import { notifyDocumentChanged, onDocumentChanged } from "../lib/documentEvents";
+import {
+  dragRect,
+  estimatedContentHeight,
+  fitBoxToPage,
+  moveBox,
+  resizeBox,
+  rotationFromPointer,
+  type BoxRect,
+  type Point as BoxPoint,
+} from "../lib/textBoxGeometry";
+import { TextBoxStylePanel } from "./TextBoxStylePanel";
 import {
   buildTextLayer,
   findCharAt,
@@ -54,6 +72,31 @@ type EditorState =
 
 type Notice = { kind: "info" | "error"; text: string };
 
+type BoxInteraction =
+  | {
+      kind: "create";
+      anchor: BoxPoint;
+      current: BoxPoint;
+    }
+  | {
+      kind: "move";
+      box: TextBoxTargetView;
+      start: BoxPoint;
+      current: BoxPoint;
+    }
+  | {
+      kind: "resize";
+      box: TextBoxTargetView;
+      start: BoxPoint;
+      current: BoxPoint;
+    }
+  | {
+      kind: "rotate";
+      box: TextBoxTargetView;
+      start: BoxPoint;
+      current: BoxPoint;
+    };
+
 const READ_ONLY_REASON = "此文档不允许编辑内容";
 const SCANNED_REASON = "此页没有可编辑文字";
 
@@ -69,21 +112,25 @@ export interface PageTextLayerProps {
 function TextEditToolbar({
   canEdit,
   editMode,
+  boxMode,
   readOnly,
   busy,
   history,
   notice,
   onToggleEdit,
+  onToggleBoxMode,
   onUndo,
   onRedo,
 }: {
   canEdit: boolean;
   editMode: boolean;
+  boxMode: boolean;
   readOnly: boolean;
   busy: boolean;
   history: EditHistoryView | null;
   notice: Notice | null;
   onToggleEdit: () => void;
+  onToggleBoxMode: () => void;
   onUndo: () => void;
   onRedo: () => void;
 }) {
@@ -109,6 +156,24 @@ function TextEditToolbar({
         onClick={onToggleEdit}
       >
         编辑文字
+      </button>
+      <button
+        type="button"
+        className="text-box-toggle"
+        aria-pressed={boxMode}
+        disabled={!canEdit || readOnly || busy}
+        title={
+          readOnly
+            ? READ_ONLY_REASON
+            : !canEdit
+              ? SCANNED_REASON
+              : boxMode
+                ? "退出文本框编辑"
+                : "在页面上点击或拖动以添加文本框"
+        }
+        onClick={onToggleBoxMode}
+      >
+        添加文本框
       </button>
       <span className="toolbar-divider" aria-hidden="true" />
       <button
@@ -152,6 +217,8 @@ function TextEditToolbar({
  * In selection mode clicks select and copy text. In edit mode a click resolves
  * the original Text Object through `text_edit_target` and opens an inline Text
  * Box editor prefilled with the original content, font, size and colour.
+ * Text Box mode adds its own overlay: dragging empty page space creates a box,
+ * and selecting a box offers move, resize, rotate and whole-box style controls.
  */
 export function PageTextLayer({
   documentId,
@@ -163,6 +230,14 @@ export function PageTextLayer({
   const [selection, setSelection] = useState<TextRange | null>(null);
   const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "failed">("idle");
   const [editMode, setEditMode] = useState(false);
+  const [boxMode, setBoxMode] = useState(false);
+  const [boxes, setBoxes] = useState<TextBoxTargetView[]>([]);
+  const [fonts, setFonts] = useState<TextBoxFontView[]>([]);
+  const [selectedBoxId, setSelectedBoxId] = useState<number | null>(null);
+  const [boxInteraction, setBoxInteraction] = useState<BoxInteraction | null>(
+    null,
+  );
+  const [boxBusy, setBoxBusy] = useState(false);
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [history, setHistory] = useState<EditHistoryView | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
@@ -188,6 +263,10 @@ export function PageTextLayer({
       setCopyStatus("idle");
       setEditor(null);
       setEditMode(false);
+      setBoxMode(false);
+      setBoxes([]);
+      setSelectedBoxId(null);
+      setBoxInteraction(null);
       setNotice(null);
     }
 
@@ -230,6 +309,58 @@ export function PageTextLayer({
     };
   }, [documentId]);
 
+  useEffect(() => {
+    if (!boxMode) {
+      setBoxes([]);
+      setSelectedBoxId(null);
+      return;
+    }
+    let cancelled = false;
+    textBoxes(documentId, pageIndex)
+      .then((list) => {
+        if (!cancelled) {
+          setBoxes(list);
+          setSelectedBoxId((current) =>
+            current !== null && list.some((box) => box.boxId === current)
+              ? current
+              : null,
+          );
+        }
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setBoxes([]);
+          setSelectedBoxId(null);
+          setNotice({ kind: "error", text: toCommandError(error).message });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [boxMode, documentId, pageIndex, reloadKey]);
+
+  useEffect(() => {
+    if (!boxMode) {
+      return;
+    }
+    let cancelled = false;
+    textBoxFonts()
+      .then((list) => {
+        if (!cancelled) {
+          setFonts(list);
+        }
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setFonts([]);
+          setNotice({ kind: "error", text: toCommandError(error).message });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [boxMode]);
+
   useEffect(
     () =>
       onDocumentChanged((detail) => {
@@ -260,6 +391,10 @@ export function PageTextLayer({
 
   const layer = state.status === "ready" ? state.layer : null;
   const structure = useMemo(() => (layer ? buildTextLayer(layer.chars) : null), [layer]);
+  const selectedBox =
+    boxMode && selectedBoxId !== null
+      ? (boxes.find((box) => box.boxId === selectedBoxId) ?? null)
+      : null;
 
   if (state.status === "loading") {
     return null;
@@ -274,15 +409,18 @@ export function PageTextLayer({
   }
 
   const editingBusy = editor?.status === "editing" && editor.busy;
+  const operationBusy = Boolean(editingBusy) || boxBusy;
   const toolbarFor = (canEdit: boolean) => (
     <TextEditToolbar
       canEdit={canEdit}
       editMode={editMode}
+      boxMode={boxMode}
       readOnly={readOnly}
-      busy={editingBusy}
+      busy={operationBusy}
       history={history}
       notice={notice}
       onToggleEdit={toggleEditMode}
+      onToggleBoxMode={toggleBoxMode}
       onUndo={() => void runHistory("undo")}
       onRedo={() => void runHistory("redo")}
     />
@@ -317,9 +455,151 @@ export function PageTextLayer({
       return;
     }
     setEditMode(true);
+    setBoxMode(false);
+    setBoxInteraction(null);
     setSelection(null);
     setCopyStatus("idle");
     setNotice(null);
+  }
+
+  function toggleBoxMode() {
+    if (readOnly) {
+      return;
+    }
+    if (boxMode) {
+      setBoxMode(false);
+      setBoxInteraction(null);
+      setSelectedBoxId(null);
+      setEditor(null);
+      return;
+    }
+    setBoxMode(true);
+    setEditMode(false);
+    setBoxInteraction(null);
+    setSelection(null);
+    setCopyStatus("idle");
+    setNotice(null);
+  }
+
+  async function createBox(rect: BoxRect) {
+    setBoxBusy(true);
+    setNotice(null);
+    try {
+      const result = await createTextBox(documentId, pageIndex, rect);
+      setHistory(result.history);
+      setBoxes((current) => [
+        ...current.filter((box) => box.boxId !== result.target.boxId),
+        result.target,
+      ]);
+      setSelectedBoxId(result.target.boxId);
+      setEditor({
+        status: "editing",
+        target: result.target,
+        draft: "",
+        busy: false,
+        error: null,
+      });
+      setNotice(
+        result.font?.fallback
+          ? {
+              kind: "info",
+              text: `${result.font.originalFamily} 无法用于新文字，已改用 ${result.font.family}${result.font.reason ? `：${result.font.reason}` : ""}`,
+            }
+          : null,
+      );
+      notifyDocumentChanged({ documentId, pageIndex });
+    } catch (error) {
+      setNotice({ kind: "error", text: toCommandError(error).message });
+    } finally {
+      setBoxBusy(false);
+    }
+  }
+
+  async function transformBox(
+    box: TextBoxTargetView,
+    rect: BoxRect,
+    autoHeight = box.autoHeight,
+    rotation = box.rotation,
+  ) {
+    setBoxBusy(true);
+    setNotice(null);
+    try {
+      const result = await transformTextBox(
+        documentId,
+        pageIndex,
+        box.boxId,
+        {
+          x: rect.x,
+          y: rect.y,
+          width: rect.width,
+          height: rect.height,
+          autoHeight,
+          rotation,
+        },
+      );
+      setHistory(result.history);
+      setBoxes((current) =>
+        current.map((item) =>
+          item.boxId === result.target.boxId ? result.target : item,
+        ),
+      );
+      notifyDocumentChanged({ documentId, pageIndex });
+    } catch (error) {
+      setNotice({ kind: "error", text: toCommandError(error).message });
+    } finally {
+      setBoxBusy(false);
+    }
+  }
+
+  async function applyBoxStyle(style: TextBoxStyleView) {
+    const box = selectedBox;
+    if (!box || boxBusy) {
+      return;
+    }
+    setBoxBusy(true);
+    setNotice(null);
+    try {
+      const result = await applyTextBoxStyle(
+        documentId,
+        pageIndex,
+        box.boxId,
+        style,
+      );
+      setHistory(result.history);
+      setBoxes((current) =>
+        current.map((item) =>
+          item.boxId === result.target.boxId ? result.target : item,
+        ),
+      );
+      notifyDocumentChanged({ documentId, pageIndex });
+    } catch (error) {
+      setNotice({ kind: "error", text: toCommandError(error).message });
+    } finally {
+      setBoxBusy(false);
+    }
+  }
+
+  async function deleteSelectedBox() {
+    const box = selectedBox;
+    if (!box || boxBusy) {
+      return;
+    }
+    setBoxBusy(true);
+    setNotice(null);
+    try {
+      const result = await deleteTextBox(documentId, pageIndex, box.boxId);
+      setHistory(result.history);
+      setBoxes((current) =>
+        current.filter((item) => item.boxId !== box.boxId),
+      );
+      setSelectedBoxId(null);
+      setEditor(null);
+      notifyDocumentChanged({ documentId, pageIndex });
+    } catch (error) {
+      setNotice({ kind: "error", text: toCommandError(error).message });
+    } finally {
+      setBoxBusy(false);
+    }
   }
 
   async function openEditor(charIndex: number) {
@@ -349,12 +629,28 @@ export function PageTextLayer({
     }
   }
 
+  function openBoxEditor(box: TextBoxTargetView) {
+    if (readOnly || boxBusy) {
+      return;
+    }
+    targetRequest.current += 1;
+    setSelectedBoxId(box.boxId);
+    setEditor({
+      status: "editing",
+      target: box,
+      draft: box.text,
+      busy: false,
+      error: null,
+    });
+    setNotice(null);
+  }
+
   async function commitEditor() {
     if (!editor || editor.status !== "editing" || editor.busy) {
       return;
     }
     const current = editor;
-    if (!current.draft.trim()) {
+    if (!current.draft.trim() && !current.target.created) {
       setEditor({
         ...current,
         error: "文字不能为空；如需移除文字，请使用删除。",
@@ -371,6 +667,9 @@ export function PageTextLayer({
       );
       setHistory(result.history);
       setEditor(null);
+      if (boxMode) {
+        setSelectedBoxId(current.target.boxId);
+      }
       setNotice(
         result.font?.fallback
           ? {
@@ -403,6 +702,9 @@ export function PageTextLayer({
       );
       setHistory(result.history);
       setEditor(null);
+      if (boxMode) {
+        setSelectedBoxId(null);
+      }
       setNotice(null);
       notifyDocumentChanged({ documentId, pageIndex });
     } catch (error) {
@@ -426,6 +728,8 @@ export function PageTextLayer({
       setHistory(step.history);
       setEditor(null);
       setSelection(null);
+      setSelectedBoxId(null);
+      setBoxInteraction(null);
       setNotice(null);
       notifyDocumentChanged({
         documentId,
@@ -473,12 +777,103 @@ export function PageTextLayer({
     return selectionForChar(index);
   };
 
+  const startBoxMove = (
+    event: ReactPointerEvent<HTMLDivElement>,
+    box: TextBoxTargetView,
+  ) => {
+    event.stopPropagation();
+    if (readOnly || boxBusy) {
+      return;
+    }
+    setSelectedBoxId(box.boxId);
+    if (editor) {
+      return;
+    }
+    const point = pointFromEvent(event);
+    if (!point) {
+      return;
+    }
+    setBoxInteraction({ kind: "move", box, start: point, current: point });
+    try {
+      // Capturing on the outline keeps pointer events bubbling to the layer,
+      // while double-click still targets the outline so it can open the editor.
+      event.currentTarget.setPointerCapture?.(event.pointerId);
+    } catch {
+      // Pointer capture is unavailable in some embedded webviews.
+    }
+  };
+
+  const startBoxResize = (
+    event: ReactPointerEvent<HTMLButtonElement>,
+    box: TextBoxTargetView,
+  ) => {
+    event.stopPropagation();
+    event.preventDefault();
+    if (readOnly || boxBusy) {
+      return;
+    }
+    setSelectedBoxId(box.boxId);
+    if (editor) {
+      return;
+    }
+    const point = pointFromEvent(event);
+    if (!point) {
+      return;
+    }
+    setBoxInteraction({ kind: "resize", box, start: point, current: point });
+    try {
+      event.currentTarget.setPointerCapture?.(event.pointerId);
+    } catch {
+      // Pointer capture is unavailable in some embedded webviews.
+    }
+  };
+
+  const startBoxRotate = (
+    event: ReactPointerEvent<HTMLButtonElement>,
+    box: TextBoxTargetView,
+  ) => {
+    event.stopPropagation();
+    event.preventDefault();
+    if (readOnly || boxBusy) {
+      return;
+    }
+    setSelectedBoxId(box.boxId);
+    if (editor) {
+      return;
+    }
+    const point = pointFromEvent(event);
+    if (!point) {
+      return;
+    }
+    setBoxInteraction({ kind: "rotate", box, start: point, current: point });
+    try {
+      event.currentTarget.setPointerCapture?.(event.pointerId);
+    } catch {
+      // Pointer capture is unavailable in some embedded webviews.
+    }
+  };
+
   const handlePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (event.button !== 0) {
       return;
     }
     const point = pointFromEvent(event);
     if (!point) {
+      return;
+    }
+
+    if (boxMode) {
+      if (editor || boxBusy) {
+        return;
+      }
+      event.preventDefault();
+      surfaceRef.current?.focus({ preventScroll: true });
+      setBoxInteraction({ kind: "create", anchor: point, current: point });
+      try {
+        surfaceRef.current?.setPointerCapture?.(event.pointerId);
+      } catch {
+        // Pointer capture is unavailable in some embedded webviews.
+      }
       return;
     }
 
@@ -523,7 +918,35 @@ export function PageTextLayer({
   };
 
   const handlePointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (editMode || dragAnchor.current === null) {
+    if (boxInteraction?.kind === "create") {
+      const point = pointFromEvent(event);
+      if (point) {
+        setBoxInteraction({ ...boxInteraction, current: point });
+      }
+      return;
+    }
+    if (boxInteraction?.kind === "move") {
+      const point = pointFromEvent(event);
+      if (point) {
+        setBoxInteraction({ ...boxInteraction, current: point });
+      }
+      return;
+    }
+    if (boxInteraction?.kind === "resize") {
+      const point = pointFromEvent(event);
+      if (point) {
+        setBoxInteraction({ ...boxInteraction, current: point });
+      }
+      return;
+    }
+    if (boxInteraction?.kind === "rotate") {
+      const point = pointFromEvent(event);
+      if (point) {
+        setBoxInteraction({ ...boxInteraction, current: point });
+      }
+      return;
+    }
+    if (editMode || boxMode || dragAnchor.current === null) {
       return;
     }
     const point = pointFromEvent(event);
@@ -537,6 +960,102 @@ export function PageTextLayer({
   };
 
   const endDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (boxInteraction?.kind === "rotate") {
+      const interaction = boxInteraction;
+      setBoxInteraction(null);
+      try {
+        event.currentTarget.releasePointerCapture?.(event.pointerId);
+      } catch {
+        // Pointer capture may never have been acquired.
+      }
+      const point = pointFromEvent(event) ?? interaction.current;
+      const rotation = rotationFromPointer(
+        interaction.box,
+        point,
+        event.shiftKey ? 15 : 0,
+      );
+      if (rotation !== interaction.box.rotation) {
+        void transformBox(
+          interaction.box,
+          interaction.box,
+          interaction.box.autoHeight,
+          rotation,
+        );
+      }
+      return;
+    }
+    if (boxInteraction?.kind === "resize") {
+      const interaction = boxInteraction;
+      setBoxInteraction(null);
+      try {
+        event.currentTarget.releasePointerCapture?.(event.pointerId);
+      } catch {
+        // Pointer capture may never have been acquired.
+      }
+      const point = pointFromEvent(event) ?? interaction.current;
+      const resized = resizeBox(
+        interaction.box,
+        interaction.box.rotation,
+        point,
+      );
+      if (
+        resized.width !== interaction.box.width ||
+        resized.height !== interaction.box.height
+      ) {
+        void transformBox(interaction.box, resized, false);
+      }
+      return;
+    }
+    if (boxInteraction?.kind === "move") {
+      const interaction = boxInteraction;
+      setBoxInteraction(null);
+      try {
+        event.currentTarget.releasePointerCapture?.(event.pointerId);
+      } catch {
+        // Pointer capture may never have been acquired.
+      }
+      const point = pointFromEvent(event) ?? interaction.current;
+      const moved = moveBox(
+        interaction.box,
+        {
+          x: point.x - interaction.start.x,
+          y: point.y - interaction.start.y,
+        },
+        textLayer.pageWidth,
+        textLayer.pageHeight,
+      );
+      if (moved.x !== interaction.box.x || moved.y !== interaction.box.y) {
+        void transformBox(interaction.box, moved);
+      }
+      return;
+    }
+    if (boxInteraction?.kind === "create") {
+      const current = boxInteraction;
+      setBoxInteraction(null);
+      try {
+        event.currentTarget.releasePointerCapture?.(event.pointerId);
+      } catch {
+        // Pointer capture may never have been acquired.
+      }
+      const point = pointFromEvent(event) ?? current.current;
+      const rect = fitBoxToPage(
+        dragRect(current.anchor, point),
+        textLayer.pageWidth,
+        textLayer.pageHeight,
+      );
+      void createBox(rect);
+      return;
+    }
+    dragAnchor.current = null;
+    try {
+      event.currentTarget.releasePointerCapture?.(event.pointerId);
+    } catch {
+      // Pointer capture may never have been acquired.
+    }
+  };
+
+  const cancelBoxInteraction = (event: ReactPointerEvent<HTMLDivElement>) => {
+    setBoxInteraction(null);
     dragAnchor.current = null;
     try {
       event.currentTarget.releasePointerCapture?.(event.pointerId);
@@ -546,7 +1065,7 @@ export function PageTextLayer({
   };
 
   const handleDoubleClick = (event: ReactMouseEvent<HTMLDivElement>) => {
-    if (editMode) {
+    if (editMode || boxMode) {
       return;
     }
     const point = pointFromEvent(event);
@@ -558,7 +1077,7 @@ export function PageTextLayer({
   };
 
   const handleClick = (event: ReactMouseEvent<HTMLDivElement>) => {
-    if (editMode || event.detail !== 3) {
+    if (editMode || boxMode || event.detail !== 3) {
       return;
     }
     const point = pointFromEvent(event);
@@ -626,18 +1145,74 @@ export function PageTextLayer({
   const selectedCharacterCount = selection
     ? [...selectionText(textLayer, selection)].length
     : 0;
+  const createPreview =
+    boxInteraction?.kind === "create"
+      ? fitBoxToPage(
+          dragRect(boxInteraction.anchor, boxInteraction.current),
+          textLayer.pageWidth,
+          textLayer.pageHeight,
+        )
+      : null;
+  const editorMinHeight =
+    editor?.status === "editing"
+      ? Math.max(
+          editor.target.height,
+          editor.target.autoHeight
+            ? estimatedContentHeight(
+                editor.draft,
+                editor.target.width,
+                editor.target.fontSize,
+                editor.target.fontFamily,
+              )
+            : 0,
+          editor.target.fontSize * 1.2,
+        )
+      : 0;
+  const previewRotationFor = (box: TextBoxTargetView): number => {    if (
+      boxInteraction?.kind === "rotate" &&
+      boxInteraction.box.boxId === box.boxId
+    ) {
+      return rotationFromPointer(box, boxInteraction.current);
+    }
+    return box.rotation;
+  };
+  const previewRectFor = (box: TextBoxTargetView): BoxRect => {
+    if (
+      boxInteraction?.kind === "move" &&
+      boxInteraction.box.boxId === box.boxId
+    ) {
+      return moveBox(
+        box,
+        {
+          x: boxInteraction.current.x - boxInteraction.start.x,
+          y: boxInteraction.current.y - boxInteraction.start.y,
+        },
+        textLayer.pageWidth,
+        textLayer.pageHeight,
+      );
+    }
+    if (
+      boxInteraction?.kind === "resize" &&
+      boxInteraction.box.boxId === box.boxId
+    ) {
+      return resizeBox(box, box.rotation, boxInteraction.current);
+    }
+    return box;
+  };
 
   return (
     <div
       ref={surfaceRef}
-      className={`page-text-layer${editMode ? " page-text-layer--editing" : ""}`}
+      className={`page-text-layer${editMode ? " page-text-layer--editing" : ""}${
+        boxMode ? " page-text-layer--box-mode" : ""
+      }`}
       role="region"
       aria-label="文本层"
       tabIndex={0}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={endDrag}
-      onPointerCancel={endDrag}
+      onPointerCancel={cancelBoxInteraction}
       onDoubleClick={handleDoubleClick}
       onClick={handleClick}
       onKeyDown={handleKeyDown}
@@ -659,6 +1234,87 @@ export function PageTextLayer({
         />
       ))}
 
+      {boxMode && (
+        <div className="text-box-overlay">
+          {boxes.map((box, index) => {
+            const rect = previewRectFor(box);
+            return (
+              <div
+                key={box.boxId}
+                className={`text-box-outline${
+                  selectedBoxId === box.boxId
+                    ? " text-box-outline--selected"
+                    : ""
+                }`}
+                role="group"
+                aria-label={`文本框 ${index + 1}`}
+                data-testid={`text-box-outline-${box.boxId}`}
+                style={{
+                  left: `${(rect.x / textLayer.pageWidth) * 100}%`,
+                  top: `${(rect.y / textLayer.pageHeight) * 100}%`,
+                  width: `${(rect.width / textLayer.pageWidth) * 100}%`,
+                  height: `${(rect.height / textLayer.pageHeight) * 100}%`,
+                  transform: `rotate(${previewRotationFor(box)}deg)`,
+                }}
+                onPointerDown={(event) => startBoxMove(event, box)}
+                onDoubleClick={(event) => {
+                  event.stopPropagation();
+                  openBoxEditor(box);
+                }}
+              >
+                <span className="text-box-outline-label">
+                  {box.text ? box.text.split("\n")[0] : "空文本框"}
+                </span>
+                {selectedBoxId === box.boxId && (
+                  <>
+                    <button
+                      type="button"
+                      className="text-box-handle text-box-handle--rotate"
+                      aria-label="旋转"
+                      data-testid="text-box-rotate-handle"
+                      onPointerDown={(event) => startBoxRotate(event, box)}
+                      onDoubleClick={(event) => event.stopPropagation()}
+                    />
+                    <button
+                      type="button"
+                      className="text-box-handle text-box-handle--resize"
+                      aria-label="调整大小"
+                      data-testid="text-box-resize-handle"
+                      onPointerDown={(event) => startBoxResize(event, box)}
+                      onDoubleClick={(event) => event.stopPropagation()}
+                    />
+                  </>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {boxMode && selectedBox && editor?.status !== "editing" && (
+        <TextBoxStylePanel
+          target={selectedBox}
+          fonts={fonts}
+          busy={boxBusy}
+          onChange={(style) => void applyBoxStyle(style)}
+          onDelete={() => void deleteSelectedBox()}
+        />
+      )}
+
+      {createPreview && (
+        <div
+          className="text-box-create-preview"
+          data-testid="text-box-create-preview"
+          aria-hidden="true"
+          style={{
+            left: `${(createPreview.x / textLayer.pageWidth) * 100}%`,
+            top: `${(createPreview.y / textLayer.pageHeight) * 100}%`,
+            width: `${(createPreview.width / textLayer.pageWidth) * 100}%`,
+            height: `${(createPreview.height / textLayer.pageHeight) * 100}%`,
+          }}
+        />
+      )}
+
       {editor?.status === "editing" && (
         <div
           className="text-box-editor"
@@ -668,7 +1324,7 @@ export function PageTextLayer({
             left: `${(editor.target.x / textLayer.pageWidth) * 100}%`,
             top: `${(editor.target.y / textLayer.pageHeight) * 100}%`,
             width: `${(editor.target.width / textLayer.pageWidth) * 100}%`,
-            minHeight: `${Math.max(editor.target.height, editor.target.fontSize * 1.2) * scale}px`,
+            minHeight: `${editorMinHeight * scale}px`,
           }}
         >
           <textarea

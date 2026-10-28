@@ -299,6 +299,12 @@ pub fn open_document(path: String, password: Option<String>) -> Result<DocumentV
     let engine = Engine::shared()
         .map_err(|message| CommandError::new(CommandErrorCode::PdfiumUnavailable, message))?;
 
+    // PDFium's API is not thread-safe, and tests (and multiple windows) open
+    // documents concurrently. The registry lock already serializes every
+    // command that uses an open document's PDFium handles; hold it here too so
+    // reading page dimensions and permissions cannot overlap those commands.
+    let mut registry = registry().lock().expect("document registry poisoned");
+
     let document = {
         let _load_guard = OPEN_LOCK.lock().expect("PDFium open lock poisoned");
         engine
@@ -323,31 +329,27 @@ pub fn open_document(path: String, password: Option<String>) -> Result<DocumentV
 
     let (encrypted, read_only, permissions) = document_permissions(&document);
 
-    let view = {
-        let mut registry = registry().lock().expect("document registry poisoned");
-        registry.next_id += 1;
-        let document_id = format!("doc-{}", registry.next_id);
-        let view = DocumentView {
-            document_id: document_id.clone(),
-            name: document_name(&path),
-            path: path.to_string_lossy().into_owned(),
-            page_count: page_count as u32,
-            page_width,
-            page_height,
-            encrypted,
-            read_only,
-            permissions,
-        };
-        registry.documents.insert(
-            document_id,
-            OpenDocument {
-                source_bytes: bytes,
-                edit: crate::text_edit::EditSession::default(),
-                document,
-            },
-        );
-        view
+    registry.next_id += 1;
+    let document_id = format!("doc-{}", registry.next_id);
+    let view = DocumentView {
+        document_id: document_id.clone(),
+        name: document_name(&path),
+        path: path.to_string_lossy().into_owned(),
+        page_count: page_count as u32,
+        page_width,
+        page_height,
+        encrypted,
+        read_only,
+        permissions,
     };
+    registry.documents.insert(
+        document_id,
+        OpenDocument {
+            source_bytes: bytes,
+            edit: crate::text_edit::EditSession::default(),
+            document,
+        },
+    );
 
     Ok(view)
 }
@@ -853,6 +855,10 @@ pub(crate) struct DisplayGeometry {
 }
 
 impl DisplayGeometry {
+    pub(crate) fn rotation(&self) -> u16 {
+        self.rotation
+    }
+
     pub(crate) fn new(page: &PdfPage<'_>, rotation: u16) -> Result<Self, CommandError> {
         // FPDF_GetPageBoundingBox is the MediaBox/CropBox intersection, which
         // is exactly the region PDFium renders. A page without a CropBox
@@ -897,6 +903,20 @@ impl DisplayGeometry {
             180 => (self.width - u, v),
             270 => (self.height - v, self.width - u),
             _ => (u, self.height - v),
+        }
+    }
+
+    /// Maps a display-space point (top-left origin) back to PDF user space.
+    ///
+    /// Overlay tools that create content (Text Boxes, shapes) need the inverse
+    /// of [`Self::point`] to place page objects in the document's own
+    /// coordinate system, including crop offset and intrinsic rotation.
+    pub(crate) fn point_inverse(&self, x: f32, y: f32) -> (f32, f32) {
+        match self.rotation {
+            90 => (self.left + y, self.bottom + x),
+            180 => (self.left + self.width - x, self.bottom + y),
+            270 => (self.left + self.width - y, self.bottom + self.height - x),
+            _ => (self.left + x, self.bottom + self.height - y),
         }
     }
 

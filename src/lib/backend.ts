@@ -158,6 +158,83 @@ export interface TextBoxTargetView {
   y: number;
   width: number;
   height: number;
+  /** Style variant flags; an original Text Object's font name can imply them. */
+  bold: boolean;
+  italic: boolean;
+  underline: boolean;
+  alignment: TextAlignment;
+  /** Clockwise rotation in degrees in display space. */
+  rotation: number;
+  /** The height follows the content and never shrinks automatically. */
+  autoHeight: boolean;
+  /** Created by the Text Box tool rather than being an original Text Object. */
+  created: boolean;
+}
+
+/** Horizontal alignment of the lines inside a Text Box. */
+export type TextAlignment = "left" | "center" | "right";
+
+/** Whole-box style the Text Box editor sends to the backend. */
+export interface TextBoxStyleView {
+  fontFamily: string;
+  fontSize: number;
+  bold: boolean;
+  italic: boolean;
+  underline: boolean;
+  /** Fill colour as `#rrggbb`. */
+  color: string;
+  alignment: TextAlignment;
+}
+
+/**
+ * One font the Text Box editor may use.
+ *
+ * `source` distinguishes PDF base-14 fonts from embedded font programs;
+ * `embedded` says whether a program is written into the saved PDF and
+ * `coverage` states which characters the font can render. Ticket 11 adds
+ * embedded families without changing this shape.
+ */
+export interface TextBoxFontView {
+  family: string;
+  label: string;
+  bold: boolean;
+  italic: boolean;
+  postscriptName: string;
+  source: "base14" | "embedded" | string;
+  embedded: boolean;
+  embeddable: boolean;
+  coverage: "win_ansi" | "cjk" | "full" | string;
+}
+
+/** Geometry for a new Text Box, in display-space points. */
+export interface CreateTextBoxRequest {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  /** Omit for the default visible style (Helvetica 16, black, left). */
+  style?: TextBoxStyleView | null;
+}
+
+/** Move, resize or rotate an existing Text Box. */
+export interface TextBoxTransformRequest {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  /** False after a manual resize: the height then clips instead of growing. */
+  autoHeight: boolean;
+  /** Clockwise rotation in degrees in display space. */
+  rotation: number;
+}
+
+/** The outcome of creating or restyling a Text Box. */
+export interface TextBoxEditResultView {
+  pageIndex: number;
+  target: TextBoxTargetView;
+  /** Set when an existing font could not be preserved. */
+  font: FontUsageView | null;
+  history: EditHistoryView;
 }
 
 /** The font chosen for a committed edit, when it differs from the original. */
@@ -377,6 +454,69 @@ export async function deleteTextBox(
     documentId,
     pageIndex,
     boxId,
+  });
+}
+
+/**
+ * Lists the fonts the Text Box editor may use. Until the subset-embedding
+ * pipeline lands these are the PDF base-14 Latin families only; the metadata
+ * already carries `source`, `embedded` and `coverage` for later families.
+ */
+export async function textBoxFonts(): Promise<TextBoxFontView[]> {
+  return invoke<TextBoxFontView[]>("text_box_fonts");
+}
+
+/** Lists the Text Boxes this session created on a page, including empty ones. */
+export async function textBoxes(
+  documentId: string,
+  pageIndex: number,
+): Promise<TextBoxTargetView[]> {
+  return invoke<TextBoxTargetView[]>("text_boxes", { documentId, pageIndex });
+}
+
+/**
+ * Adds an empty Text Box and records its creation in document-wide history.
+ * The backend gives it the default visible style unless `style` is supplied.
+ */
+export async function createTextBox(
+  documentId: string,
+  pageIndex: number,
+  request: CreateTextBoxRequest,
+): Promise<TextBoxEditResultView> {
+  return invoke<TextBoxEditResultView>("create_text_box", {
+    documentId,
+    pageIndex,
+    request,
+  });
+}
+
+/** Replaces the whole-box style; text reflows immediately inside the box. */
+export async function applyTextBoxStyle(
+  documentId: string,
+  pageIndex: number,
+  boxId: number,
+  style: TextBoxStyleView,
+): Promise<TextBoxEditResultView> {
+  return invoke<TextBoxEditResultView>("apply_text_box_style", {
+    documentId,
+    pageIndex,
+    boxId,
+    style,
+  });
+}
+
+/** Moves, resizes or rotates a Text Box as one undoable document action. */
+export async function transformTextBox(
+  documentId: string,
+  pageIndex: number,
+  boxId: number,
+  transform: TextBoxTransformRequest,
+): Promise<TextBoxEditResultView> {
+  return invoke<TextBoxEditResultView>("transform_text_box", {
+    documentId,
+    pageIndex,
+    boxId,
+    transform,
   });
 }
 

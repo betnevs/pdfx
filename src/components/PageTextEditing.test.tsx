@@ -83,6 +83,13 @@ const target: TextBoxTargetView = {
   y: 100,
   width: 200,
   height: 20,
+  bold: false,
+  italic: false,
+  underline: false,
+  alignment: "left",
+  rotation: 0,
+  autoHeight: false,
+  created: false,
 };
 
 type CommandHandler = (args: Record<string, unknown>) => unknown;
