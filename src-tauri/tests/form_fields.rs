@@ -742,7 +742,8 @@ fn saves_filled_values_that_independent_readers_can_reopen() {
         lopdf::Object::Name(name) => name.clone(),
         object => object.as_str().expect("appearance state").to_vec(),
     };
-    assert_eq!(agree_state, b"/Yes");
+    // `/AS` is a name equal to the `/V` name, not a string with a slash.
+    assert_eq!(agree_state, b"Yes");
 
     let js_guard = field_named(&parsed, "js_guard");
     let action = lopdf_dict(&parsed, js_guard.get(b"AA").expect("/AA"))
