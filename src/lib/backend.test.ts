@@ -9,12 +9,17 @@ import {
   choosePdfFile,
   closeDocument,
   initialDocumentPath,
+  isFullscreen,
   MENU_EVENT,
   onFileDrop,
   onMenuEvent,
   openDocument,
   openDocumentInNewWindow,
+  pageInfo,
   renderPage,
+  renderPageRegion,
+  renderThumbnail,
+  setFullscreen,
   setWindowTitle,
   toCommandError,
 } from "./backend";
@@ -101,6 +106,84 @@ describe("backend command seam", () => {
     expect(invokeMock).toHaveBeenCalledWith("open_document_window", {
       path: "/tmp/other.pdf",
     });
+  });
+
+  it("reads page metadata, thumbnails and high-zoom regions", async () => {
+    invokeMock.mockResolvedValue({
+      pageIndex: 2,
+      width: 432,
+      height: 288,
+      rotation: 270,
+      cropX: 0,
+      cropY: 0,
+    });
+
+    const info = await pageInfo("doc-1", 2);
+    expect(info).toEqual({
+      pageIndex: 2,
+      width: 432,
+      height: 288,
+      rotation: 270,
+      cropX: 0,
+      cropY: 0,
+    });
+    expect(invokeMock).toHaveBeenCalledWith("page_info", {
+      documentId: "doc-1",
+      pageIndex: 2,
+    });
+
+    invokeMock.mockResolvedValue({
+      documentId: "doc-1",
+      pageIndex: 2,
+      scale: 0.277778,
+      width: 120,
+      height: 80,
+      pngBase64: "iVBORw0KGgo=",
+    });
+    const thumbnail = await renderThumbnail("doc-1", 2, 120);
+    expect(thumbnail.width).toBe(120);
+    expect(invokeMock).toHaveBeenLastCalledWith("render_thumbnail", {
+      documentId: "doc-1",
+      pageIndex: 2,
+      maxEdge: 120,
+    });
+
+    invokeMock.mockResolvedValue({
+      documentId: "doc-1",
+      pageIndex: 2,
+      scale: 20,
+      x: 4000,
+      y: 3000,
+      width: 800,
+      height: 600,
+      pngBase64: "iVBORw0KGgo=",
+    });
+    const region = await renderPageRegion("doc-1", 2, 20, 4000, 3000, 800, 600);
+    expect(region.x).toBe(4000);
+    expect(invokeMock).toHaveBeenLastCalledWith("render_page_region", {
+      documentId: "doc-1",
+      pageIndex: 2,
+      scale: 20,
+      x: 4000,
+      y: 3000,
+      width: 800,
+      height: 600,
+    });
+  });
+
+  it("enters and exits fullscreen through the current window", async () => {
+    const setFullscreenMock = vi.fn().mockResolvedValue(undefined);
+    const isFullscreenMock = vi.fn().mockResolvedValue(true);
+    vi.mocked(getCurrentWindow).mockReturnValue({
+      setFullscreen: setFullscreenMock,
+      isFullscreen: isFullscreenMock,
+    } as unknown as ReturnType<typeof getCurrentWindow>);
+
+    await setFullscreen(true);
+    await expect(isFullscreen()).resolves.toBe(true);
+
+    expect(setFullscreenMock).toHaveBeenCalledWith(true);
+    expect(isFullscreenMock).toHaveBeenCalled();
   });
 
   it("sets the current window title", async () => {
