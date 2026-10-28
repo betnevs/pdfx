@@ -2832,7 +2832,27 @@ describe("PDFX workspace", () => {
     );
     expect(commandCalls("save_document")).toHaveLength(0);
 
+    // The AES-256 handler only represents 127 UTF-8 bytes; the dialog says so
+    // in Chinese instead of letting the backend truncate the password.
+    const overlong = "a".repeat(128);
+    await user.clear(within(dialog).getByLabelText("打开密码"));
     await user.clear(within(dialog).getByLabelText("确认密码"));
+    await user.type(within(dialog).getByLabelText("打开密码"), overlong);
+    await user.type(within(dialog).getByLabelText("确认密码"), overlong);
+    await user.click(
+      within(dialog).getByRole("button", { name: "加密保存" }),
+    );
+    expect(within(dialog).getByRole("alert")).toHaveTextContent(
+      "密码过长：UTF-8 编码后最多 127 字节。",
+    );
+    expect(commandCalls("save_document")).toHaveLength(0);
+
+    await user.clear(within(dialog).getByLabelText("打开密码"));
+    await user.clear(within(dialog).getByLabelText("确认密码"));
+    await user.type(
+      within(dialog).getByLabelText("打开密码"),
+      "secret-1",
+    );
     await user.type(
       within(dialog).getByLabelText("确认密码"),
       "secret-1",

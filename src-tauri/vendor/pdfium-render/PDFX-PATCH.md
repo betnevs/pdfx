@@ -50,7 +50,8 @@ safe wrapper lives in `src-tauri/src/pdfium_adapter.rs`.
 
 ## Patch scope
 
-Fifteen files change. Each hunk is additive; no upstream behaviour changes.
+Sixteen files change. Each hunk is additive; the permissions hunk only names
+security-handler revisions upstream treated as unknown.
 
 ### `src/pdf/document.rs`
 
@@ -62,6 +63,18 @@ Fifteen files change. Each hunk is additive; no upstream behaviour changes.
 - Added `save_to_bytes_with_flags(flags)`.
 - Added associated constants `FPDF_INCREMENTAL = 1`,
   `FPDF_NO_INCREMENTAL = 2`, `FPDF_REMOVE_SECURITY = 4`.
+
+### `src/pdf/document/permissions.rs`
+
+- Extended `PdfSecurityHandlerRevision` with `Revision5` and `Revision6`.
+  Upstream only names revisions 2–4, so `security_handler_revision()` returned
+  `UnknownPdfSecurityHandlerRevision` for the AES-256 `/V 5` documents PDFX
+  writes (revision 6). Every permission predicate now maps revisions 5 and 6
+  to the same `/P` bit meanings as revisions 3 and 4 (ISO 32000-2 keeps the
+  V4 bit layout for V5). Without this, PDFium's own `/P` answer was discarded
+  and a password-only Output Document reopened read-only even though `/P`
+  granted every permission. Revision 5 (deprecated Adobe AES-256) uses the
+  same bits and is mapped identically; restricted documents stay read-only.
 
 ### `src/pdf/document/page/annotations.rs`
 
@@ -223,9 +236,9 @@ cargo test --test cjk_fonts
    sha256 here.
 2. Replace everything in this directory with the new crate contents plus
    `LICENSE.md`, keeping `PDFX-PATCH.md`.
-3. Re-apply the hunks above (fifteen files). `diff -u` against the pristine
+3. Re-apply the hunks above (sixteen files). `diff -u` against the pristine
    crate source (cargo registry unpack directory or a fresh extract of the
-   `.crate`) is the authoritative patch; keep the diff to those fifteen files.
+   `.crate`) is the authoritative patch; keep the diff to those sixteen files.
 4. Update `src-tauri/Cargo.toml` version if the patched range changes, then
    build. `pdfium-render` tracks the PDFium API, so re-run the adapter tests
    against the pinned PDFium build first.

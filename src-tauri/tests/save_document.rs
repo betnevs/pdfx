@@ -13,7 +13,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 use std::time::SystemTime;
 
-use pdfx_lib::commands::{close_document, extract_text, open_document, DocumentView};
+use pdfx_lib::commands::{
+    close_document, extract_text, open_document, CommandErrorCode, DocumentPermissions,
+    DocumentView,
+};
 use pdfx_lib::save::{
     save_document_with_progress, SaveDocumentRequest, SaveKind, SaveProgress, SaveStage,
 };
@@ -356,6 +359,256 @@ fn saving_with_a_password_encrypts_the_output_and_requires_it_to_open() {
     close_document(document.document_id).expect("close source");
 }
 
+/// Writes `source` as an AES-256 (V5) encrypted document with the given
+/// security-handler revision. Revision 6 is what PDFX's save pipeline writes;
+/// revision 5 is the deprecated Adobe extension the vendored PDFium binding
+/// must also recognise.
+#[allow(deprecated)]
+fn write_aes256_document(
+    source: &Path,
+    target: &Path,
+    revision: u8,
+    user_password: &str,
+    permissions: lopdf::Permissions,
+) {
+    let mut document = lopdf::Document::load(source).expect("load fixture for encryption");
+    let file_encryption_key = [0x5a_u8; 32];
+    let crypt_filters: std::collections::BTreeMap<
+        Vec<u8>,
+        std::sync::Arc<dyn lopdf::encryption::crypt_filters::CryptFilter>,
+    > = std::collections::BTreeMap::from([(
+        b"StdCF".to_vec(),
+        std::sync::Arc::new(lopdf::encryption::crypt_filters::Aes256CryptFilter)
+            as std::sync::Arc<dyn lopdf::encryption::crypt_filters::CryptFilter>,
+    )]);
+    let version = match revision {
+        6 => lopdf::EncryptionVersion::V5 {
+            encrypt_metadata: true,
+            crypt_filters,
+            file_encryption_key: &file_encryption_key,
+            stream_filter: b"StdCF".to_vec(),
+            string_filter: b"StdCF".to_vec(),
+            owner_password: "test-owner-password",
+            user_password,
+            permissions,
+        },
+        5 => lopdf::EncryptionVersion::R5 {
+            encrypt_metadata: true,
+            crypt_filters,
+            file_encryption_key: &file_encryption_key,
+            stream_filter: b"StdCF".to_vec(),
+            string_filter: b"StdCF".to_vec(),
+            owner_password: "test-owner-password",
+            user_password,
+            permissions,
+        },
+        _ => panic!("only revisions 5 and 6 use AES-256"),
+    };
+    let state = lopdf::EncryptionState::try_from(version).expect("build the AES-256 state");
+    document.encrypt(&state).expect("encrypt the fixture");
+    document.save(target).expect("write the encrypted fixture");
+}
+
+/// A password-only Output Document grants every permission in `/P`, so
+/// reopening it must be editable and Save Changes must work with the password.
+/// The vendored PDFium binding must name security-handler revisions 5 and 6;
+/// treating an unknown revision as "no permissions" would silently read-only
+/// every protected output PDFX writes.
+#[test]
+fn a_password_only_output_opens_editable_and_saves_changes_with_the_password() {
+    let dir = TempDir::new("protected-editable");
+    let source = copy_fixture("text", &dir, "source.pdf");
+    let output = dir.path().join("protected.pdf");
+    let source_before = file_state(&source);
+
+    let document = open(&source);
+    create_box(&document.document_id, 72.0, 72.0, "First protected version");
+    save(
+        &document.document_id,
+        save_request_with_password(Some(&output), OUTPUT_PASSWORD),
+    );
+
+    let reopened = open_document(path_string(&output), Some(OUTPUT_PASSWORD.to_owned()))
+        .expect("open the protected output");
+    assert!(reopened.encrypted);
+    assert!(
+        !reopened.read_only,
+        "a password-only output must keep its editing permissions"
+    );
+    assert_eq!(
+        reopened.permissions,
+        DocumentPermissions {
+            can_modify_content: true,
+            can_annotate: true,
+            can_assemble: true,
+            can_fill_forms: true,
+            can_print: true,
+            can_copy_content: true,
+        }
+    );
+
+    // A reopened file starts with no Output Document: Save As establishes one
+    // with the password, then Save Changes must keep working through the same
+    // permission gate.
+    let second_output = dir.path().join("protected-again.pdf");
+    let (first, _) = save(
+        &reopened.document_id,
+        save_request_with_password(Some(&second_output), OUTPUT_PASSWORD),
+    );
+    assert_eq!(first.kind, SaveKind::SaveAs);
+    assert!(first.encrypted);
+
+    create_box(
+        &reopened.document_id,
+        72.0,
+        200.0,
+        "Second protected version",
+    );
+    let (result, _) = save(
+        &reopened.document_id,
+        save_request_with_password(None, OUTPUT_PASSWORD),
+    );
+    assert_eq!(result.kind, SaveKind::SaveChanges);
+    assert!(result.encrypted);
+
+    let reopened_again = open_document(
+        path_string(&second_output),
+        Some(OUTPUT_PASSWORD.to_owned()),
+    )
+    .expect("open the re-saved protected output");
+    let text = extract_text(reopened_again.document_id.clone(), 0)
+        .expect("extract the re-saved text")
+        .text;
+    assert!(
+        text.contains("Second protected version"),
+        "the edit saved through the permission gate must survive, got {text:?}"
+    );
+    close_document(reopened_again.document_id).expect("close re-saved output");
+    close_document(reopened.document_id).expect("close reopened output");
+    assert_eq!(file_state(&source), source_before, "source stays untouched");
+    close_document(document.document_id).expect("close source");
+}
+
+/// The revision 5/6 mapping must not weaken restricted documents: a `/P` that
+/// denies editing still reports read-only and refuses edit commands. The print
+/// bit proves the flags come from `/P`, not from a blanket "unknown revision"
+/// answer.
+#[test]
+fn an_aes256_document_with_denied_permissions_stays_read_only() {
+    for revision in [6_u8, 5] {
+        let dir = TempDir::new("aes256-restricted");
+        let target = dir.path().join(format!("restricted-r{revision}.pdf"));
+        write_aes256_document(
+            &fixture_path("text"),
+            &target,
+            revision,
+            "restricted-user",
+            lopdf::Permissions::PRINTABLE,
+        );
+
+        let missing =
+            open_document(path_string(&target), None).expect_err("the document is protected");
+        assert_eq!(missing.code, CommandErrorCode::PasswordRequired);
+
+        let view = open_document(path_string(&target), Some("restricted-user".to_owned()))
+            .expect("open the restricted document");
+        assert!(view.encrypted, "revision {revision} is encrypted");
+        assert!(
+            view.read_only,
+            "revision {revision} restrictions must still report read-only"
+        );
+        assert!(
+            view.permissions.can_print,
+            "revision {revision} must keep the granted print permission"
+        );
+        assert!(!view.permissions.can_modify_content);
+
+        let error = create_text_box(
+            view.document_id.clone(),
+            0,
+            CreateTextBoxRequest {
+                x: 72.0,
+                y: 72.0,
+                width: 320.0,
+                height: 40.0,
+                style: None,
+            },
+        )
+        .expect_err("editing a restricted document is denied");
+        assert_eq!(error.code, CommandErrorCode::PermissionDenied);
+
+        // The owner password still lifts the restrictions, so the mapping
+        // reads the authenticated permission set rather than a hard-coded one.
+        let owner = open_document(path_string(&target), Some("test-owner-password".to_owned()))
+            .expect("open the restricted document with its owner password");
+        assert!(
+            !owner.read_only,
+            "the owner password lifts revision {revision}"
+        );
+        assert_eq!(
+            owner.permissions,
+            DocumentPermissions {
+                can_modify_content: true,
+                can_annotate: true,
+                can_assemble: true,
+                can_fill_forms: true,
+                can_print: true,
+                can_copy_content: true,
+            }
+        );
+        close_document(owner.document_id).expect("close owner view");
+
+        close_document(view.document_id).expect("close restricted document");
+    }
+}
+
+/// ISO 32000 requires `/ID` in an encrypted file. The encrypted rewrite must
+/// set a fresh identifier from the OS generator rather than inheriting the
+/// unencrypted working bytes' identifier, and each write must differ.
+#[test]
+fn encrypted_outputs_carry_a_fresh_os_random_file_identifier() {
+    fn read_file_id(path: &Path) -> Vec<Vec<u8>> {
+        let parsed = lopdf::Document::load(path).expect("lopdf parses the output");
+        let id = parsed.trailer.get(b"ID").expect("trailer /ID");
+        id.as_array()
+            .expect("/ID is an array")
+            .iter()
+            .map(|part| part.as_str().expect("/ID element is a string").to_vec())
+            .collect()
+    }
+
+    let dir = TempDir::new("encrypted-file-id");
+    let source = copy_fixture("text", &dir, "source.pdf");
+    let first_output = dir.path().join("first.pdf");
+    let second_output = dir.path().join("second.pdf");
+
+    let document = open(&source);
+    create_box(&document.document_id, 72.0, 72.0, "Identifier check");
+    save(
+        &document.document_id,
+        save_request_with_password(Some(&first_output), OUTPUT_PASSWORD),
+    );
+    save(
+        &document.document_id,
+        save_request_with_password(Some(&second_output), OUTPUT_PASSWORD),
+    );
+
+    let first = read_file_id(&first_output);
+    let second = read_file_id(&second_output);
+    assert_eq!(first.len(), 2, "the trailer /ID has two elements");
+    assert_eq!(second.len(), 2);
+    for part in first.iter().chain(second.iter()) {
+        assert_eq!(part.len(), 16, "each /ID element is 16 bytes");
+        assert_ne!(part, &[0_u8; 16], "the identifier is not a zero filler");
+    }
+    assert_ne!(
+        first, second,
+        "each encrypted write gets a fresh file identifier"
+    );
+
+    close_document(document.document_id).expect("close source");
+}
+
 /// The User Password lives only in the save request. Logs, diagnostic
 /// exports and Recovery Files are all local artifacts the user may share, so
 /// none of them may contain it.
@@ -461,6 +714,93 @@ fn an_empty_output_password_is_rejected_and_the_save_can_be_retried() {
     assert!(result.encrypted);
     let reopened = open_document(path_string(&output), Some(OUTPUT_PASSWORD.to_owned()))
         .expect("the retried save protects the output");
+    assert!(reopened.encrypted);
+    close_document(reopened.document_id).expect("close reopened");
+    close_document(document.document_id).expect("close source");
+}
+
+/// R6 passwords are SASLprep-normalised UTF-8, so a non-ASCII password must
+/// round-trip through both the independent lopdf parse and PDFium.
+#[test]
+fn unicode_output_passwords_open_with_pdfium_and_lopdf() {
+    const UNICODE_PASSWORD: &str = "pässwörd-中文密码-Ω";
+    let dir = TempDir::new("unicode-output-password");
+    let source = copy_fixture("text", &dir, "source.pdf");
+    let output = dir.path().join("protected.pdf");
+    let source_before = file_state(&source);
+
+    let document = open(&source);
+    create_box(&document.document_id, 72.0, 72.0, "Unicode protected");
+    let (result, _) = save(
+        &document.document_id,
+        save_request_with_password(Some(&output), UNICODE_PASSWORD),
+    );
+    assert!(result.encrypted);
+
+    assert!(
+        lopdf::Document::load_with_password(&output, "wrong-password").is_err(),
+        "a wrong password must not decrypt a Unicode-password output"
+    );
+    let decrypted = lopdf::Document::load_with_password(&output, UNICODE_PASSWORD)
+        .expect("the Unicode User Password opens the output in lopdf");
+    assert!(decrypted
+        .extract_text(&[1])
+        .expect("extract text")
+        .contains("Unicode protected"));
+
+    let missing = open_document(path_string(&output), None).expect_err("the output is protected");
+    assert_eq!(missing.code, CommandErrorCode::PasswordRequired);
+    let refused = open_document(path_string(&output), Some("wrong-password".to_owned()))
+        .expect_err("a wrong password is refused");
+    assert_eq!(refused.code, CommandErrorCode::InvalidPassword);
+    let reopened = open_document(path_string(&output), Some(UNICODE_PASSWORD.to_owned()))
+        .expect("PDFium opens the output with its Unicode password");
+    assert!(reopened.encrypted);
+    assert!(extract_text(reopened.document_id.clone(), 0)
+        .expect("extract saved text")
+        .text
+        .contains("Unicode protected"));
+    close_document(reopened.document_id).expect("close reopened");
+    assert_eq!(file_state(&source), source_before, "source stays untouched");
+    close_document(document.document_id).expect("close source");
+}
+
+/// ISO 32000-2 truncates the password to 127 bytes. A 127-byte password is
+/// supported; a longer one is rejected instead of silently losing its tail.
+#[test]
+fn an_overlong_output_password_is_rejected_and_writes_nothing() {
+    let dir = TempDir::new("overlong-output-password");
+    let source = copy_fixture("text", &dir, "source.pdf");
+    let output = dir.path().join("output.pdf");
+    let source_before = file_state(&source);
+
+    let document = open(&source);
+    create_box(&document.document_id, 72.0, 72.0, "Boundary password");
+
+    let overlong = "a".repeat(128);
+    let error = save_error(
+        &document.document_id,
+        save_request_with_password(Some(&output), &overlong),
+    );
+    assert_eq!(error.code, CommandErrorCode::InvalidArgument);
+    assert!(
+        !error.message.contains(&overlong),
+        "the error must not echo the password"
+    );
+    assert!(
+        !output.exists(),
+        "nothing may be written for an overlong password"
+    );
+    assert_eq!(file_state(&source), source_before);
+
+    // The documented maximum still works end to end.
+    let maximum = "a".repeat(127);
+    let (result, _) = save(
+        &document.document_id,
+        save_request_with_password(Some(&output), &maximum),
+    );
+    assert!(result.encrypted);
+    let reopened = open_document(path_string(&output), Some(maximum)).expect("open at the limit");
     assert!(reopened.encrypted);
     close_document(reopened.document_id).expect("close reopened");
     close_document(document.document_id).expect("close source");
@@ -1470,6 +1810,21 @@ fn text_of(object: &lopdf::Object) -> String {
     String::from_utf8_lossy(object.as_str().expect("string object")).into_owned()
 }
 
+/// Decodes a PDF text string, including the UTF-16BE form used for CJK
+/// values (a leading `FE FF` byte-order mark).
+fn text_string_of(object: &lopdf::Object) -> String {
+    let bytes = object.as_str().expect("string object");
+    if let Some(units) = bytes.strip_prefix(&[0xFE, 0xFF]) {
+        let units: Vec<u16> = units
+            .chunks_exact(2)
+            .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+            .collect();
+        String::from_utf16_lossy(&units)
+    } else {
+        String::from_utf8_lossy(bytes).into_owned()
+    }
+}
+
 fn name_or_text(object: &lopdf::Object) -> String {
     match object {
         lopdf::Object::Name(name) => String::from_utf8_lossy(name).into_owned(),
@@ -1762,6 +2117,86 @@ fn saving_with_a_password_preserves_bookmarks_links_metadata_and_attachments() {
     close_document(reopened.document_id).expect("close reopened");
 
     assert_eq!(file_state(&source), source_before);
+    close_document(document.document_id).expect("close source");
+}
+
+/// Annotations created in the session are PDFium-revision additions. The
+/// encryption rewrite must keep their dictionaries and appearance streams,
+/// and PDFium must still list them after reopening with the password.
+#[test]
+fn saving_with_a_password_preserves_native_annotations_created_in_the_session() {
+    use pdfx_lib::annotations::{
+        create_note_with_author, list_annotations, CreateNoteRequest, TextMarkupRect,
+    };
+
+    let dir = TempDir::new("encrypted-annotation");
+    let source = copy_fixture("text", &dir, "source.pdf");
+    let output = dir.path().join("protected.pdf");
+
+    let document = open(&source);
+    create_box(&document.document_id, 72.0, 200.0, "Annotation kept");
+    create_note_with_author(
+        document.document_id.clone(),
+        "PDFX QA".to_owned(),
+        CreateNoteRequest {
+            page_index: 0,
+            color: "#f9a825".to_owned(),
+            opacity: 100,
+            text: "加密保留的便签".to_owned(),
+            rect: TextMarkupRect {
+                x: 400.0,
+                y: 300.0,
+                width: 40.0,
+                height: 40.0,
+            },
+        },
+    )
+    .expect("create a sticky note");
+
+    save(
+        &document.document_id,
+        save_request_with_password(Some(&output), OUTPUT_PASSWORD),
+    );
+
+    let parsed = lopdf::Document::load_with_password(&output, OUTPUT_PASSWORD)
+        .expect("the output decrypts with its password");
+    let first_page = page_dictionary(&parsed, 1);
+    let annotations = first_page
+        .get(b"Annots")
+        .expect("/Annots")
+        .as_array()
+        .expect("/Annots array");
+    let note = annotations
+        .iter()
+        .map(|annotation| dict_of(&parsed, annotation))
+        .find(|annotation| {
+            matches!(
+                annotation.get(b"Subtype").and_then(lopdf::Object::as_name),
+                Ok(subtype) if subtype == b"Text"
+            )
+        })
+        .expect("the sticky note survives encryption");
+    assert_eq!(
+        text_string_of(note.get(b"Contents").expect("/Contents")),
+        "加密保留的便签"
+    );
+    assert_eq!(text_string_of(note.get(b"T").expect("/T")), "PDFX QA");
+    assert!(
+        note.get(b"AP").is_ok(),
+        "the custom appearance stream survives encryption"
+    );
+
+    let reopened = open_document(path_string(&output), Some(OUTPUT_PASSWORD.to_owned()))
+        .expect("reopen the protected output");
+    let listed = list_annotations(reopened.document_id.clone()).expect("list annotations");
+    assert!(
+        listed.iter().any(|annotation| {
+            annotation.text.as_deref() == Some("加密保留的便签")
+                && annotation.author.as_deref() == Some("PDFX QA")
+        }),
+        "PDFium lists the decrypted note, got {listed:?}"
+    );
+    close_document(reopened.document_id).expect("close reopened");
     close_document(document.document_id).expect("close source");
 }
 

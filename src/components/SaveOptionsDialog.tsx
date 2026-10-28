@@ -5,9 +5,11 @@ import {
   SAVE_OPTIONS_TITLE,
   SAVE_PASSWORD_CONFIRM_LABEL,
   SAVE_PASSWORD_LABEL,
+  SAVE_PASSWORD_MAX_BYTES,
   SAVE_PASSWORD_MISMATCH,
   SAVE_PASSWORD_OPTION_LABEL,
   SAVE_PASSWORD_REQUIRED,
+  SAVE_PASSWORD_TOO_LONG,
   UNENCRYPTED_OUTPUT_HEADING,
   UNENCRYPTED_OUTPUT_WARNING,
 } from "../lib/document-policy";
@@ -80,6 +82,13 @@ export function SaveOptionsDialog({
     }
     if (password.length === 0) {
       setValidation(SAVE_PASSWORD_REQUIRED);
+      passwordRef.current?.focus();
+      return;
+    }
+    // The security handler hashes UTF-8 bytes, not characters; a Chinese
+    // password reaches the limit at about 42 characters.
+    if (new TextEncoder().encode(password).length > SAVE_PASSWORD_MAX_BYTES) {
+      setValidation(SAVE_PASSWORD_TOO_LONG);
       passwordRef.current?.focus();
       return;
     }

@@ -183,6 +183,30 @@ pub struct SaveState {
     pub(crate) object_edits: Vec<ObjectEdit>,
 }
 
+/// The longest User Password the AES-256 security handler defines.
+///
+/// ISO 32000-2 Algorithm 2.A hashes the UTF-8 password truncated to 127 bytes;
+/// accepting a longer value would silently ignore the tail (and make two
+/// different passwords equivalent). Rejecting it keeps the dialog honest.
+const MAX_OUTPUT_PASSWORD_BYTES: usize = 127;
+
+/// Rejects an opening password the security handler cannot represent.
+fn validate_output_password(password: &str) -> Result<(), CommandError> {
+    if password.is_empty() {
+        return Err(CommandError::new(
+            CommandErrorCode::InvalidArgument,
+            "the opening password must not be empty",
+        ));
+    }
+    if password.len() > MAX_OUTPUT_PASSWORD_BYTES {
+        return Err(CommandError::new(
+            CommandErrorCode::InvalidArgument,
+            "the opening password must be at most 127 bytes (UTF-8)",
+        ));
+    }
+    Ok(())
+}
+
 /// The save-pipeline seam: the same code the Tauri command runs, with progress
 /// delivered to a callback instead of a window.
 pub fn save_document_with_progress(
@@ -210,11 +234,8 @@ pub fn save_document_with_progress(
         ensure_target_is_not_source(&entry.source_path, &target)?;
 
         let password = request.password.as_deref();
-        if password == Some("") {
-            return Err(CommandError::new(
-                CommandErrorCode::InvalidArgument,
-                "the opening password must not be empty",
-            ));
+        if let Some(password) = password {
+            validate_output_password(password)?;
         }
 
         // ADR-0007: an encrypted Source Document is always written as an
@@ -426,15 +447,20 @@ pub(crate) fn serialize_pdfium_state(
 /// random owner password is generated so no known password grants owner
 /// permissions; the file key and owner password never leave this function.
 fn encrypt_output_bytes(mut bytes: Vec<u8>, password: &str) -> Result<Vec<u8>, CommandError> {
-    if password.is_empty() {
-        return Err(CommandError::new(
-            CommandErrorCode::InvalidArgument,
-            "the opening password must not be empty",
-        ));
-    }
+    validate_output_password(password)?;
 
     let mut document = lopdf::Document::load_mem(&bytes)
         .map_err(|error| lopdf_error("could not parse the output for encryption", error))?;
+    // ISO 32000 requires a file identifier in an encrypted file. This rewrite
+    // creates a new file, so both `/ID` elements come from the OS generator
+    // instead of whatever identifier the unencrypted working bytes carried.
+    document.trailer.set(
+        b"ID",
+        lopdf::Object::Array(vec![
+            lopdf::Object::string_literal(random_bytes::<16>()?.to_vec()),
+            lopdf::Object::string_literal(random_bytes::<16>()?.to_vec()),
+        ]),
+    );
     let file_encryption_key: [u8; 32] = random_bytes()?;
     let owner_password = base64::engine::general_purpose::STANDARD.encode(random_bytes::<32>()?);
     let state = lopdf::EncryptionState::try_from(lopdf::EncryptionVersion::V5 {

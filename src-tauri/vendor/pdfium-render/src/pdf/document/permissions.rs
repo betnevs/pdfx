@@ -35,6 +35,10 @@ pub enum PdfSecurityHandlerRevision {
     Revision2,
     Revision3,
     Revision4,
+    /// Revision 5 is the deprecated Adobe extension that introduced AES-256.
+    Revision5,
+    /// Revision 6 is the AES-256 security handler defined by PDF 2.0.
+    Revision6,
 }
 
 impl PdfSecurityHandlerRevision {
@@ -44,6 +48,8 @@ impl PdfSecurityHandlerRevision {
             2 => Some(PdfSecurityHandlerRevision::Revision2),
             3 => Some(PdfSecurityHandlerRevision::Revision3),
             4 => Some(PdfSecurityHandlerRevision::Revision4),
+            5 => Some(PdfSecurityHandlerRevision::Revision5),
+            6 => Some(PdfSecurityHandlerRevision::Revision6),
             _ => None,
         }
     }
@@ -77,7 +83,7 @@ impl<'a> PdfPermissions<'a> {
     }
 
     /// Returns the revision of the standard security handler used by the containing [PdfDocument].
-    /// As of PDF version 1.7, possible revision numbers are 2, 3, or 4.
+    /// Possible revision numbers are 2, 3, 4 (PDF 1.7) and 5, 6 (AES-256, PDF 2.0).
     pub fn security_handler_revision(&self) -> Result<PdfSecurityHandlerRevision, PdfiumError> {
         PdfSecurityHandlerRevision::from_pdfium(unsafe {
             self.bindings()
@@ -96,7 +102,10 @@ impl<'a> PdfPermissions<'a> {
             PdfSecurityHandlerRevision::Revision2 => {
                 permissions.contains(FpdfPermissions::CAN_PRINT_BIT_3)
             }
-            PdfSecurityHandlerRevision::Revision3 | PdfSecurityHandlerRevision::Revision4 => {
+            PdfSecurityHandlerRevision::Revision3
+            | PdfSecurityHandlerRevision::Revision4
+            | PdfSecurityHandlerRevision::Revision5
+            | PdfSecurityHandlerRevision::Revision6 => {
                 permissions.contains(FpdfPermissions::CAN_PRINT_BIT_3)
                     && permissions.contains(FpdfPermissions::V3_CAN_PRINT_HIGH_QUALITY_BIT_12)
             }
@@ -115,7 +124,10 @@ impl<'a> PdfPermissions<'a> {
             PdfSecurityHandlerRevision::Unprotected | PdfSecurityHandlerRevision::Revision2 => {
                 false
             }
-            PdfSecurityHandlerRevision::Revision3 | PdfSecurityHandlerRevision::Revision4 => {
+            PdfSecurityHandlerRevision::Revision3
+            | PdfSecurityHandlerRevision::Revision4
+            | PdfSecurityHandlerRevision::Revision5
+            | PdfSecurityHandlerRevision::Revision6 => {
                 permissions.contains(FpdfPermissions::CAN_PRINT_BIT_3)
                     && !permissions.contains(FpdfPermissions::V3_CAN_PRINT_HIGH_QUALITY_BIT_12)
             }
@@ -135,7 +147,10 @@ impl<'a> PdfPermissions<'a> {
             PdfSecurityHandlerRevision::Revision2 => {
                 permissions.contains(FpdfPermissions::CAN_MODIFY_BIT_4)
             }
-            PdfSecurityHandlerRevision::Revision3 | PdfSecurityHandlerRevision::Revision4 => {
+            PdfSecurityHandlerRevision::Revision3
+            | PdfSecurityHandlerRevision::Revision4
+            | PdfSecurityHandlerRevision::Revision5
+            | PdfSecurityHandlerRevision::Revision6 => {
                 permissions.contains(FpdfPermissions::V3_CAN_ASSEMBLE_DOCUMENT_BIT_11)
             }
         };
@@ -169,7 +184,10 @@ impl<'a> PdfPermissions<'a> {
                 permissions.contains(FpdfPermissions::CAN_EXTRACT_TEXT_AND_GRAPHICS_BIT_5)
             }
             // TODO: AJRC - 27/5/22 - what operations are permitted by bit 10 but prevented by bit 5?
-            PdfSecurityHandlerRevision::Revision3 | PdfSecurityHandlerRevision::Revision4 => {
+            PdfSecurityHandlerRevision::Revision3
+            | PdfSecurityHandlerRevision::Revision4
+            | PdfSecurityHandlerRevision::Revision5
+            | PdfSecurityHandlerRevision::Revision6 => {
                 permissions.contains(FpdfPermissions::V3_CAN_EXTRACT_TEXT_AND_GRAPHICS_BIT_10)
             }
         };
@@ -187,7 +205,10 @@ impl<'a> PdfPermissions<'a> {
             PdfSecurityHandlerRevision::Revision2 => {
                 permissions.contains(FpdfPermissions::CAN_ANNOTATE_AND_FORM_FILL_BIT_6)
             }
-            PdfSecurityHandlerRevision::Revision3 | PdfSecurityHandlerRevision::Revision4 => {
+            PdfSecurityHandlerRevision::Revision3
+            | PdfSecurityHandlerRevision::Revision4
+            | PdfSecurityHandlerRevision::Revision5
+            | PdfSecurityHandlerRevision::Revision6 => {
                 permissions.contains(FpdfPermissions::V3_CAN_FORM_FILL_BIT_9)
             }
         };

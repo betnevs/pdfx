@@ -10,6 +10,9 @@ const SAVE_ERROR_MESSAGES: Partial<Record<CommandErrorCode, string>> = {
   no_output_document: "此文档还没有输出文件，请先另存为。",
   unencrypted_output_confirmation_required:
     "保存加密文档前需要确认输出不加密。",
+  encrypted_output_confirmation_required:
+    "当前输出文件已加密；请重新设置打开密码，或明确选择不加密保存。",
+  invalid_argument: "保存设置无效，请检查后重试。",
   read_only_document: "只读文档不能保存更改。",
   permission_denied: "没有写入目标位置的权限。",
   file_read_failed: "无法读取源文件。",

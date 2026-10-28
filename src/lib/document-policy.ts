@@ -27,6 +27,13 @@ export const SAVE_PASSWORD_CONFIRM_LABEL = "确认密码";
 /** Validation copy shown inside the save-options dialog. */
 export const SAVE_PASSWORD_REQUIRED = "请输入打开密码";
 export const SAVE_PASSWORD_MISMATCH = "两次输入的密码不一致";
+/**
+ * The AES-256 security handler hashes the UTF-8 password truncated to 127
+ * bytes (ISO 32000-2 Algorithm 2.A). The dialog rejects longer values rather
+ * than let the backend silently ignore the tail.
+ */
+export const SAVE_PASSWORD_MAX_BYTES = 127;
+export const SAVE_PASSWORD_TOO_LONG = "密码过长：UTF-8 编码后最多 127 字节。";
 
 /**
  * Heading shown when saving without a password would write an unencrypted
