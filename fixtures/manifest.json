@@ -1,0 +1,127 @@
+{
+  "version": 1,
+  "generated_by": "fixtures/generate.py",
+  "notes": "Deterministic fixture corpus. Regenerate with python3 fixtures/generate.py. Passwords are documented in fixtures/README.md.",
+  "fixtures": [
+    {
+      "id": "text-latin",
+      "category": "text",
+      "path": "pdfs/text-latin.pdf",
+      "sha256": "ae0019643ad761327516b3eff0d80c1ab54d4a7a9c6b6cbfddbc0159e5b07254",
+      "size_bytes": 864,
+      "page_count": 1,
+      "valid": true,
+      "password": null,
+      "owner_password": null,
+      "description": "单页拉丁文本，使用 Helvetica；文字可被提取。"
+    },
+    {
+      "id": "scanned-image-only",
+      "category": "scanned",
+      "path": "pdfs/scanned-image-only.pdf",
+      "sha256": "af784f7d6b5e885b58b4e8eb56a64629345e94f4aeac5d0e260a57ccabd3f442",
+      "size_bytes": 5683,
+      "page_count": 1,
+      "valid": true,
+      "password": null,
+      "owner_password": null,
+      "description": "纯图片页（DeviceGray 图像），没有文本层。"
+    },
+    {
+      "id": "encrypted-user-password",
+      "category": "encrypted",
+      "path": "pdfs/encrypted-user-password.pdf",
+      "sha256": "e10547dd76ba811976c5aaa6c5a00f4836e3ee2064e8a5daa257ae575ad3bda1",
+      "size_bytes": 1235,
+      "page_count": 1,
+      "valid": true,
+      "password": "pdfx-user",
+      "owner_password": "pdfx-owner",
+      "description": "需要用户密码 pdfx-user 才能打开；所有者密码为 pdfx-owner。"
+    },
+    {
+      "id": "encrypted-owner-restrictions",
+      "category": "encrypted",
+      "path": "pdfs/encrypted-owner-restrictions.pdf",
+      "sha256": "3bb4498381e2e9bb11fdff68a6576433d2ce5e89c4b25bb8a71d44fb34455c8a",
+      "size_bytes": 1248,
+      "page_count": 1,
+      "valid": true,
+      "password": "",
+      "owner_password": "pdfx-owner",
+      "description": "用户密码为空可直接打开；所有者密码 pdfx-owner 限制修改、复制与注释。"
+    },
+    {
+      "id": "form-acroform",
+      "category": "form",
+      "path": "pdfs/form-acroform.pdf",
+      "sha256": "b1ba3ecbd8de1d9cfaa34c0e1717a8592a90fec879f0adad9a0fef5af116665d",
+      "size_bytes": 1844,
+      "page_count": 1,
+      "valid": true,
+      "password": null,
+      "owner_password": null,
+      "description": "AcroForm：一个已填写的文本字段和一个复选框（含 /Off 与 /Yes 外观流）。"
+    },
+    {
+      "id": "structure-metadata",
+      "category": "structure",
+      "path": "pdfs/structure-metadata.pdf",
+      "sha256": "7bed11bb14035e7933fc603751ba68bd9f2e1d23ebc3335744a72dafdf73dcd7",
+      "size_bytes": 2206,
+      "page_count": 1,
+      "valid": true,
+      "password": null,
+      "owner_password": null,
+      "description": "书签、URI 链接、Info/XMP 元数据与内嵌附件。"
+    },
+    {
+      "id": "large-500-pages",
+      "category": "large",
+      "path": "pdfs/large-500-pages.pdf",
+      "sha256": "ef0afa65e63fd12e2a0b9f45196b62a73eb801e939e3f7d31f85dabc4c2c7d02",
+      "size_bytes": 149167,
+      "page_count": 500,
+      "valid": true,
+      "password": null,
+      "owner_password": null,
+      "description": "500 页的最小“大文件”样例；完整 2000 页压力样例可用 --large-pages 2000 生成。"
+    },
+    {
+      "id": "rotated-mixed-size",
+      "category": "rotated",
+      "path": "pdfs/rotated-mixed-size.pdf",
+      "sha256": "ccec474a9c9326005e84a26caba33054c896f743ce2f229a8ed69810d29544d6",
+      "size_bytes": 1343,
+      "page_count": 3,
+      "valid": true,
+      "password": null,
+      "owner_password": null,
+      "description": "三页，旋转角 90/0/270，混合页面尺寸。"
+    },
+    {
+      "id": "malformed-truncated",
+      "category": "malformed",
+      "path": "pdfs/malformed-truncated.pdf",
+      "sha256": "936f982e9781ddaa333cc0b5bf9db519d305dad23eeeb1e0a5445353e9bee870",
+      "size_bytes": 475,
+      "page_count": 1,
+      "valid": false,
+      "password": null,
+      "owner_password": null,
+      "description": "在文件中部截断，缺少 xref 与 trailer。"
+    },
+    {
+      "id": "malformed-bad-xref",
+      "category": "malformed",
+      "path": "pdfs/malformed-bad-xref.pdf",
+      "sha256": "becdaec7417133717a129d611f068d5fbd4de45241f209c9b6f2942a88186b3a",
+      "size_bytes": 867,
+      "page_count": 1,
+      "valid": false,
+      "password": null,
+      "owner_password": null,
+      "description": "结构完整但 startxref 指向不存在的偏移。"
+    }
+  ]
+}
