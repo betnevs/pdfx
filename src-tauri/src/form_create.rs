@@ -988,7 +988,10 @@ pub fn create_form_field(
     request: CreateFormFieldRequest,
 ) -> Result<CreateFormFieldResult, CommandError> {
     with_open_document(&document_id, |entry| {
-        create_field_for(entry, page_index, request)
+        let physical = entry.physical_page(page_index)?;
+        let mut result = create_field_for(entry, physical, request)?;
+        result.fields = crate::form::logical_fields(entry, result.fields);
+        Ok(result)
     })
 }
 
@@ -1001,9 +1004,10 @@ pub fn create_form_text_field(
     request: CreateFormTextFieldRequest,
 ) -> Result<CreateFormTextFieldResult, CommandError> {
     with_open_document(&document_id, |entry| {
+        let physical = entry.physical_page(page_index)?;
         let result = create_field_for(
             entry,
-            page_index,
+            physical,
             CreateFormFieldRequest::Text {
                 rect: request.rect,
                 name: request.name,
@@ -1015,7 +1019,7 @@ pub fn create_form_text_field(
         )?;
         Ok(CreateFormTextFieldResult {
             field_id: result.field_id,
-            fields: result.fields,
+            fields: crate::form::logical_fields(entry, result.fields),
             history: result.history,
         })
     })
@@ -1183,7 +1187,9 @@ pub fn update_form_field(
     request: UpdateFormFieldRequest,
 ) -> Result<FormStructureEditResult, CommandError> {
     with_open_document(&document_id, |entry| {
-        update_field_for(entry, &field_id, request)
+        let mut result = update_field_for(entry, &field_id, request)?;
+        result.fields = crate::form::logical_fields(entry, result.fields);
+        Ok(result)
     })
 }
 
@@ -1195,7 +1201,7 @@ pub fn update_form_text_field(
     request: UpdateFormTextFieldRequest,
 ) -> Result<FormStructureEditResult, CommandError> {
     with_open_document(&document_id, |entry| {
-        update_field_for(
+        let mut result = update_field_for(
             entry,
             &field_id,
             UpdateFormFieldRequest::Text {
@@ -1205,7 +1211,9 @@ pub fn update_form_text_field(
                 multiline: request.multiline,
                 font_size: request.font_size,
             },
-        )
+        )?;
+        result.fields = crate::form::logical_fields(entry, result.fields);
+        Ok(result)
     })
 }
 
@@ -1242,7 +1250,11 @@ pub fn delete_form_field(
     document_id: String,
     field_id: String,
 ) -> Result<FormStructureEditResult, CommandError> {
-    with_open_document(&document_id, |entry| delete_field_for(entry, &field_id))
+    with_open_document(&document_id, |entry| {
+        let mut result = delete_field_for(entry, &field_id)?;
+        result.fields = crate::form::logical_fields(entry, result.fields);
+        Ok(result)
+    })
 }
 
 /// The ticket-31 command. Deletes a text field created in this session.
@@ -1251,7 +1263,11 @@ pub fn delete_form_text_field(
     document_id: String,
     field_id: String,
 ) -> Result<FormStructureEditResult, CommandError> {
-    with_open_document(&document_id, |entry| delete_field_for(entry, &field_id))
+    with_open_document(&document_id, |entry| {
+        let mut result = delete_field_for(entry, &field_id)?;
+        result.fields = crate::form::logical_fields(entry, result.fields);
+        Ok(result)
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1476,9 +1492,18 @@ impl CreatedField {
 
 /// Object-level edits for the fields this session created. One edit carries
 /// every field, so the save pipeline stays at one writer per revision.
-pub(crate) fn save_object_edits(edit: &EditSession) -> Vec<crate::save::ObjectEdit> {
+/// Fields on deleted pages are omitted: the page tree no longer references
+/// those pages, so their widgets must not appear in the saved file. Undoing
+/// the deletion brings the field back on the next save.
+pub(crate) fn save_object_edits(
+    edit: &EditSession,
+    pages: &crate::page_ops::PageModel,
+) -> Vec<crate::save::ObjectEdit> {
     let mut specs = Vec::new();
     for field in &edit.created_fields.fields {
+        if pages.logical(field.page_index).is_none() {
+            continue;
+        }
         match field.kind {
             CreatedFieldKind::Text => {
                 if let Some(spec) = field.text_spec() {

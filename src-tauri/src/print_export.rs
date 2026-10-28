@@ -112,9 +112,10 @@ fn export_page_impl(
             entry.save.output_path.as_deref(),
             path,
         )?;
-        let page = load_page(&entry.document, page_index)?;
-        let (width, height) = checked_page_pixels(&page, page_index, scale)?;
-        let rgba = render_page_rgba(&page, page_index, width, height)?;
+        let physical_index = entry.physical_page(page_index)?;
+        let page = load_page(&entry.document, physical_index)?;
+        let (width, height) = checked_page_pixels(&page, physical_index, scale)?;
+        let rgba = render_page_rgba(&page, physical_index, width, height)?;
         let bytes = match format {
             PageImageFormat::Png => encode_png(&rgba, width, height)?,
             PageImageFormat::Jpg => encode_jpeg(&rgba, width, height)?,

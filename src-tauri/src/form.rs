@@ -515,7 +515,29 @@ pub(crate) fn discover_all(entry: &OpenDocument) -> Result<Vec<FormFieldView>, C
 /// The `form_fields` command. Returns every fillable or displayable widget.
 #[tauri::command]
 pub fn form_fields(document_id: String) -> Result<Vec<FormFieldView>, CommandError> {
-    with_open_document(&document_id, |entry| discover_all(entry))
+    with_open_document(&document_id, |entry| {
+        Ok(logical_fields(entry, discover_all(entry)?))
+    })
+}
+
+/// Rewrites discovered fields for the command boundary: page indexes become
+/// logical slots and widgets on deleted pages are dropped. Field ids keep the
+/// physical page index because they are opaque handles into the live PDFium
+/// document. Stable sorting restores the user's page order while keeping the
+/// tab order inside each page.
+pub(crate) fn logical_fields(
+    entry: &OpenDocument,
+    fields: Vec<FormFieldView>,
+) -> Vec<FormFieldView> {
+    let mut fields: Vec<FormFieldView> = fields
+        .into_iter()
+        .filter_map(|mut field| {
+            field.page_index = entry.logical_page(field.page_index)?;
+            Some(field)
+        })
+        .collect();
+    fields.sort_by_key(|field| field.page_index);
+    fields
 }
 
 fn text_is_blank(value: Option<&str>) -> bool {
@@ -561,7 +583,10 @@ pub(crate) fn required_missing(fields: &[FormFieldView]) -> Vec<FormFieldView> {
 #[tauri::command]
 pub fn missing_required_fields(document_id: String) -> Result<Vec<FormFieldView>, CommandError> {
     with_open_document(&document_id, |entry| {
-        Ok(required_missing(&discover_all(entry)?))
+        Ok(logical_fields(
+            entry,
+            required_missing(&discover_all(entry)?),
+        ))
     })
 }
 
@@ -809,7 +834,7 @@ fn fill_for(
         if after == before {
             return Ok(FormFieldEditResultView {
                 field_id,
-                fields: discover_all(entry)?,
+                fields: logical_fields(entry, discover_all(entry)?),
                 history: entry.edit.history_view(),
             });
         }
@@ -823,7 +848,7 @@ fn fill_for(
         );
         return Ok(FormFieldEditResultView {
             field_id,
-            fields: discover_all(entry)?,
+            fields: logical_fields(entry, discover_all(entry)?),
             history,
         });
     }
@@ -888,7 +913,7 @@ fn fill_for(
 
     Ok(FormFieldEditResultView {
         field_id,
-        fields: fields_after,
+        fields: logical_fields(entry, fields_after),
         history: entry.edit.history_view(),
     })
 }

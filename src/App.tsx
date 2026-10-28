@@ -11,21 +11,29 @@ import {
 import { SettingsPanel } from "./components/SettingsPanel";
 import { PasswordPrompt } from "./components/PasswordPrompt";
 import { CloseConfirmDialog } from "./components/CloseConfirmDialog";
+import {
+  DeletePageDialog,
+  InsertBlankPageDialog,
+} from "./components/PageOperationDialogs";
 import { RecoveryPrompt } from "./components/RecoveryPrompt";
 import { SaveConfirmDialog } from "./components/SaveConfirmDialog";
 import {
   choosePdfFile,
   closeDocument,
+  deletePage,
   destroyWindow,
   editHistory,
   getAppInfo,
   initialDocumentPath,
+  insertBlankPage,
+  movePage,
   onFileDrop,
   onMenuEvent,
   onWindowCloseRequested,
   openDocument,
   openDocumentInNewWindow,
   redoTextEdit,
+  rotatePage,
   setMenuState,
   setWindowTitle,
   toCommandError,
@@ -33,11 +41,13 @@ import {
   ZOOM_STEP,
   type AnnotationView,
   type AppInfo,
+  type BlankPageSize,
   type CommandError,
   type CommandErrorCode,
   type DocumentView,
   type EditHistoryView,
   type FormFieldView,
+  type PageOperationView,
   type StampKind,
 } from "./lib/backend";
 import { scaleToPercent } from "./lib/pageGeometry";
@@ -80,6 +90,17 @@ interface ClosePromptState {
   /** Explains why the last save attempt left the window open. */
   message: string | null;
 }
+
+/** A page operation waiting for the user's confirmation or paper size. */
+type PageDialogState =
+  | { kind: "delete"; pageIndex: number }
+  | {
+      kind: "insert";
+      /** Logical insertion slot: right after the page shown when opening. */
+      afterIndex: number;
+      /** Display size of the page the dialog was opened from. */
+      currentSize: BlankPageSize | null;
+    };
 
 const WRONG_PASSWORD_MESSAGE = "密码不正确，请重试。";
 
@@ -147,6 +168,7 @@ export function App() {
   const recovery = useRecoveryStartup(!launchedWithDocument);
   const recent = useRecentFiles(!launchedWithDocument);
   const [passwordPrompt, setPasswordPrompt] = useState<PasswordPromptState | null>(null);
+  const [pageDialog, setPageDialog] = useState<PageDialogState | null>(null);
 
   const editorRef = useRef(editor);
   editorRef.current = editor;
@@ -158,6 +180,7 @@ export function App() {
   const closingRef = useRef(false);
   const closeSaveInFlightRef = useRef(false);
   const openingRef = useRef(false);
+  const pageOperationInFlightRef = useRef(false);
   const printExportRef = useRef<PrintExportHandle>(null);
 
   const handleViewerError = useCallback((error: CommandError) => {
@@ -242,6 +265,153 @@ export function App() {
   const saveRef = useRef(save);
   saveRef.current = save;
 
+  // Page operations follow the same content-modification permission gate as
+  // the Rust commands: a read-only document shows disabled controls and a
+  // Chinese explanation instead of mutating history.
+  const canModifyPages =
+    (openDocumentView?.permissions.canModifyContent ?? false) &&
+    !(openDocumentView?.readOnly ?? false);
+  const pageOperationDisabledReason = !openDocumentView
+    ? null
+    : openDocumentView.readOnly
+      ? "文档为只读，页面操作已禁用。"
+      : !openDocumentView.permissions.canModifyContent
+        ? "当前文档的权限不允许修改页面内容。"
+        : null;
+
+  /**
+   * Runs one page operation and publishes its outcome: new page count,
+   * unified history, and a structure-change event so page metadata and every
+   * thumbnail cache refresh. Selection follows the operation's page.
+   */
+  const applyPageOperation = useCallback(
+    async (operation: () => Promise<PageOperationView>) => {
+      if (pageOperationInFlightRef.current) {
+        return;
+      }
+      const current = editorRef.current;
+      if (current.status !== "open") {
+        return;
+      }
+      const { document } = current;
+      if (document.readOnly || !document.permissions.canModifyContent) {
+        return;
+      }
+      pageOperationInFlightRef.current = true;
+      try {
+        const result = await operation();
+        saveRef.current.acceptHistory(result.history);
+        setEditor((state) =>
+          state.status === "open" &&
+          state.document.documentId === document.documentId
+            ? {
+                status: "open",
+                document: { ...state.document, pageCount: result.pageCount },
+              }
+            : state,
+        );
+        notifyDocumentChanged({
+          documentId: document.documentId,
+          pageIndex: result.pageIndex,
+          pageCount: result.pageCount,
+          pageStructureChanged: true,
+        });
+      } catch (error) {
+        setNotice(toCommandError(error));
+      } finally {
+        pageOperationInFlightRef.current = false;
+      }
+    },
+    [],
+  );
+
+  const rotateCurrentPage = useCallback(
+    (deltaDegrees: 90 | 180 | 270) => {
+      const current = editorRef.current;
+      if (current.status !== "open") {
+        return;
+      }
+      if (current.document.readOnly || !current.document.permissions.canModifyContent) {
+        return;
+      }
+      const documentId = current.document.documentId;
+      const pageIndex = viewerRef.current.pageIndex;
+      void applyPageOperation(() =>
+        rotatePage(documentId, pageIndex, deltaDegrees),
+      );
+    },
+    [applyPageOperation],
+  );
+
+  const moveThumbnailPage = useCallback(
+    (fromIndex: number, toIndex: number) => {
+      const current = editorRef.current;
+      if (current.status !== "open") {
+        return;
+      }
+      if (current.document.readOnly || !current.document.permissions.canModifyContent) {
+        return;
+      }
+      const documentId = current.document.documentId;
+      void applyPageOperation(() =>
+        movePage(documentId, fromIndex, toIndex),
+      );
+    },
+    [applyPageOperation],
+  );
+
+  function confirmDeletePage() {
+    const dialog = pageDialog;
+    setPageDialog(null);
+    if (!dialog || dialog.kind !== "delete") {
+      return;
+    }
+    const current = editorRef.current;
+    if (current.status !== "open") {
+      return;
+    }
+    const documentId = current.document.documentId;
+    const { pageIndex } = dialog;
+    void applyPageOperation(() => deletePage(documentId, pageIndex));
+  }
+
+  function confirmInsertBlankPage(size: BlankPageSize) {
+    const dialog = pageDialog;
+    setPageDialog(null);
+    if (!dialog || dialog.kind !== "insert") {
+      return;
+    }
+    const current = editorRef.current;
+    if (current.status !== "open") {
+      return;
+    }
+    const documentId = current.document.documentId;
+    const { afterIndex } = dialog;
+    void applyPageOperation(() =>
+      insertBlankPage(documentId, afterIndex, size),
+    );
+  }
+
+  function openInsertBlankPageDialog() {
+    if (!canModifyPages) {
+      return;
+    }
+    setPageDialog({
+      kind: "insert",
+      afterIndex: viewer.pageIndex + 1,
+      currentSize: viewer.info
+        ? { width: viewer.info.width, height: viewer.info.height }
+        : null,
+    });
+  }
+
+  function openDeletePageDialog() {
+    if (!canModifyPages) {
+      return;
+    }
+    setPageDialog({ kind: "delete", pageIndex: viewer.pageIndex });
+  }
+
   // While the open Document is dirty, ask the backend for throttled Recovery
   // File snapshots. The backend rejects writes while nothing changed.
   useRecoverySnapshots(openDocumentView?.documentId ?? null, save.dirty);
@@ -293,7 +463,8 @@ export function App() {
       passwordPrompt !== null ||
       save.confirmation !== null ||
       recoveryPromptOpen ||
-      settingsOpen,
+      settingsOpen ||
+      pageDialog !== null,
     textInputFocused,
     pageIndex: viewer.pageIndex,
     pageCount: openDocumentView?.pageCount ?? 0,
@@ -354,9 +525,24 @@ export function App() {
           ? await undoTextEdit(documentId)
           : await redoTextEdit(documentId);
       currentSave.acceptHistory(step.history);
+      setEditor((state) =>
+        state.status === "open" &&
+        state.document.documentId === documentId
+          ? {
+              status: "open",
+              document: { ...state.document, pageCount: step.pageCount },
+            }
+          : state,
+      );
       // The Edit Session is document-wide: refresh every overlay, the page
-      // bitmap and the dirty marker, not just the page that changed.
-      notifyDocumentChanged({ documentId, pageIndex: step.pageIndex });
+      // bitmap and the dirty marker, not just the page that changed. Undoing
+      // a page operation also renumbers every slot.
+      notifyDocumentChanged({
+        documentId,
+        pageIndex: step.pageIndex,
+        pageCount: step.pageCount,
+        pageStructureChanged: step.pageStructureChanged,
+      });
     } catch (error) {
       setNotice(toCommandError(error));
     } finally {
@@ -913,6 +1099,25 @@ export function App() {
         />
       )}
 
+      {open && pageDialog?.kind === "delete" && (
+        <DeletePageDialog
+          pageNumber={pageDialog.pageIndex + 1}
+          pageCount={open.document.pageCount}
+          onConfirm={confirmDeletePage}
+          onCancel={() => setPageDialog(null)}
+        />
+      )}
+
+      {open && pageDialog?.kind === "insert" && (
+        <InsertBlankPageDialog
+          afterPageNumber={pageDialog.afterIndex}
+          pageCount={open.document.pageCount}
+          currentPageSize={pageDialog.currentSize}
+          onInsert={confirmInsertBlankPage}
+          onCancel={() => setPageDialog(null)}
+        />
+      )}
+
       {recoveryPromptOpen && (
         <RecoveryPrompt
           candidates={recovery.candidates}
@@ -1001,6 +1206,11 @@ export function App() {
               onFit={viewer.fit}
               onActualSize={viewer.actualSize}
               onToggleFullscreen={viewer.toggleFullscreen}
+              canModifyPages={canModifyPages}
+              pageOperationDisabledReason={pageOperationDisabledReason}
+              onRotatePage={rotateCurrentPage}
+              onDeletePage={openDeletePageDialog}
+              onInsertPage={openInsertBlankPageDialog}
             />
             <PrintExport
               ref={printExportRef}
@@ -1014,6 +1224,8 @@ export function App() {
                 pageCount={open.document.pageCount}
                 currentPageIndex={viewer.pageIndex}
                 onSelectPage={viewer.goToPage}
+                canReorder={canModifyPages}
+                onMovePage={moveThumbnailPage}
               />
               <div
                 ref={viewer.viewportRef}

@@ -4,6 +4,7 @@ import {
   useReducer,
   useRef,
   useState,
+  type DragEvent as ReactDragEvent,
   type RefObject,
 } from "react";
 
@@ -70,6 +71,11 @@ export function DocumentToolbar({
   onFit,
   onActualSize,
   onToggleFullscreen,
+  canModifyPages = false,
+  pageOperationDisabledReason = null,
+  onRotatePage,
+  onDeletePage,
+  onInsertPage,
 }: {
   pageIndex: number;
   pageCount: number;
@@ -83,6 +89,13 @@ export function DocumentToolbar({
   onFit: (mode: FitMode) => void;
   onActualSize: () => void;
   onToggleFullscreen: () => void;
+  /** Permission Restrictions allow changing the page arrangement. */
+  canModifyPages?: boolean;
+  /** Chinese explanation shown while page operations are unavailable. */
+  pageOperationDisabledReason?: string | null;
+  onRotatePage?: (deltaDegrees: 90 | 180 | 270) => void;
+  onDeletePage?: () => void;
+  onInsertPage?: () => void;
 }) {
   const [pageDraft, setPageDraft] = useState(String(pageIndex + 1));
   const [zoomDraft, setZoomDraft] = useState(`${scaleToPercent(scale)}%`);
@@ -155,6 +168,50 @@ export function DocumentToolbar({
         </button>
       </div>
 
+      <div
+        className="page-ops"
+        role="group"
+        aria-label="页面操作"
+        title={pageOperationDisabledReason ?? undefined}
+      >
+        <button
+          type="button"
+          title="逆时针旋转 90°"
+          disabled={!canModifyPages}
+          onClick={() => onRotatePage?.(270)}
+        >
+          向左旋转
+        </button>
+        <button
+          type="button"
+          title="顺时针旋转 90°"
+          disabled={!canModifyPages}
+          onClick={() => onRotatePage?.(90)}
+        >
+          向右旋转
+        </button>
+        <button
+          type="button"
+          disabled={!canModifyPages}
+          onClick={() => onInsertPage?.()}
+        >
+          插入空白页…
+        </button>
+        <button
+          type="button"
+          disabled={!canModifyPages || pageCount <= 1}
+          title={
+            pageCount <= 1 ? "文档至少需要保留一页" : "删除当前页（可撤销）"
+          }
+          onClick={() => onDeletePage?.()}
+        >
+          删除页面
+        </button>
+        {pageOperationDisabledReason && (
+          <span className="page-ops-hint">{pageOperationDisabledReason}</span>
+        )}
+      </div>
+
       <div className="zoom-controls" role="group" aria-label="缩放">
         <button type="button" aria-label="缩小" onClick={onZoomOut}>
           缩小
@@ -209,16 +266,24 @@ export function ThumbnailRail({
   pageCount,
   currentPageIndex,
   onSelectPage,
+  canReorder = false,
+  onMovePage,
 }: {
   documentId: string;
   pageCount: number;
   currentPageIndex: number;
   onSelectPage: (index: number) => void;
+  /** Permission Restrictions allow changing the page arrangement. */
+  canReorder?: boolean;
+  onMovePage?: (fromIndex: number, toIndex: number) => void;
 }) {
   const railRef = useRef<HTMLElement>(null);
   const cacheRef = useRef(new Map<number, PageImageView>());
   const pendingRef = useRef(new Set<number>());
   const pageGenerationRef = useRef(new Map<number, number>());
+  // A structure change renumbers every slot, so a thumbnail request that was
+  // already in flight must not fill the cleared cache with stale pixels.
+  const structureGenerationRef = useRef(0);
   const aliveRef = useRef(true);
   const revealedRef = useRef(currentPageIndex);
   const [scrollTop, setScrollTop] = useState(0);
@@ -226,10 +291,13 @@ export function ThumbnailRail({
     THUMBNAIL_FALLBACK_VIEWPORT,
   );
   const [contentRevision, setContentRevision] = useState(0);
+  const [dragFrom, setDragFrom] = useState<number | null>(null);
+  const [dragOver, setDragOver] = useState<number | null>(null);
   const [, bump] = useReducer((value: number) => value + 1, 0);
 
   useEffect(() => {
     aliveRef.current = true;
+    structureGenerationRef.current += 1;
     cacheRef.current.clear();
     pendingRef.current.clear();
     pageGenerationRef.current.clear();
@@ -243,10 +311,19 @@ export function ThumbnailRail({
 
   // An edit, delete or undo invalidates that page's thumbnail. The generation
   // check keeps a render that was already in flight from caching stale pixels.
+  // A page operation renumbers the slots, so every cached thumbnail is stale.
   useEffect(
     () =>
       onDocumentChanged((detail) => {
         if (detail.documentId !== documentId) {
+          return;
+        }
+        if (detail.pageStructureChanged) {
+          structureGenerationRef.current += 1;
+          cacheRef.current.clear();
+          pendingRef.current.clear();
+          pageGenerationRef.current.clear();
+          setContentRevision((value) => value + 1);
           return;
         }
         pageGenerationRef.current.set(
@@ -320,10 +397,12 @@ export function ThumbnailRail({
       }
       pendingRef.current.add(index);
       const generation = pageGenerationRef.current.get(index) ?? 0;
+      const structureGeneration = structureGenerationRef.current;
       renderThumbnail(documentId, index, THUMBNAIL_MAX_EDGE)
         .then((image) => {
           if (
             !aliveRef.current ||
+            structureGenerationRef.current !== structureGeneration ||
             (pageGenerationRef.current.get(index) ?? 0) !== generation
           ) {
             return;
@@ -335,26 +414,92 @@ export function ThumbnailRail({
           console.warn(`[pdfx] could not render thumbnail ${index}`, error);
         })
         .finally(() => {
-          pendingRef.current.delete(index);
+          if (structureGenerationRef.current === structureGeneration) {
+            pendingRef.current.delete(index);
+          }
         });
     }
   }, [documentId, range.start, range.end, contentRevision]);
 
+  const handleDragStart = (
+    event: ReactDragEvent<HTMLButtonElement>,
+    index: number,
+  ) => {
+    if (!canReorder) {
+      return;
+    }
+    setDragFrom(index);
+    setDragOver(index);
+    if (event.dataTransfer) {
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", String(index));
+    }
+  };
+
+  const handleDragOver = (
+    event: ReactDragEvent<HTMLButtonElement>,
+    index: number,
+  ) => {
+    if (!canReorder || dragFrom === null) {
+      return;
+    }
+    event.preventDefault();
+    if (event.dataTransfer) {
+      event.dataTransfer.dropEffect = "move";
+    }
+    if (dragOver !== index) {
+      setDragOver(index);
+    }
+  };
+
+  const handleDrop = (
+    event: ReactDragEvent<HTMLButtonElement>,
+    index: number,
+  ) => {
+    event.preventDefault();
+    const from = dragFrom;
+    setDragFrom(null);
+    setDragOver(null);
+    if (from === null || from === index) {
+      return;
+    }
+    onMovePage?.(from, index);
+  };
+
+  const handleDragEnd = () => {
+    setDragFrom(null);
+    setDragOver(null);
+  };
+
   const items = [];
   for (let index = range.start; index < range.end; index += 1) {
     const image = cacheRef.current.get(index);
+    const dragging = dragFrom === index;
+    const dropTarget = dragFrom !== null && dragOver === index && !dragging;
     items.push(
       <button
         key={index}
         type="button"
-        className="thumbnail"
+        className={[
+          "thumbnail",
+          dragging ? "thumbnail--dragging" : "",
+          dropTarget ? "thumbnail--drop-target" : "",
+        ]
+          .filter(Boolean)
+          .join(" ")}
         aria-label={`第 ${index + 1} 页`}
         aria-current={index === currentPageIndex ? "page" : undefined}
+        title={canReorder ? "拖动以调整页面顺序" : undefined}
+        draggable={canReorder}
         style={{
           top: `${index * THUMBNAIL_ITEM_HEIGHT}px`,
           height: `${THUMBNAIL_ITEM_HEIGHT - 8}px`,
         }}
         onClick={() => onSelectPage(index)}
+        onDragStart={(event) => handleDragStart(event, index)}
+        onDragOver={(event) => handleDragOver(event, index)}
+        onDrop={(event) => handleDrop(event, index)}
+        onDragEnd={handleDragEnd}
       >
         <span className="thumbnail-frame">
           {image ? (

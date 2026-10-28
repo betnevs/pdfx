@@ -472,6 +472,12 @@ pub struct TextEditResultView {
 pub struct EditStepView {
     /// Page whose content changed, so the frontend can refresh just that page.
     pub page_index: u32,
+    /// Visible page count after the step. Page deletion, insertion and undo/
+    /// redo of them can change it without a separate document reload.
+    pub page_count: u32,
+    /// True when page order, count or rotation changed, so caches keyed by
+    /// page index (page metadata, thumbnails) must be refreshed.
+    pub page_structure_changed: bool,
     pub history: EditHistoryView,
 }
 
@@ -588,6 +594,8 @@ pub(crate) enum EditAction {
     Field(FieldEditAction),
     FormStructure(FormStructureEditAction),
     Annotation(Box<AnnotationEditAction>),
+    /// Rotation, deletion, reordering or blank-page insertion.
+    Page(crate::page_ops::PageEditAction),
 }
 
 /// The value a field edit restores during undo or redo.
@@ -1187,7 +1195,10 @@ pub fn text_edit_target(
     char_index: u32,
 ) -> Result<TextBoxTargetView, CommandError> {
     with_open_document(&document_id, |entry| {
-        target_for(entry, page_index, char_index)
+        let physical = entry.physical_page(page_index)?;
+        let mut view = target_for(entry, physical, char_index)?;
+        view.page_index = entry.logical_page(physical).unwrap_or(0);
+        Ok(view)
     })
 }
 
@@ -2102,6 +2113,8 @@ fn undo_form_structure(
         .push(EditAction::FormStructure(action));
     Ok(EditStepView {
         page_index,
+        page_count: entry.pages.len(),
+        page_structure_changed: false,
         history: entry.edit.history_view(),
     })
 }
@@ -2119,6 +2132,8 @@ fn redo_form_structure(
         .push(EditAction::FormStructure(action));
     Ok(EditStepView {
         page_index,
+        page_count: entry.pages.len(),
+        page_structure_changed: false,
         history: entry.edit.history_view(),
     })
 }
@@ -2173,6 +2188,8 @@ fn undo_annotation(
     entry.edit.redo_stack.push(EditAction::Annotation(action));
     Ok(EditStepView {
         page_index,
+        page_count: entry.pages.len(),
+        page_structure_changed: false,
         history: entry.edit.history_view(),
     })
 }
@@ -2187,6 +2204,8 @@ fn redo_annotation(
     entry.edit.undo_stack.push(EditAction::Annotation(action));
     Ok(EditStepView {
         page_index,
+        page_count: entry.pages.len(),
+        page_structure_changed: false,
         history: entry.edit.history_view(),
     })
 }
@@ -2201,6 +2220,8 @@ fn redo_field(
     entry.edit.undo_stack.push(EditAction::Field(action));
     Ok(EditStepView {
         page_index,
+        page_count: entry.pages.len(),
+        page_structure_changed: false,
         history: entry.edit.history_view(),
     })
 }
@@ -2214,7 +2235,8 @@ fn undo_for(entry: &mut OpenDocument) -> Result<EditStepView, CommandError> {
         Some(EditAction::Box(_))
         | Some(EditAction::Image(_))
         | Some(EditAction::Line(_))
-        | Some(EditAction::FormStructure(_)) => ensure_content_editable(&entry.document)?,
+        | Some(EditAction::FormStructure(_))
+        | Some(EditAction::Page(_)) => ensure_content_editable(&entry.document)?,
         Some(EditAction::Field(_)) => crate::form::ensure_forms_editable(&entry.document)?,
         Some(EditAction::Annotation(_)) => ensure_annotation_editable(&entry.document)?,
         None => {
@@ -2227,14 +2249,22 @@ fn undo_for(entry: &mut OpenDocument) -> Result<EditStepView, CommandError> {
     let Some(action) = entry.edit.undo_stack.pop() else {
         unreachable!("the undo stack was checked immediately above");
     };
-    match action {
+    let structural = matches!(action, EditAction::Page(_));
+    let mut step = match action {
         EditAction::Box(action) => undo_box(entry, action),
         EditAction::Image(action) => crate::image_edit::undo_image(entry, action),
         EditAction::Line(action) => crate::line_edit::undo_line(entry, action),
         EditAction::Field(action) => undo_field(entry, action),
         EditAction::FormStructure(action) => undo_form_structure(entry, action),
         EditAction::Annotation(action) => undo_annotation(entry, action),
+        EditAction::Page(action) => crate::page_ops::undo_page(entry, action),
+    }?;
+    // Edit actions address physical pages; report the slot the user sees.
+    // Page actions already report a logical slot.
+    if !structural {
+        step.page_index = entry.logical_page(step.page_index).unwrap_or(0);
     }
+    Ok(step)
 }
 
 fn undo_field(
@@ -2247,6 +2277,8 @@ fn undo_field(
     entry.edit.redo_stack.push(EditAction::Field(action));
     Ok(EditStepView {
         page_index,
+        page_count: entry.pages.len(),
+        page_structure_changed: false,
         history: entry.edit.history_view(),
     })
 }
@@ -2308,6 +2340,8 @@ fn undo_box(
     entry.edit.redo_stack.push(EditAction::Box(action));
     Ok(EditStepView {
         page_index,
+        page_count: entry.pages.len(),
+        page_structure_changed: false,
         history: entry.edit.history_view(),
     })
 }
@@ -2321,7 +2355,8 @@ fn redo_for(entry: &mut OpenDocument) -> Result<EditStepView, CommandError> {
         Some(EditAction::Box(_))
         | Some(EditAction::Image(_))
         | Some(EditAction::Line(_))
-        | Some(EditAction::FormStructure(_)) => ensure_content_editable(&entry.document)?,
+        | Some(EditAction::FormStructure(_))
+        | Some(EditAction::Page(_)) => ensure_content_editable(&entry.document)?,
         Some(EditAction::Field(_)) => crate::form::ensure_forms_editable(&entry.document)?,
         Some(EditAction::Annotation(_)) => ensure_annotation_editable(&entry.document)?,
         None => {
@@ -2334,14 +2369,22 @@ fn redo_for(entry: &mut OpenDocument) -> Result<EditStepView, CommandError> {
     let Some(action) = entry.edit.redo_stack.pop() else {
         unreachable!("the redo stack was checked immediately above");
     };
-    match action {
+    let structural = matches!(action, EditAction::Page(_));
+    let mut step = match action {
         EditAction::Box(action) => redo_box(entry, action),
         EditAction::Image(action) => crate::image_edit::redo_image(entry, action),
         EditAction::Line(action) => crate::line_edit::redo_line(entry, action),
         EditAction::Field(action) => redo_field(entry, action),
         EditAction::FormStructure(action) => redo_form_structure(entry, action),
         EditAction::Annotation(action) => redo_annotation(entry, action),
+        EditAction::Page(action) => crate::page_ops::redo_page(entry, action),
+    }?;
+    // Edit actions address physical pages; report the slot the user sees.
+    // Page actions already report a logical slot.
+    if !structural {
+        step.page_index = entry.logical_page(step.page_index).unwrap_or(0);
     }
+    Ok(step)
 }
 
 fn redo_box(
@@ -2398,6 +2441,8 @@ fn redo_box(
     entry.edit.undo_stack.push(EditAction::Box(action));
     Ok(EditStepView {
         page_index,
+        page_count: entry.pages.len(),
+        page_structure_changed: false,
         history: entry.edit.history_view(),
     })
 }
@@ -3274,7 +3319,10 @@ pub fn apply_text_edit(
     text: String,
 ) -> Result<TextEditResultView, CommandError> {
     with_open_document(&document_id, |entry| {
-        apply_for(entry, page_index, box_id, text)
+        let physical = entry.physical_page(page_index)?;
+        let mut view = apply_for(entry, physical, box_id, text)?;
+        view.page_index = entry.logical_page(physical).unwrap_or(0);
+        Ok(view)
     })
 }
 
@@ -3286,7 +3334,12 @@ pub fn delete_text_box(
     page_index: u32,
     box_id: u64,
 ) -> Result<TextEditResultView, CommandError> {
-    with_open_document(&document_id, |entry| delete_for(entry, page_index, box_id))
+    with_open_document(&document_id, |entry| {
+        let physical = entry.physical_page(page_index)?;
+        let mut view = delete_for(entry, physical, box_id)?;
+        view.page_index = entry.logical_page(physical).unwrap_or(0);
+        Ok(view)
+    })
 }
 
 /// The `create_text_box` command: adds an empty, visible Text Box and records
@@ -3297,7 +3350,14 @@ pub fn create_text_box(
     page_index: u32,
     request: CreateTextBoxRequest,
 ) -> Result<TextBoxEditResultView, CommandError> {
-    with_open_document(&document_id, |entry| create_for(entry, page_index, request))
+    with_open_document(&document_id, |entry| {
+        let physical = entry.physical_page(page_index)?;
+        let mut view = create_for(entry, physical, request)?;
+        let logical = entry.logical_page(physical).unwrap_or(0);
+        view.page_index = logical;
+        view.target.page_index = logical;
+        Ok(view)
+    })
 }
 
 /// The `text_boxes` command: every Text Box this session created on the page,
@@ -3307,7 +3367,15 @@ pub fn text_boxes(
     document_id: String,
     page_index: u32,
 ) -> Result<Vec<TextBoxTargetView>, CommandError> {
-    with_open_document(&document_id, |entry| boxes_for(entry, page_index))
+    with_open_document(&document_id, |entry| {
+        let physical = entry.physical_page(page_index)?;
+        let mut views = boxes_for(entry, physical)?;
+        let logical = entry.logical_page(physical).unwrap_or(0);
+        for view in &mut views {
+            view.page_index = logical;
+        }
+        Ok(views)
+    })
 }
 
 /// The `apply_text_box_style` command: replaces the whole-box style and keeps
@@ -3320,7 +3388,12 @@ pub fn apply_text_box_style(
     style: TextBoxStyleView,
 ) -> Result<TextBoxEditResultView, CommandError> {
     with_open_document(&document_id, |entry| {
-        style_for(entry, page_index, box_id, style)
+        let physical = entry.physical_page(page_index)?;
+        let mut view = style_for(entry, physical, box_id, style)?;
+        let logical = entry.logical_page(physical).unwrap_or(0);
+        view.page_index = logical;
+        view.target.page_index = logical;
+        Ok(view)
     })
 }
 
@@ -3333,7 +3406,12 @@ pub fn transform_text_box(
     transform: TextBoxTransformRequest,
 ) -> Result<TextBoxEditResultView, CommandError> {
     with_open_document(&document_id, |entry| {
-        transform_for(entry, page_index, box_id, transform)
+        let physical = entry.physical_page(page_index)?;
+        let mut view = transform_for(entry, physical, box_id, transform)?;
+        let logical = entry.logical_page(physical).unwrap_or(0);
+        view.page_index = logical;
+        view.target.page_index = logical;
+        Ok(view)
     })
 }
 
