@@ -51,6 +51,7 @@ const approved: AnnotationView = {
     kind: "approved",
     frame: { x: 216, y: 366, width: 180, height: 60, rotation: 0 },
   },
+  freeText: null,
 };
 
 function renderLayer(overrides: Partial<StampLayerProps> = {}) {
@@ -353,6 +354,7 @@ describe("StampLayer", () => {
       name: "a1",
       kind: "highlight",
       stamp: null,
+      freeText: null,
     };
     renderLayer({
       annotations: [approved, otherPage, highlight],

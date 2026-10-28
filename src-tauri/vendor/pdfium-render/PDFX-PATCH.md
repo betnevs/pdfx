@@ -50,7 +50,7 @@ safe wrapper lives in `src-tauri/src/pdfium_adapter.rs`.
 
 ## Patch scope
 
-Thirteen files change. Each hunk is additive; no upstream behaviour changes.
+Fifteen files change. Each hunk is additive; no upstream behaviour changes.
 
 ### `src/pdf/document.rs`
 
@@ -80,6 +80,19 @@ Thirteen files change. Each hunk is additive; no upstream behaviour changes.
 - Added `PdfPageSquareAnnotation::close(self)` calling
   `FPDFPage_CloseAnnot()`, mirroring the circle patch. Rectangle shapes use it
   through the adapter's free `create_shape_annotation()` function.
+
+### `src/pdf/document/page/annotation/squiggly.rs`
+
+- Added `PdfPageSquigglyAnnotation::close(self)` calling
+  `FPDFPage_CloseAnnot()`. Squiggly markup is a native `/Squiggly` annotation
+  created through this type, so it needs the same explicit close as the other
+  annotation constructors PDFX uses.
+
+### `src/pdf/document/page/annotation/free_text.rs`
+
+- Added `PdfPageFreeTextAnnotation::close(self)` calling
+  `FPDFPage_CloseAnnot()`. Native free text and callouts are created through
+  this type.
 
 ### `src/pdf/document/page/annotation/ink.rs`
 
@@ -210,9 +223,9 @@ cargo test --test cjk_fonts
    sha256 here.
 2. Replace everything in this directory with the new crate contents plus
    `LICENSE.md`, keeping `PDFX-PATCH.md`.
-3. Re-apply the hunks above (thirteen files). `diff -u` against the pristine
+3. Re-apply the hunks above (fifteen files). `diff -u` against the pristine
    crate source (cargo registry unpack directory or a fresh extract of the
-   `.crate`) is the authoritative patch; keep the diff to those thirteen files.
+   `.crate`) is the authoritative patch; keep the diff to those fifteen files.
 4. Update `src-tauri/Cargo.toml` version if the patched range changes, then
    build. `pdfium-render` tracks the PDFium API, so re-run the adapter tests
    against the pinned PDFium build first.
@@ -224,8 +237,9 @@ cargo test --test cjk_fonts
 
 - Upstream concrete annotation types (e.g. `PdfPageCircleAnnotation`) have no
   `Drop`; only the `PdfPageAnnotation` enum closes its annotation handle. The
-  patch adds `close(self)` to the eight types PDFX creates (circle, square,
-  ink, highlight, underline, strikeout, text, stamp), and the adapter calls it
+  patch adds `close(self)` to the ten types PDFX creates (circle, square,
+  ink, highlight, underline, strikeout, squiggly, text, stamp, free text), and
+  the adapter calls it
   immediately after setting bounds. Other concrete annotation types keep
   upstream behaviour, so
   callers creating them directly must close them explicitly if the patch is

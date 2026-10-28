@@ -10,7 +10,9 @@
 //!    rewrite with `FPDF_REMOVE_SECURITY`).
 //! 2. `lopdf` appends one revision for object-level edits PDFium cannot make.
 //!    Only one engine writes a revision, and lopdf always appends to PDFium's
-//!    output rather than to the source.
+//!    output rather than to the source. Free text annotations need this pass
+//!    because PDFium has no integer annotation-value API: `/Q` (alignment) and
+//!    `/IT` are written from the annotation's private PDFX keys here.
 //!
 //! Font subsets follow the same rule. CJK text loads a `subsetter`-produced
 //! CIDFontType2 into the live document with `FPDFText_LoadCidType2Font`, so
@@ -200,6 +202,11 @@ pub fn save_document_with_progress(
         // in the output.
         object_edits.extend(crate::form_create::save_object_edits(&entry.edit));
         let output_bytes = append_object_edits(output_bytes, &object_edits)?;
+        // Free text alignment lives in a private string key because PDFium
+        // cannot write an integer annotation entry. Translate it into `/Q`
+        // (and `/IT`) in one appended revision; undo/redo and repeat saves
+        // therefore always reflect the current annotation state.
+        let output_bytes = apply_annotation_dictionary_edits(output_bytes)?;
 
         emit(document_id, SaveStage::Writing, 3, progress);
         let written = write_output_atomically(&target, &output_bytes)?;
@@ -367,6 +374,171 @@ pub fn append_object_edits(base: Vec<u8>, edits: &[ObjectEdit]) -> Result<Vec<u8
     incremental
         .save_to(&mut output)
         .map_err(|error| lopdf_error("could not append the object-level revision", error))?;
+    Ok(output)
+}
+
+/// The deferred standard entries for one PDFX free text annotation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FreeTextDictionaryEdit {
+    q: Option<i64>,
+    it: Vec<u8>,
+}
+
+/// A page whose `/Annots` array is rewritten because Pdfium stores the
+/// annotation dictionaries inline. Writing a direct dictionary requires
+/// cloning its containing page object into the appended revision.
+struct PageAnnotsEdit {
+    page_id: lopdf::ObjectId,
+    annots: Vec<lopdf::Object>,
+}
+
+/// A referenced annotation that can be edited by cloning its own object.
+struct ReferencedAnnotationEdit {
+    id: lopdf::ObjectId,
+    edit: FreeTextDictionaryEdit,
+}
+
+/// Derives the standard `/Q` and `/IT` entries for every PDFX free text
+/// annotation in a PDFium revision.
+///
+/// Pdfium writes annotation dictionaries inline in `/Annots`, so inline entries
+/// are rewritten through their page object while referenced entries are edited
+/// directly. Foreign free text annotations have no PDFX style state and are
+/// left untouched.
+fn free_text_dictionary_edits(
+    document: &lopdf::Document,
+) -> (Vec<PageAnnotsEdit>, Vec<ReferencedAnnotationEdit>) {
+    fn edit_for(dictionary: &lopdf::Dictionary) -> Option<FreeTextDictionaryEdit> {
+        if dictionary
+            .get(b"Subtype")
+            .and_then(lopdf::Object::as_name)
+            .ok()
+            != Some(b"FreeText".as_slice())
+        {
+            return None;
+        }
+        let kind = dictionary
+            .get(b"PDFXFreeTextKind")
+            .ok()
+            .and_then(|object| object.as_str().ok())
+            .map(decode_pdf_text)?;
+        let q = dictionary
+            .get(b"PDFXFreeTextAlign")
+            .ok()
+            .and_then(|object| object.as_str().ok())
+            .map(decode_pdf_text)
+            .and_then(|value| crate::annotations::FreeTextAlign::parse(&value))
+            .map(crate::annotations::FreeTextAlign::pdf_q);
+        let it = if kind == "callout" {
+            b"FreeTextCallout".to_vec()
+        } else {
+            b"FreeText".to_vec()
+        };
+        Some(FreeTextDictionaryEdit { q, it })
+    }
+
+    let mut page_edits = Vec::new();
+    let mut referenced_edits = Vec::new();
+    for page_id in document.get_pages().values() {
+        let Ok(page) = document.get_dictionary(*page_id) else {
+            continue;
+        };
+        let Ok(annots) = page.get_deref(b"Annots", document) else {
+            continue;
+        };
+        let Ok(array) = annots.as_array() else {
+            continue;
+        };
+        let mut rewritten = Vec::with_capacity(array.len());
+        let mut changed = false;
+        for object in array {
+            match object {
+                lopdf::Object::Dictionary(dictionary) => match edit_for(dictionary) {
+                    Some(edit) => {
+                        let mut updated = dictionary.clone();
+                        if let Some(q) = edit.q {
+                            updated.set(b"Q".to_vec(), lopdf::Object::Integer(q));
+                        }
+                        updated.set(b"IT".to_vec(), lopdf::Object::Name(edit.it));
+                        rewritten.push(lopdf::Object::Dictionary(updated));
+                        changed = true;
+                    }
+                    None => rewritten.push(object.clone()),
+                },
+                lopdf::Object::Reference(id) => {
+                    if let Ok(dictionary) = document.get_dictionary(*id) {
+                        if let Some(edit) = edit_for(dictionary) {
+                            referenced_edits.push(ReferencedAnnotationEdit { id: *id, edit });
+                        }
+                    }
+                    rewritten.push(object.clone());
+                }
+                other => rewritten.push(other.clone()),
+            }
+        }
+        if changed {
+            page_edits.push(PageAnnotsEdit {
+                page_id: *page_id,
+                annots: rewritten,
+            });
+        }
+    }
+    (page_edits, referenced_edits)
+}
+
+/// Writes `/Q` and `/IT` for PDFX free text annotations into one appended
+/// revision.
+///
+/// PDFium's annotation API cannot set an integer dictionary entry, so the
+/// alignment is mirrored as a string while editing and translated here on every
+/// save. The pass is stateless: it reads the current PDFium output, so undo,
+/// redo and repeated saves all produce the same result and never accumulate
+/// duplicate annotations.
+pub fn apply_annotation_dictionary_edits(base: Vec<u8>) -> Result<Vec<u8>, CommandError> {
+    let previous = lopdf::Document::load_mem(&base).map_err(|error| {
+        lopdf_error(
+            "could not parse the PDFium revision for annotation dictionary edits",
+            error,
+        )
+    })?;
+    let edits = free_text_dictionary_edits(&previous);
+    let (page_edits, referenced_edits) = edits;
+    if page_edits.is_empty() && referenced_edits.is_empty() {
+        return Ok(base);
+    }
+
+    let mut incremental = lopdf::IncrementalDocument::create_from(base, previous);
+    for edit in &page_edits {
+        incremental
+            .opt_clone_object_to_new_document(edit.page_id)
+            .map_err(|error| lopdf_error("could not clone a page for annotation edits", error))?;
+        let page = incremental
+            .new_document
+            .get_dictionary_mut(edit.page_id)
+            .map_err(|error| lopdf_error("could not edit a page for annotation edits", error))?;
+        page.set(
+            b"Annots".to_vec(),
+            lopdf::Object::Array(edit.annots.clone()),
+        );
+    }
+    for edit in &referenced_edits {
+        incremental
+            .opt_clone_object_to_new_document(edit.id)
+            .map_err(|error| lopdf_error("could not clone a free text annotation", error))?;
+        let dictionary = incremental
+            .new_document
+            .get_dictionary_mut(edit.id)
+            .map_err(|error| lopdf_error("could not edit a free text annotation", error))?;
+        if let Some(q) = edit.edit.q {
+            dictionary.set(b"Q".to_vec(), lopdf::Object::Integer(q));
+        }
+        dictionary.set(b"IT".to_vec(), lopdf::Object::Name(edit.edit.it.clone()));
+    }
+
+    let mut output = Vec::new();
+    incremental
+        .save_to(&mut output)
+        .map_err(|error| lopdf_error("could not append the annotation revision", error))?;
     Ok(output)
 }
 

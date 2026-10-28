@@ -46,6 +46,7 @@ const createdRectangle: AnnotationView = {
     style: style(),
   },
   stamp: null,
+  freeText: null,
 };
 
 const selectedRectangle: AnnotationView = {
@@ -66,6 +67,7 @@ const selectedRectangle: AnnotationView = {
     style: style({ opacity: 80, lineWidth: 3 }),
   },
   stamp: null,
+  freeText: null,
 };
 
 function mockCommands(

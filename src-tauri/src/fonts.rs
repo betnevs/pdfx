@@ -57,6 +57,13 @@ pub(crate) struct BundledFont {
 }
 
 impl BundledFont {
+    /// A parser over the bundled font program, for callers that need glyph
+    /// advances and outlines rather than PDFium font handles.
+    pub(crate) fn face(&self) -> Option<ttf_parser::Face<'static>> {
+        let bytes: &'static [u8] = self.bytes;
+        ttf_parser::Face::parse(bytes, 0).ok()
+    }
+
     /// True when every character that will be written to a text object has a
     /// glyph. Line breaks never reach a text object (each line is one object);
     /// a tab falls back to the space glyph because CJK fonts rarely map the
