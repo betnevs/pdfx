@@ -508,6 +508,72 @@ fn build_objects(
     Ok(built)
 }
 
+/// Whether `object_index` belongs to the active watermark on `physical_page`.
+///
+/// The watermark is page content and stays searchable, but it is not a Text
+/// Box: editing it through the text layer would replace objects underneath the
+/// watermark's tracked range and let a later delete detach the wrong object.
+pub(crate) fn is_watermark_object(
+    entry: &OpenDocument,
+    physical_page: u32,
+    object_index: usize,
+) -> bool {
+    entry
+        .edit
+        .watermark
+        .as_ref()
+        .and_then(|state| {
+            state
+                .pages
+                .iter()
+                .find(|page| page.physical_page == physical_page)
+        })
+        .is_some_and(|page| object_index >= page.start && object_index < page.start + page.count)
+}
+
+/// Registers the watermark objects a page duplication carried along.
+///
+/// `copy_page` clones the source page from a serialization of the live
+/// document, so a page that carries the active watermark produces a copy with
+/// the same content objects in the same order. Recording the copy lets a later
+/// replace or delete remove the mark there too; without it the copy would look
+/// like ordinary unmarked page content and the mark would linger as a second,
+/// untracked layer. Returns whether the copy was added to the active watermark.
+pub(crate) fn track_copied_page(
+    entry: &mut OpenDocument,
+    source: u32,
+    copy: u32,
+) -> Result<bool, CommandError> {
+    let Some(state) = entry.edit.watermark.as_mut() else {
+        return Ok(false);
+    };
+    if state.pages.iter().any(|page| page.physical_page == copy) {
+        return Ok(false);
+    }
+    let Some(source_page) = state
+        .pages
+        .iter()
+        .find(|page| page.physical_page == source)
+        .cloned()
+    else {
+        return Ok(false);
+    };
+
+    let source_count = load_page(&entry.document, source)?.objects().len();
+    let copy_count = load_page(&entry.document, copy)?.objects().len();
+    if source_count != copy_count || source_page.start + source_page.count > copy_count {
+        // The importer changed the object layout; do not guess an index range
+        // that could later detach the wrong object.
+        return Ok(false);
+    }
+    state.pages.push(WatermarkPage {
+        physical_page: copy,
+        start: source_page.start,
+        count: source_page.count,
+    });
+    Ok(true)
+}
+
 /// Removes the watermark's objects from every tracked page and returns them as
 /// history snapshots.
 fn take_current(entry: &mut OpenDocument) -> Result<Option<WatermarkSnapshot>, CommandError> {

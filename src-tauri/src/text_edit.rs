@@ -1145,6 +1145,14 @@ fn target_for(
     let objects = page.objects();
     let object_index = object_index_for_raw_char(&page_text, objects, raw_index)
         .ok_or_else(|| no_editable_text(page_index))?;
+    if crate::watermark::is_watermark_object(entry, page_index, object_index) {
+        // The watermark is page content but not a Text Box; editing it would
+        // move page objects underneath the watermark's tracked range.
+        return Err(CommandError::new(
+            CommandErrorCode::NoEditableText,
+            format!("page {page_index} watermark text is not editable"),
+        ));
+    }
 
     if let Some(record) = entry
         .edit

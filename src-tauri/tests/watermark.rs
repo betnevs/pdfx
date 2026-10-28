@@ -17,9 +17,13 @@ use pdfx_lib::commands::{
     close_document, extract_text_layer, open_document, page_info, render_page, CommandErrorCode,
 };
 use pdfx_lib::flatten_export::export_flattened_copy;
+use pdfx_lib::page_ops::copy_page;
 use pdfx_lib::print_export::{export_page, PageImageFormat};
 use pdfx_lib::save::{save_document_with_progress, SaveDocumentRequest};
-use pdfx_lib::text_edit::{edit_history, redo_text_edit, undo_text_edit};
+use pdfx_lib::text_edit::{
+    create_text_box, delete_text_box, edit_history, redo_text_edit, text_edit_target,
+    undo_text_edit, CreateTextBoxRequest,
+};
 use pdfx_lib::watermark::{
     apply_watermark, delete_watermark, watermark_image_preview, watermark_state,
     WatermarkEditResult, WatermarkKind, WatermarkRequest, WatermarkScope,
@@ -1650,5 +1654,469 @@ fn invalid_watermark_requests_are_rejected_without_history() {
             "{name}: a rejection must not dirty the document"
         );
     }
+    close_document(document_id).expect("close document");
+}
+
+/// Page duplication copies the mark as page content. The active watermark must
+/// follow the copy so a later replace or delete removes it there too, and
+/// undo/redo of both actions must stay consistent.
+#[test]
+fn copying_a_watermarked_page_keeps_the_copy_in_the_watermark() {
+    let pdf = synthetic::single_line_pdf();
+    let document_id = open_synthetic(&pdf);
+    let baseline = render_pixels(&document_id, 0, 1.0);
+
+    apply_watermark(
+        document_id.clone(),
+        0,
+        text_request(WatermarkScope::Current, "MARK"),
+    )
+    .expect("apply a watermark");
+    let copied = copy_page(document_id.clone(), 0).expect("copy the marked page");
+    assert_eq!((copied.page_count, copied.page_index), (2, 1));
+
+    let copy_text = extract_text_layer(document_id.clone(), 1)
+        .expect("extract the copy")
+        .text;
+    assert!(
+        copy_text.contains("MARK"),
+        "the copy must keep the page's watermark content: {copy_text:?}"
+    );
+    assert_eq!(
+        watermark_state(document_id.clone())
+            .expect("read state")
+            .expect("watermark is active")
+            .page_indices,
+        vec![0, 1],
+        "the copied page is part of the one active watermark"
+    );
+
+    // A replace cleans the copy as well: no old mark may survive underneath.
+    apply_watermark(
+        document_id.clone(),
+        0,
+        text_request(WatermarkScope::All, "SECOND"),
+    )
+    .expect("replace on every page");
+    for logical in [0u32, 1] {
+        let text = extract_text_layer(document_id.clone(), logical)
+            .expect("extract page")
+            .text;
+        assert!(
+            text.contains("SECOND") && !text.contains("MARK"),
+            "page {logical} must carry only the replacement: {text:?}"
+        );
+    }
+
+    // Delete removes the mark from both pages, including the copy.
+    delete_watermark(document_id.clone()).expect("delete the watermark");
+    for logical in [0u32, 1] {
+        let text = extract_text_layer(document_id.clone(), logical)
+            .expect("extract page")
+            .text;
+        assert!(!text.contains("SECOND"), "page {logical}: {text:?}");
+        let diff = diff_from(&baseline, &render_pixels(&document_id, logical, 1.0));
+        assert_eq!(
+            diff.count, 0,
+            "page {logical} still paints the deleted watermark"
+        );
+    }
+
+    // Undo restores the mark on both pages; undo the copy and the mark again,
+    // then redo in order.
+    undo_text_edit(document_id.clone()).expect("undo delete");
+    for logical in [0u32, 1] {
+        let text = extract_text_layer(document_id.clone(), logical)
+            .expect("extract page")
+            .text;
+        assert!(text.contains("SECOND"), "page {logical}: {text:?}");
+    }
+    undo_text_edit(document_id.clone()).expect("undo replace");
+    undo_text_edit(document_id.clone()).expect("undo first apply");
+    undo_text_edit(document_id.clone()).expect("undo copy");
+    assert!(watermark_state(document_id.clone())
+        .expect("state after undo")
+        .is_none());
+    redo_text_edit(document_id.clone()).expect("redo copy");
+    redo_text_edit(document_id.clone()).expect("redo first apply");
+    let redone = watermark_state(document_id.clone())
+        .expect("state after redo")
+        .expect("watermark is active again");
+    assert_eq!(redone.text.as_deref(), Some("MARK"));
+    assert_eq!(redone.page_indices, vec![0, 1]);
+    let copy_text = extract_text_layer(document_id.clone(), 1)
+        .expect("extract copy")
+        .text;
+    assert!(copy_text.contains("MARK"), "{copy_text:?}");
+
+    // The copy and its tracked mark survive saving and reopening.
+    let dir = TempDir::new("watermark-copy-save");
+    let output = dir.path().join("copied.pdf");
+    save_as(&document_id, &output);
+    let saved = lopdf::Document::load(&output).expect("parse saved copy");
+    assert_eq!(saved.get_pages().len(), 2);
+    close_document(document_id).expect("close live document");
+    let reopened =
+        open_document(output.to_string_lossy().into_owned(), None).expect("reopen saved copy");
+    for logical in [0u32, 1] {
+        let text = extract_text_layer(reopened.document_id.clone(), logical)
+            .expect("extract saved page")
+            .text;
+        assert!(text.contains("MARK"), "saved page {logical}: {text:?}");
+    }
+    close_document(reopened.document_id).expect("close reopened document");
+}
+
+/// Text Box creation, deletion and undo move page objects around the mark. The
+/// watermark's recorded object range must follow those shifts so delete and
+/// undo/redo detach the mark itself, never a neighbouring object.
+#[test]
+fn watermark_object_ranges_follow_text_box_edits() {
+    let pdf = synthetic::single_line_pdf();
+    let document_id = open_synthetic(&pdf);
+    let baseline = render_pixels(&document_id, 0, 1.0);
+
+    let text_box = create_text_box(
+        document_id.clone(),
+        0,
+        CreateTextBoxRequest {
+            x: 40.0,
+            y: 50.0,
+            width: 220.0,
+            height: 90.0,
+            style: None,
+        },
+    )
+    .expect("create a Text Box");
+    let box_id = text_box.target.box_id;
+    apply_watermark(
+        document_id.clone(),
+        0,
+        text_request(WatermarkScope::Current, "MARK"),
+    )
+    .expect("apply the watermark after the Text Box");
+
+    // Deleting the Text Box removes an object before the mark: the range must
+    // shift down by one.
+    delete_text_box(document_id.clone(), 0, box_id).expect("delete the Text Box");
+    let deleted = delete_watermark(document_id.clone()).expect("delete the watermark");
+    assert_eq!(deleted.history.revision, 4);
+    let text = extract_text_layer(document_id.clone(), 0)
+        .expect("extract text")
+        .text;
+    assert!(!text.contains("MARK"), "{text:?}");
+    assert_eq!(
+        diff_from(&baseline, &render_pixels(&document_id, 0, 1.0)).count,
+        0,
+        "no watermark pixels may remain after the shifted delete"
+    );
+
+    // Undo the delete, then the Text Box deletion: the restored Text Box
+    // re-inserts at the front and shifts the mark back up. Deleting again must
+    // still address the mark.
+    undo_text_edit(document_id.clone()).expect("undo watermark delete");
+    undo_text_edit(document_id.clone()).expect("undo Text Box deletion");
+    let restored = extract_text_layer(document_id.clone(), 0)
+        .expect("extract text")
+        .text;
+    assert!(restored.contains("MARK"), "{restored:?}");
+    delete_watermark(document_id.clone()).expect("delete the shifted-in watermark");
+    let text = extract_text_layer(document_id.clone(), 0)
+        .expect("extract text")
+        .text;
+    assert!(!text.contains("MARK"), "{text:?}");
+
+    close_document(document_id).expect("close document");
+}
+
+fn char_index_of(layer: &pdfx_lib::commands::TextLayerView, needle: &str) -> usize {
+    let offset = layer.text.find(needle).expect("text in layer");
+    layer.text[..offset].chars().count()
+}
+
+/// The watermark is page content, but it is not a Text Box: clicking its glyphs
+/// in the text layer must not offer a text edit whose object range overlaps the
+/// active watermark.
+#[test]
+fn watermark_text_is_not_editable_as_a_text_box() {
+    let pdf = synthetic::single_line_pdf();
+    let document_id = open_synthetic(&pdf);
+    apply_watermark(
+        document_id.clone(),
+        0,
+        text_request(WatermarkScope::Current, "MARK"),
+    )
+    .expect("apply a watermark");
+
+    let layer = extract_text_layer(document_id.clone(), 0).expect("extract text");
+    let index = char_index_of(&layer, "MARK");
+    let error = text_edit_target(document_id.clone(), 0, index as u32)
+        .err()
+        .expect("the watermark text must not become an editable Text Box");
+    assert_eq!(error.code, CommandErrorCode::NoEditableText);
+
+    // Even a direct text edit of the recorded box would be refused, and the
+    // watermark remains deletable afterwards.
+    let history = edit_history(document_id.clone()).expect("history");
+    assert_eq!(history.revision, 1, "a refused target changes no history");
+    delete_watermark(document_id.clone()).expect("delete the untouched watermark");
+    let text = extract_text_layer(document_id.clone(), 0)
+        .expect("extract text")
+        .text;
+    assert!(!text.contains("MARK"), "{text:?}");
+    close_document(document_id).expect("close document");
+}
+
+/// A save rewrites the live PDFium page objects in place. Replacing and
+/// deleting the watermark afterwards must still detach exactly the mark, and a
+/// second save must not leave the old layer in the output.
+#[test]
+fn watermark_replace_and_delete_after_save_stay_consistent() {
+    let pdf = synthetic::single_line_pdf();
+    let document_id = open_synthetic(&pdf);
+    apply_watermark(
+        document_id.clone(),
+        0,
+        text_request(WatermarkScope::Current, "BEFORE"),
+    )
+    .expect("apply before saving");
+
+    let dir = TempDir::new("watermark-after-save");
+    let output = dir.path().join("after-save.pdf");
+    save_as(&document_id, &output);
+    assert!(!edit_history(document_id.clone()).expect("history").dirty);
+
+    apply_watermark(
+        document_id.clone(),
+        0,
+        text_request(WatermarkScope::Current, "AFTER"),
+    )
+    .expect("replace after saving");
+    let text = extract_text_layer(document_id.clone(), 0)
+        .expect("extract text")
+        .text;
+    assert!(
+        text.contains("AFTER") && !text.contains("BEFORE"),
+        "the post-save replacement must not stack: {text:?}"
+    );
+
+    save_as(&document_id, &output);
+
+    // The watermark is still the live session's active mark after the save, so
+    // it can be deleted and the deletion written by one more save.
+    delete_watermark(document_id.clone()).expect("delete after save");
+    let text = extract_text_layer(document_id.clone(), 0)
+        .expect("extract text")
+        .text;
+    assert!(
+        !text.contains("AFTER") && !text.contains("BEFORE"),
+        "{text:?}"
+    );
+    let output_two = dir.path().join("after-delete.pdf");
+    save_as(&document_id, &output_two);
+    close_document(document_id).expect("close live document");
+
+    let reopened =
+        open_document(output.to_string_lossy().into_owned(), None).expect("reopen saved document");
+    let saved_text = extract_text_layer(reopened.document_id.clone(), 0)
+        .expect("extract saved text")
+        .text;
+    assert!(
+        saved_text.contains("AFTER") && !saved_text.contains("BEFORE"),
+        "the saved file carries only the replacement: {saved_text:?}"
+    );
+    assert_eq!(
+        saved_text.matches("AFTER").count(),
+        1,
+        "the replacement appears once: {saved_text:?}"
+    );
+    close_document(reopened.document_id).expect("close reopened document");
+
+    let reopened_two =
+        open_document(output_two.to_string_lossy().into_owned(), None).expect("reopen final save");
+    let final_text = extract_text_layer(reopened_two.document_id.clone(), 0)
+        .expect("extract final text")
+        .text;
+    assert!(
+        !final_text.contains("AFTER") && !final_text.contains("BEFORE"),
+        "the deleted watermark must not be restored by a later save: {final_text:?}"
+    );
+    close_document(reopened_two.document_id).expect("close final document");
+}
+
+/// Image watermarks copy with the page as an image page object. Deleting the
+/// watermark must remove the image from the copy too.
+#[test]
+fn copying_an_image_watermarked_page_tracks_the_copy() {
+    let pdf = synthetic::single_line_pdf();
+    let document_id = open_synthetic(&pdf);
+    let baseline = render_pixels(&document_id, 0, 1.0);
+    let dir = TempDir::new("watermark-image-copy");
+    let path = write_image(&dir, "copy.png", &solid_png(120, 60, RED));
+
+    apply_watermark(
+        document_id.clone(),
+        0,
+        image_request(WatermarkScope::Current, &path, 100),
+    )
+    .expect("apply an image watermark");
+    copy_page(document_id.clone(), 0).expect("copy the marked page");
+    assert_eq!(
+        watermark_state(document_id.clone())
+            .expect("state")
+            .expect("active")
+            .page_indices,
+        vec![0, 1]
+    );
+    delete_watermark(document_id.clone()).expect("delete the image watermark");
+    for logical in [0u32, 1] {
+        let diff = diff_from(&baseline, &render_pixels(&document_id, logical, 1.0));
+        assert_eq!(
+            diff.count, 0,
+            "page {logical} still paints the deleted image watermark"
+        );
+    }
+    close_document(document_id).expect("close document");
+}
+
+/// Page operations after a watermark move, hide and rotate physical pages.
+/// The active watermark addresses physical pages, so delete/undo must still hit
+/// the mark on the pages the user currently sees, and saving the rearranged
+/// document must keep it on the same content.
+#[test]
+fn page_operations_after_a_watermark_keep_the_mark_targeted() {
+    use pdfx_lib::page_ops::{delete_page, move_page, rotate_page};
+
+    let pdf = synthetic::page_operations_pdf();
+    let document_id = open_synthetic(&pdf);
+    apply_watermark(
+        document_id.clone(),
+        0,
+        text_request(WatermarkScope::All, "MARK"),
+    )
+    .expect("apply to all pages");
+
+    rotate_page(document_id.clone(), 0, 90).expect("rotate a marked page");
+    move_page(document_id.clone(), 2, 0).expect("move a marked page");
+    delete_page(document_id.clone(), 1).expect("hide a marked page");
+
+    let state = watermark_state(document_id.clone())
+        .expect("read state")
+        .expect("watermark is active");
+    assert_eq!(
+        state.page_indices,
+        vec![0, 1],
+        "only the visible slots are reported after reorder and deletion"
+    );
+
+    delete_watermark(document_id.clone()).expect("delete after the page operations");
+    for logical in [0u32, 1] {
+        let text = extract_text_layer(document_id.clone(), logical)
+            .expect("extract visible page")
+            .text;
+        assert!(!text.contains("MARK"), "page {logical}: {text:?}");
+    }
+
+    // Undo in order: the mark returns before the hidden page becomes visible.
+    undo_text_edit(document_id.clone()).expect("undo watermark delete");
+    undo_text_edit(document_id.clone()).expect("undo page deletion");
+    for logical in [0u32, 1, 2] {
+        let text = extract_text_layer(document_id.clone(), logical)
+            .expect("extract restored page")
+            .text;
+        assert!(text.contains("MARK"), "restored page {logical}: {text:?}");
+    }
+    undo_text_edit(document_id.clone()).expect("undo move");
+    undo_text_edit(document_id.clone()).expect("undo rotation");
+    assert_eq!(
+        page_info(document_id.clone(), 0)
+            .expect("page info after undo")
+            .rotation,
+        0
+    );
+
+    // Redo the page operations and the rotate still carry the mark; saving the
+    // rearranged document keeps it on the two visible pages.
+    redo_text_edit(document_id.clone()).expect("redo rotation");
+    redo_text_edit(document_id.clone()).expect("redo move");
+    redo_text_edit(document_id.clone()).expect("redo page deletion");
+    let state = watermark_state(document_id.clone())
+        .expect("state after redo")
+        .expect("active again");
+    assert_eq!(state.page_indices, vec![0, 1]);
+
+    let dir = TempDir::new("watermark-page-ops-save");
+    let output = dir.path().join("page-ops.pdf");
+    save_as(&document_id, &output);
+    close_document(document_id).expect("close live document");
+
+    let saved = lopdf::Document::load(&output).expect("parse saved rearranged document");
+    assert_eq!(saved.get_pages().len(), 2);
+    let reopened =
+        open_document(output.to_string_lossy().into_owned(), None).expect("reopen saved document");
+    for logical in [0u32, 1] {
+        let text = extract_text_layer(reopened.document_id.clone(), logical)
+            .expect("extract saved page")
+            .text;
+        assert!(text.contains("MARK"), "saved page {logical}: {text:?}");
+    }
+    close_document(reopened.document_id).expect("close reopened document");
+}
+
+/// Narrowing an all-pages watermark to the current page must remove the mark
+/// from every other page, and undo must restore the earlier all-pages state.
+#[test]
+fn narrowing_the_scope_replaces_instead_of_leaving_old_marks() {
+    let pdf = synthetic::page_operations_pdf();
+    let document_id = open_synthetic(&pdf);
+    apply_watermark(
+        document_id.clone(),
+        0,
+        text_request(WatermarkScope::All, "ALL"),
+    )
+    .expect("apply to all pages");
+
+    let narrowed = apply_watermark(
+        document_id.clone(),
+        1,
+        text_request(WatermarkScope::Current, "ONE"),
+    )
+    .expect("narrow to the current page");
+    assert_eq!(
+        narrowed.watermark.as_ref().expect("active").page_indices,
+        vec![1]
+    );
+    for (logical, expected) in [(0u32, false), (1, true), (2, false)] {
+        let text = extract_text_layer(document_id.clone(), logical)
+            .expect("extract page")
+            .text;
+        assert_eq!(
+            text.contains("ONE"),
+            expected,
+            "page {logical} after narrowing: {text:?}"
+        );
+        assert!(
+            !text.contains("ALL"),
+            "page {logical} must not keep the all-pages mark: {text:?}"
+        );
+    }
+
+    let undone = undo_text_edit(document_id.clone()).expect("undo narrowing");
+    assert_eq!(undone.history.revision, 1);
+    let restored = watermark_state(document_id.clone())
+        .expect("state after undo")
+        .expect("all-pages watermark restored");
+    assert_eq!(restored.page_indices, vec![0, 1, 2]);
+    for logical in [0u32, 1, 2] {
+        let text = extract_text_layer(document_id.clone(), logical)
+            .expect("extract page")
+            .text;
+        assert!(text.contains("ALL"), "page {logical}: {text:?}");
+    }
+    redo_text_edit(document_id.clone()).expect("redo narrowing");
+    let text = extract_text_layer(document_id.clone(), 0)
+        .expect("extract page")
+        .text;
+    assert!(!text.contains("ALL"), "{text:?}");
     close_document(document_id).expect("close document");
 }
