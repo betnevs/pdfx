@@ -505,6 +505,32 @@ impl BoxEditAction {
 
 pub(crate) enum EditAction {
     Box(BoxEditAction),
+    Field(FieldEditAction),
+}
+
+/// The value a field edit restores during undo or redo.
+///
+/// Field edits do not snapshot page objects; PDFium stores a widget's value in
+/// the annotation dictionary, so restoring the recorded value is enough.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum FieldValueSnapshot {
+    Text(String),
+    Checked(bool),
+    Choice(String),
+    /// The radio group's selected on-state name, or `None` when unselected.
+    Radio(Option<String>),
+}
+
+pub(crate) struct FieldEditAction {
+    pub(crate) field_id: String,
+    pub(crate) field_name: String,
+    /// Set for radio widgets: the group whose value the action changes.
+    pub(crate) radio_group: Option<String>,
+    pub(crate) page_index: u32,
+    pub(crate) before_state: u64,
+    pub(crate) after_state: u64,
+    pub(crate) before: FieldValueSnapshot,
+    pub(crate) after: FieldValueSnapshot,
 }
 
 /// One editable Text Box on a page.
@@ -1786,12 +1812,28 @@ fn push_action(
 }
 
 fn undo_for(entry: &mut OpenDocument) -> Result<EditStepView, CommandError> {
-    ensure_content_editable(&entry.document)?;
-    let Some(EditAction::Box(mut action)) = entry.edit.undo_stack.pop() else {
+    match entry.edit.undo_stack.last() {
+        Some(EditAction::Field(_)) => crate::form::ensure_forms_editable(&entry.document)?,
+        _ => ensure_content_editable(&entry.document)?,
+    }
+    let Some(action) = entry.edit.undo_stack.pop() else {
         return Err(CommandError::new(
             CommandErrorCode::InvalidArgument,
             "there is nothing to undo",
         ));
+    };
+    let mut action = match action {
+        EditAction::Field(action) => {
+            crate::form::apply_field_snapshot(&entry.document, &action.field_id, &action.before)?;
+            entry.edit.current_state = action.before_state;
+            let page_index = action.page_index;
+            entry.edit.redo_stack.push(EditAction::Field(action));
+            return Ok(EditStepView {
+                page_index,
+                history: entry.edit.history_view(),
+            });
+        }
+        EditAction::Box(action) => action,
     };
 
     let before_count = action.before_count();
@@ -1851,12 +1893,28 @@ fn undo_for(entry: &mut OpenDocument) -> Result<EditStepView, CommandError> {
 }
 
 fn redo_for(entry: &mut OpenDocument) -> Result<EditStepView, CommandError> {
-    ensure_content_editable(&entry.document)?;
-    let Some(EditAction::Box(mut action)) = entry.edit.redo_stack.pop() else {
+    match entry.edit.redo_stack.last() {
+        Some(EditAction::Field(_)) => crate::form::ensure_forms_editable(&entry.document)?,
+        _ => ensure_content_editable(&entry.document)?,
+    }
+    let Some(action) = entry.edit.redo_stack.pop() else {
         return Err(CommandError::new(
             CommandErrorCode::InvalidArgument,
             "there is nothing to redo",
         ));
+    };
+    let mut action = match action {
+        EditAction::Field(action) => {
+            crate::form::apply_field_snapshot(&entry.document, &action.field_id, &action.after)?;
+            entry.edit.current_state = action.after_state;
+            let page_index = action.page_index;
+            entry.edit.undo_stack.push(EditAction::Field(action));
+            return Ok(EditStepView {
+                page_index,
+                history: entry.edit.history_view(),
+            });
+        }
+        EditAction::Box(action) => action,
     };
 
     let before_count = action.before_count();

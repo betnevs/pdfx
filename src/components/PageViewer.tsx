@@ -22,6 +22,7 @@ import {
   type FitMode,
 } from "../lib/pageGeometry";
 import type { PageRender, ZoomMode } from "../lib/useDocumentViewer";
+import { FormLayer } from "./FormLayer";
 import { PageTextLayer } from "./PageTextLayer";
 
 /** Fixed cell height keeps thumbnail virtualization independent of page sizes. */
@@ -388,6 +389,11 @@ export function PageSurface({
   render,
   readOnly,
   surfaceRef,
+  canFillForms = false,
+  formFocusFieldId = null,
+  onFormFocusHandled,
+  onSelectPage,
+  onFormFocusField,
 }: {
   documentId: string;
   pageIndex: number;
@@ -396,6 +402,13 @@ export function PageSurface({
   render: PageRender;
   readOnly: boolean;
   surfaceRef: RefObject<HTMLDivElement | null>;
+  /** Permission Restrictions allow filling existing form fields. */
+  canFillForms?: boolean;
+  /** Widget to focus after the caller navigated to its page. */
+  formFocusFieldId?: string | null;
+  onFormFocusHandled?: () => void;
+  onSelectPage?: (pageIndex: number) => void;
+  onFormFocusField?: (fieldId: string) => void;
 }) {
   const pixel = info ? pagePixelSize(info, scale) : null;
   const ready = pixel !== null && render.scale === scale;
@@ -456,6 +469,20 @@ export function PageSurface({
         readOnly={readOnly}
         scale={scale}
       />
+      {info && (
+        <FormLayer
+          documentId={documentId}
+          pageIndex={pageIndex}
+          pageWidth={info.width}
+          pageHeight={info.height}
+          scale={scale}
+          canFillForms={canFillForms}
+          focusFieldId={formFocusFieldId}
+          onFocusHandled={onFormFocusHandled}
+          onSelectPage={onSelectPage}
+          onFocusField={onFormFocusField}
+        />
+      )}
     </div>
   );
 }

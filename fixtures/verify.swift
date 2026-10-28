@@ -118,13 +118,25 @@ do {
             }
 
         case "form":
-            let annotations = document.page(at: 0)?.annotations ?? []
-            expect(annotations.count == 2, "page has two widget annotations (got \(annotations.count))")
-            expect(annotations.allSatisfy { ($0.type ?? "").contains("Widget") },
-                   "both annotations are widgets")
+            let pageZero = document.page(at: 0)?.annotations ?? []
+            let pageOne = document.page(at: 1)?.annotations ?? []
+            expect(pageZero.count == 8,
+                   "page 1 has eight widget annotations (got \(pageZero.count))")
+            expect(pageOne.count == 4,
+                   "page 2 has four widget annotations (got \(pageOne.count))")
+            expect((pageZero + pageOne).allSatisfy { ($0.type ?? "").contains("Widget") },
+                   "all annotations are widgets")
             expect(containsASCII(bytes, "/AcroForm"), "catalog declares /AcroForm")
             expect(containsASCII(bytes, "/Off") && containsASCII(bytes, "/Yes"),
                    "checkbox exposes /Off and /Yes states")
+            expect(containsASCII(bytes, "/male") && containsASCII(bytes, "/female"),
+                   "radio group exposes export states")
+            expect(containsASCII(bytes, "/Opt"), "choice fields declare options")
+            let names = Set((pageZero + pageOne).compactMap { $0.fieldName })
+            for name in ["full_name", "email", "subscribe", "gender", "country",
+                         "department", "notes", "agree", "js_guard", "readonly_note"] {
+                expect(names.contains(name), "form field \(name) is present")
+            }
 
         case "structure":
             expect(document.outlineRoot != nil, "document has an outline")

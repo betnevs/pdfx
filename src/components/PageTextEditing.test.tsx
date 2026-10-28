@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -223,7 +223,11 @@ describe("PageTextLayer text editing", () => {
     expect(applyCalls).toEqual([
       { documentId: "doc-1", pageIndex: 2, boxId: 7, text: "Edited text" },
     ]);
-    expect(changed).toHaveBeenCalledWith({ documentId: "doc-1", pageIndex: 2 });
+    expect(changed).toHaveBeenCalledWith({
+      documentId: "doc-1",
+      pageIndex: 2,
+      origin: "text",
+    });
     await waitFor(() =>
       expect(
         invokeMock.mock.calls.filter(([command]) => command === "extract_text_layer"),
@@ -233,6 +237,27 @@ describe("PageTextLayer text editing", () => {
     expect(screen.getByRole("button", { name: "重做" })).toBeDisabled();
 
     window.removeEventListener(DOCUMENT_CHANGED_EVENT, listener);
+  });
+
+  it("shows form fills in the shared undo history", async () => {
+    let history = emptyHistory;
+    mockCommands({ edit_history: () => history });
+    await renderLayer();
+
+    expect(screen.getByRole("button", { name: "撤销" })).toBeDisabled();
+
+    history = editedHistory;
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent(DOCUMENT_CHANGED_EVENT, {
+          detail: { documentId: "doc-1", pageIndex: 0, origin: "form" },
+        }),
+      );
+    });
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "撤销" })).toBeEnabled(),
+    );
   });
 
   it("cancels without writing anything", async () => {

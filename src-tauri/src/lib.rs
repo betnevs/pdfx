@@ -1,6 +1,7 @@
 pub mod commands;
 pub mod engine;
 pub mod file_association;
+pub mod form;
 pub mod logging;
 mod menu;
 pub mod pdfium_adapter;
@@ -60,6 +61,9 @@ pub fn run() {
             text_edit::undo_text_edit,
             text_edit::redo_text_edit,
             text_edit::mark_document_saved,
+            form::form_fields,
+            form::missing_required_fields,
+            form::fill_form_field,
             save::save_document,
             commands::get_settings,
             commands::update_settings,

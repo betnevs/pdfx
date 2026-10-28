@@ -10,9 +10,12 @@ import {
   chooseSaveFile,
   closeDocument,
   extractTextLayer,
+  fillFormField,
+  formFields,
   initialDocumentPath,
   isFullscreen,
   MENU_EVENT,
+  missingRequiredFields,
   onFileDrop,
   onMenuEvent,
   onSaveProgress,
@@ -358,6 +361,73 @@ describe("backend command seam", () => {
         message: "detail",
       });
     }
+  });
+
+  it("recognizes the form error codes", () => {
+    for (const code of [
+      "form_field_not_found",
+      "form_field_read_only",
+      "form_fill_not_permitted",
+      "form_value_invalid",
+    ] as const) {
+      expect(toCommandError({ code, message: "detail" })).toEqual({
+        code,
+        message: "detail",
+      });
+    }
+  });
+
+  it("maps form commands to their Tauri command names and camelCase arguments", async () => {
+    const field = {
+      fieldId: "0:1",
+      name: "full_name",
+      kind: "text",
+      pageIndex: 0,
+      order: 0,
+      rect: { x: 72, y: 72, width: 180, height: 18 },
+      value: null,
+      checked: false,
+      options: [],
+      selectedIndex: null,
+      required: true,
+      readOnly: false,
+      multiline: false,
+      radioGroup: null,
+      exportValue: null,
+    };
+
+    invokeMock.mockResolvedValue([field]);
+    await expect(formFields("doc-1")).resolves.toEqual([field]);
+    expect(invokeMock).toHaveBeenCalledWith("form_fields", {
+      documentId: "doc-1",
+    });
+
+    invokeMock.mockResolvedValue([field]);
+    await expect(missingRequiredFields("doc-1")).resolves.toEqual([field]);
+    expect(invokeMock).toHaveBeenCalledWith("missing_required_fields", {
+      documentId: "doc-1",
+    });
+
+    const result = {
+      fieldId: "0:1",
+      fields: [field],
+      history: {
+        canUndo: true,
+        canRedo: false,
+        revision: 1,
+        savedRevision: 0,
+        dirty: true,
+      },
+    };
+    invokeMock.mockResolvedValue(result);
+    await expect(
+      fillFormField("doc-1", "0:1", { kind: "text", text: "Ada" }),
+    ).resolves.toEqual(result);
+    expect(invokeMock).toHaveBeenCalledWith("fill_form_field", {
+      documentId: "doc-1",
+      fieldId: "0:1",
+      value: { kind: "text", text: "Ada" },
+    });
   });
 
   it("asks the save dialog for a PDF, preselecting the document name", async () => {

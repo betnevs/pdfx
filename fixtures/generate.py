@@ -295,8 +295,34 @@ def scanned_pdf() -> bytes:
 
 
 def form_pdf() -> bytes:
-    page_content = content_lines(
-        ["PDFX AcroForm fixture", "Full name:  Ada Lovelace", "Subscribe to updates"],
+    """Two-page AcroForm covering every fillable widget type.
+
+    Page 0 holds text, checkbox, a three-widget radio group, a list box and a
+    combo box. Page 1 holds a multiline text field, a required checkbox, a text
+    field with a JavaScript keystroke action (which PDFX must never run) and a
+    read-only field. Required fields are empty so required-field validation has
+    something to find.
+    """
+    page_one_content = content_lines(
+        [
+            "PDFX AcroForm fixture",
+            "Full name:  Ada Lovelace",
+            "Email (required):",
+            "Subscribe to updates",
+            "Gender (required):",
+            "Country:",
+            "Department:",
+        ],
+        size=16,
+    )
+    page_two_content = content_lines(
+        [
+            "PDFX AcroForm fixture - page 2",
+            "Notes:",
+            "I agree to the terms (required)",
+            "JavaScript guard:",
+            "Read-only value:",
+        ],
         size=16,
     )
     text_field_appearance = stream_object(
@@ -311,20 +337,33 @@ def form_pdf() -> bytes:
         b"/Type /XObject /Subtype /Form /BBox [0 0 16 16]",
         b"q 0 0 0 rg 1 1 14 14 re S 3 8 m 6 4 l 12 12 l S Q\n",
     )
+    radio_off = stream_object(
+        b"/Type /XObject /Subtype /Form /BBox [0 0 16 16]",
+        b"q 0 0 0 RG 1 1 14 14 re S Q\n",
+    )
+    radio_on = stream_object(
+        b"/Type /XObject /Subtype /Form /BBox [0 0 16 16]",
+        b"q 0 0 0 RG 1 1 14 14 re S 4 4 8 8 re f Q\n",
+    )
+    # A keystroke action that would rewrite the value if a viewer executed it.
+    javascript_guard = b"<< /S /JavaScript /JS (event.value = 'JS_RAN';) >>"
 
     objects = {
         1: (
-            b"<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [6 0 R 7 0 R] "
-            b"/DA (/Helv 0 Tf 0 g) /DR << /Font << /Helv 4 0 R >> >> /NeedAppearances true >> >>"
+            b"<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields ["
+            b"6 0 R 7 0 R 13 0 R 14 0 R 20 0 R 21 0 R 22 0 R 23 0 R 24 0 R 25 0 R"
+            b"] /DA (/Helv 0 Tf 0 g) /DR << /Font << /Helv 4 0 R >> >> "
+            b"/NeedAppearances true >> >>"
         ),
-        2: b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        2: b"<< /Type /Pages /Kids [3 0 R 12 0 R] /Count 2 >>",
+        # Page 0.
         3: (
             b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
             b"/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R "
-            b"/Annots [6 0 R 7 0 R] >>"
+            b"/Annots [6 0 R 13 0 R 7 0 R 15 0 R 16 0 R 17 0 R 20 0 R 21 0 R] >>"
         ),
         4: HELVETICA,
-        5: stream_object(b"", page_content),
+        5: stream_object(b"", page_one_content),
         6: (
             b"<< /Type /Annot /Subtype /Widget /FT /Tx /T (full_name) "
             b"/V (Ada Lovelace) /Rect [72 620 320 644] /P 3 0 R /F 4 "
@@ -332,15 +371,78 @@ def form_pdf() -> bytes:
         ),
         7: (
             b"<< /Type /Annot /Subtype /Widget /FT /Btn /T (subscribe) "
-            b"/V /Off /AS /Off /Rect [72 580 88 596] /P 3 0 R /F 4 "
+            b"/V /Off /AS /Off /Rect [72 520 88 536] /P 3 0 R /F 4 "
             b"/AP << /N << /Off 9 0 R /Yes 10 0 R >> >> >>"
         ),
         8: text_field_appearance,
         9: checkbox_off,
         10: checkbox_yes,
-        11: b"<< /Title (PDFX form fixture) /Author (PDFX QA) >>",
+        # Page 1.
+        11: stream_object(b"", page_two_content),
+        12: (
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+            b"/Resources << /Font << /F1 4 0 R >> >> /Contents 11 0 R "
+            b"/Annots [22 0 R 23 0 R 24 0 R 25 0 R] >>"
+        ),
+        # Required, empty text field. First missing required field.
+        13: (
+            b"<< /Type /Annot /Subtype /Widget /FT /Tx /T (email) /Ff 2 "
+            b"/Rect [72 560 320 584] /P 3 0 R /F 4 /DA (/Helv 12 Tf 0 g) >>"
+        ),
+        # Required radio group; the widgets are separate kids.
+        14: (
+            b"<< /FT /Btn /T (gender) /Ff 32770 /Kids [15 0 R 16 0 R 17 0 R] "
+            b"/V /Off >>"
+        ),
+        15: (
+            b"<< /Type /Annot /Subtype /Widget /Parent 14 0 R /Rect [72 480 88 496] "
+            b"/P 3 0 R /F 4 /AP << /N << /male 18 0 R /Off 19 0 R >> >> /AS /Off >>"
+        ),
+        16: (
+            b"<< /Type /Annot /Subtype /Widget /Parent 14 0 R /Rect [96 480 112 496] "
+            b"/P 3 0 R /F 4 /AP << /N << /female 18 0 R /Off 19 0 R >> >> /AS /Off >>"
+        ),
+        17: (
+            b"<< /Type /Annot /Subtype /Widget /Parent 14 0 R /Rect [120 480 136 496] "
+            b"/P 3 0 R /F 4 /AP << /N << /other 18 0 R /Off 19 0 R >> >> /AS /Off >>"
+        ),
+        18: radio_on,
+        19: radio_off,
+        # Single-select list box with one value already selected.
+        20: (
+            b"<< /Type /Annot /Subtype /Widget /FT /Ch /T (country) "
+            b"/Rect [300 440 460 520] /P 3 0 R /F 4 /DA (/Helv 12 Tf 0 g) "
+            b"/Opt [(China) (Japan) (Germany)] /V (Japan) /I [1] >>"
+        ),
+        # Drop-down (combo box), initially empty.
+        21: (
+            b"<< /Type /Annot /Subtype /Widget /FT /Ch /T (department) /Ff 131072 "
+            b"/Rect [300 560 460 584] /P 3 0 R /F 4 /DA (/Helv 12 Tf 0 g) "
+            b"/Opt [(Engineering) (Design) (Sales)] >>"
+        ),
+        # Page 1 fields.
+        22: (
+            b"<< /Type /Annot /Subtype /Widget /FT /Tx /T (notes) /Ff 4096 "
+            b"/Rect [72 600 400 680] /P 12 0 R /F 4 /DA (/Helv 12 Tf 0 g) >>"
+        ),
+        23: (
+            b"<< /Type /Annot /Subtype /Widget /FT /Btn /T (agree) /Ff 2 "
+            b"/V /Off /AS /Off /Rect [72 560 88 576] /P 12 0 R /F 4 "
+            b"/AP << /N << /Off 9 0 R /Yes 10 0 R >> >> >>"
+        ),
+        24: (
+            b"<< /Type /Annot /Subtype /Widget /FT /Tx /T (js_guard) "
+            b"/Rect [72 500 320 524] /P 12 0 R /F 4 /DA (/Helv 12 Tf 0 g) "
+            b"/AA << /K " + javascript_guard + b" >> >>"
+        ),
+        25: (
+            b"<< /Type /Annot /Subtype /Widget /FT /Tx /T (readonly_note) /Ff 1 "
+            b"/V (Read only) /Rect [72 440 320 464] /P 12 0 R /F 4 "
+            b"/DA (/Helv 12 Tf 0 g) >>"
+        ),
+        26: b"<< /Title (PDFX form fixture) /Author (PDFX QA) >>",
     }
-    return build_pdf(objects, root_ref=b"1 0 R", info_ref=b"11 0 R")
+    return build_pdf(objects, root_ref=b"1 0 R", info_ref=b"26 0 R")
 
 
 def structure_pdf() -> bytes:
@@ -554,8 +656,9 @@ def build_all(large_pages: int) -> Tuple[Dict[str, bytes], List[FixtureSpec]]:
         FixtureSpec(
             "form-acroform.pdf",
             "form",
-            "AcroForm：一个已填写的文本字段和一个复选框（含 /Off 与 /Yes 外观流）。",
-            1,
+            "两页 AcroForm：文本、复选框、单选组、列表框、下拉框，含必填与只读字段；"
+            "js_guard 字段带 JavaScript 击键动作（PDFX 不执行）。",
+            2,
             True,
         ),
         FixtureSpec(

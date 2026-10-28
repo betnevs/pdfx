@@ -16,6 +16,13 @@ export const DOCUMENT_CHANGED_EVENT = "pdfx://document-changed";
 export interface DocumentChangedDetail {
   documentId: string;
   pageIndex: number;
+  /**
+   * Set by the tool that made the change when its own view already reflects
+   * the new state. `"form"` marks a form fill; the form overlay updates from
+   * the command result and only other views need to refresh. `"text"` marks a
+   * Text Box edit whose command result already returned the new history.
+   */
+  origin?: "form" | "text";
 }
 
 export function notifyDocumentChanged(detail: DocumentChangedDetail): void {
@@ -40,7 +47,13 @@ export function onDocumentChanged(
       typeof detail.documentId === "string" &&
       typeof detail.pageIndex === "number"
     ) {
-      handler({ documentId: detail.documentId, pageIndex: detail.pageIndex });
+      handler({
+        documentId: detail.documentId,
+        pageIndex: detail.pageIndex,
+        ...(detail.origin === "form" || detail.origin === "text"
+          ? { origin: detail.origin }
+          : {}),
+      });
     }
   };
   window.addEventListener(DOCUMENT_CHANGED_EVENT, listener);

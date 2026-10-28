@@ -47,7 +47,7 @@ safe wrapper lives in `src-tauri/src/pdfium_adapter.rs`.
 
 ## Patch scope
 
-Five files change. Each hunk is additive; no upstream behaviour changes.
+Six files change. Each hunk is additive; no upstream behaviour changes.
 
 ### `src/pdf/document.rs`
 
@@ -94,6 +94,14 @@ Added to the `PdfPageAnnotation` enum (available on every annotation type):
 - `add_ink_stroke(points)` / `ink_stroke_count()` — delegate to the ink
   variant, returning `PdfiumError::UnknownPdfAnnotationType` otherwise.
 
+### `src/pdf/document/page/field/radio.rs`
+
+- Added `PdfFormRadioButtonField::export_value()`, returning the non-`Off`
+  state name from the widget's normal appearance dictionary. PDFium's
+  `FPDFAnnot_GetFormFieldExportValue()` returns nothing in PDFX's pinned build,
+  so the form overlay reads the on-state through this method (with a lopdf
+  fallback) to tell which radio widget a stored group value belongs to.
+
 ## Verification
 
 The patch is exercised through the safe adapter in
@@ -113,6 +121,10 @@ cargo test --test pdfium_adapter
 | `encrypted_sources_refuse_encrypted_output_and_remove_security_decrypts` | Incremental/full-rewrite saves of encrypted fixtures are refused; `FPDF_REMOVE_SECURITY` output reopens without a password with `PdfSecurityHandlerRevision::Unprotected`. |
 | `full_rewrite_annotates_only_the_target_page_and_preserves_untouched_content` | `FPDF_NO_INCREMENTAL` output is not an append, keeps all 500 pages, paints the new annotation, and leaves an untouched page's rendered pixels byte-identical. |
 
+The radio hunk is exercised by `src-tauri/tests/form_fields.rs`: radio
+discovery compares the group value with `export_value()`, and the save test
+reopens the file with PDFium and lopdf to confirm the selected widget.
+
 Run the complete Rust suite with:
 
 ```sh
@@ -127,9 +139,9 @@ cargo test
    sha256 here.
 2. Replace everything in this directory with the new crate contents plus
    `LICENSE.md`, keeping `PDFX-PATCH.md`.
-3. Re-apply the hunks above (five files). `diff -u` against the pristine crate
+3. Re-apply the hunks above (six files). `diff -u` against the pristine crate
    source (cargo registry unpack directory or a fresh extract of the `.crate`)
-   is the authoritative patch; keep the diff to those five files.
+   is the authoritative patch; keep the diff to those six files.
 4. Update `src-tauri/Cargo.toml` version if the patched range changes, then
    build. `pdfium-render` tracks the PDFium API, so re-run the adapter tests
    against the pinned PDFium build first.
