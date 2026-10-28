@@ -1089,11 +1089,21 @@ describe("PDFX workspace", () => {
       edit_history: () => currentHistory,
       undo_text_edit: () => {
         currentHistory = undone;
-        return { pageIndex: 1, history: undone };
+        return {
+          pageIndex: 1,
+          pageCount: 3,
+          pageStructureChanged: false,
+          history: undone,
+        };
       },
       redo_text_edit: () => {
         currentHistory = redone;
-        return { pageIndex: 1, history: redone };
+        return {
+          pageIndex: 1,
+          pageCount: 3,
+          pageStructureChanged: false,
+          history: redone,
+        };
       },
     });
     openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
@@ -1228,7 +1238,12 @@ describe("PDFX workspace", () => {
       edit_history: () => currentHistory,
       undo_text_edit: () => {
         currentHistory = undone;
-        return { pageIndex: 0, history: undone };
+        return {
+          pageIndex: 0,
+          pageCount: 3,
+          pageStructureChanged: false,
+          history: undone,
+        };
       },
     });
     openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
@@ -1330,7 +1345,12 @@ describe("PDFX workspace", () => {
         edit_history: () => currentHistory,
         redo_text_edit: () => {
           currentHistory = redone;
-          return { pageIndex: 0, history: redone };
+          return {
+            pageIndex: 0,
+            pageCount: 3,
+            pageStructureChanged: false,
+            history: redone,
+          };
         },
       });
       openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
@@ -3068,6 +3088,216 @@ describe("PDFX workspace", () => {
     await waitFor(() => expect(menuHandler).toBeDefined());
     act(() => menuHandler?.({ payload: "file.print" }));
     expect(screen.queryByRole("dialog", { name: "打印" })).not.toBeInTheDocument();
+  });
+});
+
+describe("page operations", () => {
+  it("rotates the current page and refreshes metadata, canvas and thumbnails", async () => {
+    let history = idleHistory;
+    installDocumentBackend({
+      edit_history: () => history,
+      rotate_page: (args) => {
+        history = dirtyHistory;
+        return {
+          pageCount: 3,
+          pageIndex: (args as { pageIndex: number }).pageIndex,
+          history,
+        };
+      },
+    });
+    openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("report.pdf");
+    await waitFor(() => expect(thumbnailCalls().length).toBeGreaterThan(0));
+    const infoCalls = pageInfoCalls().length;
+    const renderCalls = renderPageCalls().length;
+    const thumbCalls = thumbnailCalls().length;
+
+    await user.click(screen.getByRole("button", { name: "向右旋转" }));
+
+    await waitFor(() =>
+      expect(commandCalls("rotate_page")).toEqual([
+        [
+          "rotate_page",
+          { documentId: "doc-1", pageIndex: 0, deltaDegrees: 90 },
+        ],
+      ]),
+    );
+    await waitFor(() =>
+      expect(pageInfoCalls().length).toBeGreaterThan(infoCalls),
+    );
+    await waitFor(() =>
+      expect(renderPageCalls().length).toBeGreaterThan(renderCalls),
+    );
+    await waitFor(() =>
+      expect(thumbnailCalls().length).toBeGreaterThan(thumbCalls),
+    );
+    expect(await screen.findByText("未保存")).toBeInTheDocument();
+  });
+
+  it("deletes the current page, clamps navigation and refreshes the page count", async () => {
+    let history = idleHistory;
+    installDocumentBackend({
+      edit_history: () => history,
+      delete_page: () => {
+        history = dirtyHistory;
+        return { pageCount: 2, pageIndex: 1, history };
+      },
+    });
+    openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("report.pdf");
+    await user.click(await screen.findByRole("button", { name: "第 3 页" }));
+    expect(await screen.findByText("第 3 / 3 页 · 100%")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "删除页面" }));
+    const dialog = await screen.findByRole("dialog", { name: "删除页面" });
+    expect(within(dialog).getByText(/确定删除第 3 页/)).toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "删除页面" }));
+
+    await waitFor(() =>
+      expect(commandCalls("delete_page")).toEqual([
+        ["delete_page", { documentId: "doc-1", pageIndex: 2 }],
+      ]),
+    );
+    expect(await screen.findByText("第 2 / 2 页 · 100%")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(pageInfoCalls().some((call) => call.pageIndex === 1)).toBe(true),
+    );
+    await waitFor(() => expect(lastMenuState().get("page.next")).toBe(false));
+  });
+
+  it("inserts a blank page with the chosen paper size and selects it", async () => {
+    let history = idleHistory;
+    const inserted: unknown[] = [];
+    installDocumentBackend({
+      edit_history: () => history,
+      insert_blank_page: (args) => {
+        inserted.push(args);
+        history = dirtyHistory;
+        return { pageCount: 4, pageIndex: 1, history };
+      },
+    });
+    openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("report.pdf");
+    await waitFor(() => expect(pageInfoCalls().length).toBeGreaterThan(0));
+
+    await user.click(screen.getByRole("button", { name: "插入空白页…" }));
+    const dialog = await screen.findByRole("dialog", { name: "插入空白页" });
+    expect(
+      within(dialog).getByRole("radio", { name: /与当前页相同/ }),
+    ).toBeChecked();
+    await user.click(within(dialog).getByRole("radio", { name: /A4/ }));
+    await user.click(within(dialog).getByRole("button", { name: "插入" }));
+
+    await waitFor(() =>
+      expect(inserted).toEqual([
+        {
+          documentId: "doc-1",
+          pageIndex: 1,
+          size: { width: 595.28, height: 841.89 },
+        },
+      ]),
+    );
+    expect(await screen.findByText("第 2 / 4 页 · 100%")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(pageInfoCalls().some((call) => call.pageIndex === 1)).toBe(true),
+    );
+    expect(await screen.findByText("未保存")).toBeInTheDocument();
+  });
+
+  it("disables page operations on a read-only document without touching history", async () => {
+    installDocumentBackend({
+      open_document: () => ({
+        ...documentView,
+        readOnly: true,
+        permissions: {
+          ...allGrantedPermissions,
+          canModifyContent: false,
+        },
+      }),
+    });
+    openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("report.pdf");
+
+    expect(
+      await screen.findByText("文档为只读，页面操作已禁用。"),
+    ).toBeInTheDocument();
+    for (const name of ["向左旋转", "向右旋转", "插入空白页…", "删除页面"]) {
+      expect(screen.getByRole("button", { name })).toBeDisabled();
+    }
+    expect(screen.getByRole("button", { name: "第 1 页" })).toHaveAttribute(
+      "draggable",
+      "false",
+    );
+    expect(commandCalls("rotate_page")).toHaveLength(0);
+    expect(commandCalls("delete_page")).toHaveLength(0);
+    expect(commandCalls("insert_blank_page")).toHaveLength(0);
+    expect(commandCalls("move_page")).toHaveLength(0);
+  });
+
+  it("undoes a page operation and restores the previous page count", async () => {
+    const undoable = {
+      canUndo: true,
+      canRedo: false,
+      revision: 1,
+      savedRevision: 0,
+      dirty: true,
+    };
+    const undone = {
+      canUndo: false,
+      canRedo: true,
+      revision: 0,
+      savedRevision: 0,
+      dirty: false,
+    };
+    let history = undoable;
+    installDocumentBackend({
+      edit_history: () => history,
+      undo_text_edit: () => {
+        history = undone;
+        return {
+          pageIndex: 0,
+          pageCount: 2,
+          pageStructureChanged: true,
+          history,
+        };
+      },
+    });
+    openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("report.pdf");
+    await waitFor(() => expect(lastMenuState().get("edit.undo")).toBe(true));
+    await waitFor(() => expect(menuHandler).toBeDefined());
+    const infoCalls = pageInfoCalls().length;
+
+    act(() => menuHandler?.({ payload: "edit.undo" }));
+
+    await waitFor(() =>
+      expect(commandCalls("undo_text_edit")).toHaveLength(1),
+    );
+    expect(await screen.findByText("第 1 / 2 页 · 100%")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(pageInfoCalls().length).toBeGreaterThan(infoCalls),
+    );
+    await waitFor(() => expect(lastMenuState().get("edit.redo")).toBe(true));
   });
 });
 

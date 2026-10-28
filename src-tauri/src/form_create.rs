@@ -19,6 +19,7 @@
 
 use std::collections::HashSet;
 
+use pdfium_render::prelude::PdfDocument;
 use serde::{Deserialize, Serialize};
 
 use crate::commands::{
@@ -988,7 +989,10 @@ pub fn create_form_field(
     request: CreateFormFieldRequest,
 ) -> Result<CreateFormFieldResult, CommandError> {
     with_open_document(&document_id, |entry| {
-        create_field_for(entry, page_index, request)
+        let physical = entry.physical_page(page_index)?;
+        let mut result = create_field_for(entry, physical, request)?;
+        result.fields = crate::form::logical_fields(entry, result.fields);
+        Ok(result)
     })
 }
 
@@ -1001,9 +1005,10 @@ pub fn create_form_text_field(
     request: CreateFormTextFieldRequest,
 ) -> Result<CreateFormTextFieldResult, CommandError> {
     with_open_document(&document_id, |entry| {
+        let physical = entry.physical_page(page_index)?;
         let result = create_field_for(
             entry,
-            page_index,
+            physical,
             CreateFormFieldRequest::Text {
                 rect: request.rect,
                 name: request.name,
@@ -1015,7 +1020,7 @@ pub fn create_form_text_field(
         )?;
         Ok(CreateFormTextFieldResult {
             field_id: result.field_id,
-            fields: result.fields,
+            fields: crate::form::logical_fields(entry, result.fields),
             history: result.history,
         })
     })
@@ -1183,7 +1188,9 @@ pub fn update_form_field(
     request: UpdateFormFieldRequest,
 ) -> Result<FormStructureEditResult, CommandError> {
     with_open_document(&document_id, |entry| {
-        update_field_for(entry, &field_id, request)
+        let mut result = update_field_for(entry, &field_id, request)?;
+        result.fields = crate::form::logical_fields(entry, result.fields);
+        Ok(result)
     })
 }
 
@@ -1195,7 +1202,7 @@ pub fn update_form_text_field(
     request: UpdateFormTextFieldRequest,
 ) -> Result<FormStructureEditResult, CommandError> {
     with_open_document(&document_id, |entry| {
-        update_field_for(
+        let mut result = update_field_for(
             entry,
             &field_id,
             UpdateFormFieldRequest::Text {
@@ -1205,7 +1212,9 @@ pub fn update_form_text_field(
                 multiline: request.multiline,
                 font_size: request.font_size,
             },
-        )
+        )?;
+        result.fields = crate::form::logical_fields(entry, result.fields);
+        Ok(result)
     })
 }
 
@@ -1242,7 +1251,11 @@ pub fn delete_form_field(
     document_id: String,
     field_id: String,
 ) -> Result<FormStructureEditResult, CommandError> {
-    with_open_document(&document_id, |entry| delete_field_for(entry, &field_id))
+    with_open_document(&document_id, |entry| {
+        let mut result = delete_field_for(entry, &field_id)?;
+        result.fields = crate::form::logical_fields(entry, result.fields);
+        Ok(result)
+    })
 }
 
 /// The ticket-31 command. Deletes a text field created in this session.
@@ -1251,7 +1264,11 @@ pub fn delete_form_text_field(
     document_id: String,
     field_id: String,
 ) -> Result<FormStructureEditResult, CommandError> {
-    with_open_document(&document_id, |entry| delete_field_for(entry, &field_id))
+    with_open_document(&document_id, |entry| {
+        let mut result = delete_field_for(entry, &field_id)?;
+        result.fields = crate::form::logical_fields(entry, result.fields);
+        Ok(result)
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1474,43 +1491,76 @@ impl CreatedField {
     }
 }
 
+/// The page's current `/Rotate`. A widget placed before a page rotation still
+/// needs an appearance that matches the final rotation, so the save pipeline
+/// re-reads it instead of trusting the snapshot taken at creation time.
+fn current_rotation(
+    document: &PdfDocument<'static>,
+    physical_page: u32,
+) -> Result<u16, CommandError> {
+    let page = load_page(document, physical_page)?;
+    page.rotation()
+        .map(|rotation| rotation.as_degrees() as u16)
+        .map_err(|error| {
+            CommandError::new(
+                CommandErrorCode::RenderFailed,
+                format!("could not read the rotation of page {physical_page}: {error:?}"),
+            )
+        })
+}
+
+/// Rewrites every rotation carried by a spec. Radio groups store one per kid;
+/// a group's kids all sit on the same page.
+fn with_rotation(mut spec: FormFieldSpec, rotation: u16) -> FormFieldSpec {
+    match &mut spec {
+        FormFieldSpec::Text(spec) => spec.rotation = rotation,
+        FormFieldSpec::Checkbox(spec) => spec.rotation = rotation,
+        FormFieldSpec::Radio(spec) => {
+            for option in &mut spec.options {
+                option.rotation = rotation;
+            }
+        }
+        FormFieldSpec::Choice(spec) => spec.rotation = rotation,
+        FormFieldSpec::Signature(spec) => spec.rotation = rotation,
+    }
+    spec
+}
+
 /// Object-level edits for the fields this session created. One edit carries
 /// every field, so the save pipeline stays at one writer per revision.
-pub(crate) fn save_object_edits(edit: &EditSession) -> Vec<crate::save::ObjectEdit> {
+/// Fields on deleted pages are omitted: the page tree no longer references
+/// those pages, so their widgets must not appear in the saved file. Undoing
+/// the deletion brings the field back on the next save.
+pub(crate) fn save_object_edits(
+    edit: &EditSession,
+    pages: &crate::page_ops::PageModel,
+    document: &PdfDocument<'static>,
+) -> Result<Vec<crate::save::ObjectEdit>, CommandError> {
     let mut specs = Vec::new();
     for field in &edit.created_fields.fields {
-        match field.kind {
-            CreatedFieldKind::Text => {
-                if let Some(spec) = field.text_spec() {
-                    specs.push(FormFieldSpec::Text(spec));
-                }
-            }
-            CreatedFieldKind::Checkbox => {
-                if let Some(spec) = field.checkbox_spec() {
-                    specs.push(FormFieldSpec::Checkbox(spec));
-                }
-            }
-            CreatedFieldKind::Radio => {
-                if let Some(spec) = field.radio_spec() {
-                    specs.push(FormFieldSpec::Radio(spec));
-                }
-            }
+        if pages.logical(field.page_index).is_none() {
+            continue;
+        }
+        let rotation = current_rotation(document, field.page_index)?;
+        let spec = match field.kind {
+            CreatedFieldKind::Text => field.text_spec().map(FormFieldSpec::Text),
+            CreatedFieldKind::Checkbox => field.checkbox_spec().map(FormFieldSpec::Checkbox),
+            CreatedFieldKind::Radio => field.radio_spec().map(FormFieldSpec::Radio),
             CreatedFieldKind::ComboBox | CreatedFieldKind::ListBox => {
-                if let Some(spec) = field.choice_spec() {
-                    specs.push(FormFieldSpec::Choice(spec));
-                }
+                field.choice_spec().map(FormFieldSpec::Choice)
             }
-            CreatedFieldKind::Signature => {
-                if let Some(spec) = field.signature_spec() {
-                    specs.push(FormFieldSpec::Signature(spec));
-                }
-            }
+            CreatedFieldKind::Signature => field.signature_spec().map(FormFieldSpec::Signature),
+        };
+        if let Some(spec) = spec {
+            specs.push(with_rotation(spec, rotation));
         }
     }
     if specs.is_empty() {
-        Vec::new()
+        Ok(Vec::new())
     } else {
-        vec![crate::save::ObjectEdit::CreateFormFields { fields: specs }]
+        Ok(vec![crate::save::ObjectEdit::CreateFormFields {
+            fields: specs,
+        }])
     }
 }
 

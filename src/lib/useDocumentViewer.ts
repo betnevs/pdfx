@@ -165,15 +165,24 @@ export function useDocumentViewer(
     setFullscreenState(false);
   }, [documentId]);
 
-  // Edits, deletions, undo and redo change the page bitmap without changing
-  // page geometry, so only the render effect needs to run again.
+  // Edits, deletions, undo and redo change the page bitmap. Page operations
+  // additionally change what each slot contains (and possibly its geometry),
+  // so cached metadata is dropped and the requested page becomes current.
   useEffect(() => {
     if (!documentId) {
       return;
     }
     return onDocumentChanged((detail) => {
-      if (detail.documentId === documentId) {
-        setContentRevision((value) => value + 1);
+      if (detail.documentId !== documentId) {
+        return;
+      }
+      setContentRevision((value) => value + 1);
+      if (detail.pageStructureChanged) {
+        setInfos({});
+        if (typeof detail.pageCount === "number") {
+          const lastPage = Math.max(0, detail.pageCount - 1);
+          setPageIndex(Math.min(Math.max(0, detail.pageIndex), lastPage));
+        }
       }
     });
   }, [documentId]);

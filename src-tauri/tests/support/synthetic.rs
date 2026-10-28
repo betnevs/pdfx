@@ -308,6 +308,61 @@ pub fn destination_links_pdf() -> TempPdf {
     write_pdf("destination-links", build_pdf(objects, 1))
 }
 
+/// Three 612x792 pages with distinct Helvetica text, one bookmark pointing at
+/// page 2 and one link annotation on page 1 pointing at page 3. Page
+/// operations tests use it to check that untouched pages keep their content,
+/// bookmarks and links after a save.
+pub fn page_operations_pdf() -> TempPdf {
+    let objects = vec![
+        (
+            1,
+            b"<< /Type /Catalog /Pages 2 0 R /Outlines 10 0 R >>".to_vec(),
+        ),
+        (
+            2,
+            b"<< /Type /Pages /Kids [4 0 R 6 0 R 8 0 R] /Count 3 >>".to_vec(),
+        ),
+        (3, HELVETICA.to_vec()),
+        (
+            4,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R /Annots [12 0 R] >>".to_vec(),
+        ),
+        (
+            5,
+            stream("", b"BT /F1 18 Tf 72 720 Td (Page one) Tj ET\n"),
+        ),
+        (
+            6,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 7 0 R >>".to_vec(),
+        ),
+        (
+            7,
+            stream("", b"BT /F1 18 Tf 72 720 Td (Page two) Tj ET\n"),
+        ),
+        (
+            8,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 9 0 R >>".to_vec(),
+        ),
+        (
+            9,
+            stream("", b"BT /F1 18 Tf 72 720 Td (Page three) Tj ET\n"),
+        ),
+        (
+            10,
+            b"<< /Type /Outlines /First 11 0 R /Last 11 0 R /Count 1 >>".to_vec(),
+        ),
+        (
+            11,
+            b"<< /Title (Chapter Two) /Parent 10 0 R /Dest [6 0 R /XYZ 0 792 null] >>".to_vec(),
+        ),
+        (
+            12,
+            b"<< /Type /Annot /Subtype /Link /Rect [72 700 250 730] /Border [0 0 0] /A << /S /GoTo /D [8 0 R /XYZ 0 792 null] >> >>".to_vec(),
+        ),
+    ];
+    write_pdf("page-operations", build_pdf(objects, 1))
+}
+
 /// Wraps arbitrary bytes (for example a document saved by the backend) in a
 /// temporary file so it can be reopened through the command boundary.
 pub fn pdf_bytes_file(name: &str, bytes: Vec<u8>) -> TempPdf {

@@ -672,6 +672,8 @@ fn delete_for(
     );
     Ok(EditStepView {
         page_index,
+        page_count: entry.pages.len(),
+        page_structure_changed: false,
         history: entry.edit.history_view(),
     })
 }
@@ -736,6 +738,8 @@ pub(crate) fn undo_line(
     entry.edit.redo_stack.push(EditAction::Line(action));
     Ok(EditStepView {
         page_index,
+        page_count: entry.pages.len(),
+        page_structure_changed: false,
         history: entry.edit.history_view(),
     })
 }
@@ -796,6 +800,8 @@ pub(crate) fn redo_line(
     entry.edit.undo_stack.push(EditAction::Line(action));
     Ok(EditStepView {
         page_index,
+        page_count: entry.pages.len(),
+        page_structure_changed: false,
         history: entry.edit.history_view(),
     })
 }
@@ -805,10 +811,15 @@ pub(crate) fn redo_line(
 #[tauri::command]
 pub fn create_line_object(
     document_id: String,
-    request: CreateLineRequest,
+    mut request: CreateLineRequest,
 ) -> Result<LineEditResultView, CommandError> {
     with_open_document(&document_id, |entry| {
-        insert_for(entry, request.page_index, request)
+        request.page_index = entry.physical_page(request.page_index)?;
+        let mut view = insert_for(entry, request.page_index, request)?;
+        let logical = entry.logical_page(view.page_index).unwrap_or(0);
+        view.page_index = logical;
+        view.line.page_index = logical;
+        Ok(view)
     })
 }
 
@@ -819,7 +830,15 @@ pub fn page_line_objects(
     document_id: String,
     page_index: u32,
 ) -> Result<Vec<LineObjectView>, CommandError> {
-    with_open_document(&document_id, |entry| lines_for(entry, page_index))
+    with_open_document(&document_id, |entry| {
+        let physical = entry.physical_page(page_index)?;
+        let mut views = lines_for(entry, physical)?;
+        let logical = entry.logical_page(physical).unwrap_or(0);
+        for view in &mut views {
+            view.page_index = logical;
+        }
+        Ok(views)
+    })
 }
 
 /// The `transform_line_object` command: replaces the endpoints, which covers
@@ -832,7 +851,12 @@ pub fn transform_line_object(
     transform: LineTransformRequest,
 ) -> Result<LineEditResultView, CommandError> {
     with_open_document(&document_id, |entry| {
-        transform_for(entry, page_index, line_id, transform)
+        let physical = entry.physical_page(page_index)?;
+        let mut view = transform_for(entry, physical, line_id, transform)?;
+        let logical = entry.logical_page(physical).unwrap_or(0);
+        view.page_index = logical;
+        view.line.page_index = logical;
+        Ok(view)
     })
 }
 
@@ -846,7 +870,12 @@ pub fn update_line_style(
     style: LineStyle,
 ) -> Result<LineEditResultView, CommandError> {
     with_open_document(&document_id, |entry| {
-        style_for(entry, page_index, line_id, style)
+        let physical = entry.physical_page(page_index)?;
+        let mut view = style_for(entry, physical, line_id, style)?;
+        let logical = entry.logical_page(physical).unwrap_or(0);
+        view.page_index = logical;
+        view.line.page_index = logical;
+        Ok(view)
     })
 }
 
@@ -858,5 +887,10 @@ pub fn delete_line_object(
     page_index: u32,
     line_id: u64,
 ) -> Result<EditStepView, CommandError> {
-    with_open_document(&document_id, |entry| delete_for(entry, page_index, line_id))
+    with_open_document(&document_id, |entry| {
+        let physical = entry.physical_page(page_index)?;
+        let mut step = delete_for(entry, physical, line_id)?;
+        step.page_index = entry.logical_page(physical).unwrap_or(0);
+        Ok(step)
+    })
 }

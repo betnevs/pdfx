@@ -166,7 +166,12 @@ describe("PageImageLayer", () => {
 
   it("deletes the selected image and lets the page refresh", async () => {
     pageImagesMock.mockResolvedValue([image]);
-    deleteImageMock.mockResolvedValue({ pageIndex: 0, history: idleHistory });
+    deleteImageMock.mockResolvedValue({
+      pageIndex: 0,
+      pageCount: 1,
+      pageStructureChanged: false,
+      history: idleHistory,
+    });
     const changed = vi.fn();
     window.addEventListener(DOCUMENT_CHANGED_EVENT, changed);
 

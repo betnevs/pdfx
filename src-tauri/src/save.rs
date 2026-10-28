@@ -321,14 +321,432 @@ pub(crate) fn serialize_live_document(
     object_edits.extend(crate::form::save_object_edits(&entry.edit));
     // Created form fields are re-derived from the session on every save, so
     // repeated saves cannot duplicate them and undo/redo is reflected in the
-    // output.
-    object_edits.extend(crate::form_create::save_object_edits(&entry.edit));
-    let output_bytes = append_object_edits(output_bytes, &object_edits)?;
-    // Free text alignment lives in a private string key because PDFium cannot
-    // write an integer annotation entry. Translate it into `/Q` (and `/IT`) in
-    // one appended revision; undo/redo and repeat saves therefore always
-    // reflect the current annotation state.
-    apply_annotation_dictionary_edits(output_bytes)
+    // output. Their appearances follow the page's current rotation.
+    object_edits.extend(crate::form_create::save_object_edits(
+        &entry.edit,
+        &entry.pages,
+        &entry.document,
+    )?);
+    // Every lopdf-side change — object edits, deferred annotation dictionary
+    // entries and the page arrangement — is written in one appended revision
+    // after PDFium's incremental one, keeping a single writer per revision.
+    finalize_lopdf_revision(output_bytes, &object_edits, &entry.pages)
+}
+
+/// Applies every lopdf-side change to the PDFium output in one incremental
+/// revision. Returns the input untouched when there is nothing to write.
+fn finalize_lopdf_revision(
+    base: Vec<u8>,
+    edits: &[ObjectEdit],
+    pages: &crate::page_ops::PageModel,
+) -> Result<Vec<u8>, CommandError> {
+    let previous = lopdf::Document::load_mem(&base).map_err(|error| {
+        lopdf_error(
+            "could not parse the PDFium revision for object-level edits",
+            error,
+        )
+    })?;
+    let (page_edits, referenced_edits) = annotation_dictionary_edits(&previous);
+    let page_tree = page_tree_edit(&previous, pages)?;
+    let form_fields_prune = form_fields_prune(&previous, pages)?;
+    if edits.is_empty()
+        && page_edits.is_empty()
+        && referenced_edits.is_empty()
+        && page_tree.is_none()
+        && form_fields_prune.is_none()
+    {
+        return Ok(base);
+    }
+
+    let mut incremental = lopdf::IncrementalDocument::create_from(base, previous);
+    // Annotation dictionaries are rewritten first: the array comes from the
+    // PDFium revision, so created form widgets appended by the object edits
+    // below must come after it or they would be overwritten on pages that
+    // also carry a PDFX free text annotation.
+    for edit in &page_edits {
+        incremental
+            .opt_clone_object_to_new_document(edit.page_id)
+            .map_err(|error| lopdf_error("could not clone a page for annotation edits", error))?;
+        let page = incremental
+            .new_document
+            .get_dictionary_mut(edit.page_id)
+            .map_err(|error| lopdf_error("could not edit a page for annotation edits", error))?;
+        page.set(
+            b"Annots".to_vec(),
+            lopdf::Object::Array(edit.annots.clone()),
+        );
+    }
+    for edit in &referenced_edits {
+        incremental
+            .opt_clone_object_to_new_document(edit.id)
+            .map_err(|error| {
+                lopdf_error("could not clone an annotation for dictionary edits", error)
+            })?;
+        let dictionary = incremental
+            .new_document
+            .get_dictionary_mut(edit.id)
+            .map_err(|error| lopdf_error("could not edit an annotation dictionary", error))?;
+        apply_dictionary_edit(dictionary, &edit.edit);
+    }
+    // Pruning comes before the object edits: created fields are appended to
+    // this `/Fields` array by `CreateFormFields`, so an earlier prune is not
+    // overwritten, and fields on deleted pages never reach the output.
+    if let Some(prune) = &form_fields_prune {
+        apply_form_fields_prune(&mut incremental, prune)?;
+    }
+    for edit in edits {
+        apply_object_edit(&mut incremental, edit)?;
+    }
+    if let Some(page_tree) = &page_tree {
+        apply_page_tree_edit(&mut incremental, page_tree)?;
+    }
+
+    let mut output = Vec::new();
+    incremental
+        .save_to(&mut output)
+        .map_err(|error| lopdf_error("could not append the object-level revision", error))?;
+    Ok(output)
+}
+
+/// The lopdf-side page tree rewrite for a logical arrangement.
+///
+/// Destinations are deliberately left alone. Bookmark and link destinations
+/// reference page objects, so they follow a page through reordering and
+/// insertion. Deleting a destination page leaves the destination pointing at
+/// an object that is no longer in the page tree (readers show it as
+/// unresolved) instead of rewriting an untouched page's annotation.
+struct PageTreeEdit {
+    /// The document's `/Pages` node; included page dictionaries become its
+    /// direct `/Kids` so order, count and hidden pages are expressed there.
+    pages_id: lopdf::ObjectId,
+    /// Page dictionaries in logical order.
+    kids: Vec<lopdf::ObjectId>,
+    /// Page boxes and resources to give inserted blank pages.
+    blanks: Vec<(lopdf::ObjectId, crate::page_ops::BlankPageSize)>,
+}
+
+/// Plans the page tree rewrite, or `None` when the arrangement is the physical
+/// order of every page (nothing to change).
+fn page_tree_edit(
+    document: &lopdf::Document,
+    model: &crate::page_ops::PageModel,
+) -> Result<Option<PageTreeEdit>, CommandError> {
+    let physical: Vec<lopdf::ObjectId> = document.get_pages().values().copied().collect();
+    let identity = model.blanks.is_empty()
+        && model.order.len() == physical.len()
+        && model
+            .order
+            .iter()
+            .enumerate()
+            .all(|(index, page)| *page as usize == index);
+    if identity {
+        return Ok(None);
+    }
+
+    let mut kids = Vec::with_capacity(model.order.len());
+    for physical_index in &model.order {
+        let id = physical
+            .get(*physical_index as usize)
+            .copied()
+            .ok_or_else(|| {
+                CommandError::new(
+                    CommandErrorCode::Internal,
+                    format!("page arrangement references missing page {physical_index}"),
+                )
+            })?;
+        kids.push(id);
+    }
+
+    let catalog = document.catalog().map_err(|error| {
+        lopdf_error(
+            "could not read the document catalog for the page tree",
+            error,
+        )
+    })?;
+    let pages_id = catalog
+        .get(b"Pages")
+        .and_then(lopdf::Object::as_reference)
+        .map_err(|error| lopdf_error("the document catalog has no /Pages reference", error))?;
+
+    let blanks = model
+        .blanks
+        .iter()
+        .filter(|(physical_index, _)| model.order.contains(physical_index))
+        .filter_map(|(physical_index, blank)| {
+            physical
+                .get(*physical_index as usize)
+                .map(|id| (*id, blank.size))
+        })
+        .collect();
+
+    Ok(Some(PageTreeEdit {
+        pages_id,
+        kids,
+        blanks,
+    }))
+}
+
+/// A `/AcroForm /Fields` rewrite that leaves out fields whose widgets only
+/// lived on pages the saved arrangement removes. The AcroForm may sit inline
+/// in the catalog or behind a reference; both forms are carried here.
+struct FormFieldsPrune {
+    catalog: lopdf::ObjectId,
+    acro_form: Option<lopdf::ObjectId>,
+    dictionary: lopdf::Dictionary,
+}
+
+/// Plans dropping root form fields that no longer have a widget on a kept
+/// page. Without this, deleting a page would leave its field in the saved
+/// AcroForm and readers would still list it even though its page is gone.
+/// Fields carrying no `/P` are kept: without a page reference there is no
+/// evidence they belong to a removed page.
+fn form_fields_prune(
+    document: &lopdf::Document,
+    model: &crate::page_ops::PageModel,
+) -> Result<Option<FormFieldsPrune>, CommandError> {
+    let physical: Vec<lopdf::ObjectId> = document.get_pages().values().copied().collect();
+    if model.order.len() == physical.len() {
+        // No page was removed, so no field can have lost its only widget.
+        return Ok(None);
+    }
+    let included: std::collections::HashSet<lopdf::ObjectId> = model
+        .order
+        .iter()
+        .filter_map(|index| physical.get(*index as usize).copied())
+        .collect();
+    let catalog = document.catalog().map_err(|error| {
+        lopdf_error(
+            "could not read the document catalog to prune form fields",
+            error,
+        )
+    })?;
+    let catalog_id = document
+        .trailer
+        .get(b"Root")
+        .and_then(lopdf::Object::as_reference)
+        .map_err(|error| lopdf_error("the saved document has no /Root reference", error))?;
+    let (acro_form_id, acro_form) = match catalog.get(b"AcroForm").ok() {
+        Some(lopdf::Object::Reference(id)) => match document.get_dictionary(*id) {
+            Ok(dictionary) => (Some(*id), dictionary.clone()),
+            Err(_) => return Ok(None),
+        },
+        Some(lopdf::Object::Dictionary(dictionary)) => (None, dictionary.clone()),
+        // No AcroForm: nothing to prune.
+        _ => return Ok(None),
+    };
+    let Ok(fields_object) = acro_form.get_deref(b"Fields", document) else {
+        return Ok(None);
+    };
+    let Ok(fields) = fields_object.as_array() else {
+        return Ok(None);
+    };
+    let kept: Vec<lopdf::Object> = fields
+        .iter()
+        .filter(|field| field_uses_kept_page(document, field, &included, 0))
+        .cloned()
+        .collect();
+    if kept.len() == fields.len() {
+        return Ok(None);
+    }
+    let mut dictionary = acro_form;
+    dictionary.set(b"Fields".to_vec(), lopdf::Object::Array(kept));
+    Ok(Some(FormFieldsPrune {
+        catalog: catalog_id,
+        acro_form: acro_form_id,
+        dictionary,
+    }))
+}
+
+/// Whether a field or any of its `/Kids` has a widget on a kept page. A
+/// radio group keeps one widget per option, so a group survives while at
+/// least one option's page remains.
+fn field_uses_kept_page(
+    document: &lopdf::Document,
+    object: &lopdf::Object,
+    included: &std::collections::HashSet<lopdf::ObjectId>,
+    depth: usize,
+) -> bool {
+    if depth > 32 {
+        // Malformed nesting: keep the field rather than risk dropping data.
+        return true;
+    }
+    let dictionary = match object {
+        lopdf::Object::Reference(id) => match document.get_dictionary(*id) {
+            Ok(dictionary) => dictionary,
+            Err(_) => return true,
+        },
+        lopdf::Object::Dictionary(dictionary) => dictionary,
+        _ => return true,
+    };
+    if let Ok(kids) = dictionary.get_deref(b"Kids", document) {
+        if let Ok(kids) = kids.as_array() {
+            if !kids.is_empty() {
+                return kids
+                    .iter()
+                    .any(|kid| field_uses_kept_page(document, kid, included, depth + 1));
+            }
+        }
+    }
+    match dictionary
+        .get(b"P")
+        .ok()
+        .and_then(|page| page.as_reference().ok())
+    {
+        Some(page) => included.contains(&page),
+        None => true,
+    }
+}
+
+fn apply_form_fields_prune(
+    incremental: &mut lopdf::IncrementalDocument,
+    edit: &FormFieldsPrune,
+) -> Result<(), CommandError> {
+    match edit.acro_form {
+        Some(acro_form) => {
+            incremental
+                .opt_clone_object_to_new_document(acro_form)
+                .map_err(|error| {
+                    lopdf_error("could not clone the AcroForm for field pruning", error)
+                })?;
+            *incremental
+                .new_document
+                .get_dictionary_mut(acro_form)
+                .map_err(|error| {
+                    lopdf_error("could not edit the AcroForm for field pruning", error)
+                })? = edit.dictionary.clone();
+        }
+        None => {
+            incremental
+                .opt_clone_object_to_new_document(edit.catalog)
+                .map_err(|error| {
+                    lopdf_error("could not clone the catalog for field pruning", error)
+                })?;
+            let catalog = incremental
+                .new_document
+                .get_dictionary_mut(edit.catalog)
+                .map_err(|error| {
+                    lopdf_error("could not edit the catalog for field pruning", error)
+                })?;
+            catalog.set(
+                b"AcroForm".to_vec(),
+                lopdf::Object::Dictionary(edit.dictionary.clone()),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Resolves a page attribute through the `/Parent` chain, matching the PDF
+/// inheritance rules for `Resources`, `MediaBox`, `CropBox` and `Rotate`.
+/// Flattening the tree to a single level requires materializing these onto the
+/// page dictionary.
+fn inherited_page_attribute(
+    document: &lopdf::Document,
+    page: &lopdf::Dictionary,
+    key: &[u8],
+) -> Option<lopdf::Object> {
+    let mut current = page;
+    for _ in 0..32 {
+        if let Ok(value) = current.get(key) {
+            return Some(value.clone());
+        }
+        let parent = current.get(b"Parent").ok()?.as_reference().ok()?;
+        current = document.get_dictionary(parent).ok()?;
+    }
+    None
+}
+
+/// Writes the arrangement into the appended revision: included pages become
+/// direct children of the root `/Pages` node in logical order, each page keeps
+/// inherited attributes, and blank pages get explicit page boxes/resources.
+fn apply_page_tree_edit(
+    incremental: &mut lopdf::IncrementalDocument,
+    edit: &PageTreeEdit,
+) -> Result<(), CommandError> {
+    // Collect inherited attributes before the mutable new-document edits
+    // (the previous document is borrowed immutably).
+    type InheritedAttributes = (lopdf::ObjectId, Vec<(Vec<u8>, lopdf::Object)>);
+    let inherited: Vec<InheritedAttributes> = {
+        let previous = incremental.get_prev_documents();
+        edit.kids
+            .iter()
+            .map(|page_id| {
+                let mut values = Vec::new();
+                if let Ok(page) = previous.get_dictionary(*page_id) {
+                    for key in [&b"MediaBox"[..], b"CropBox", b"Rotate", b"Resources"] {
+                        if page.has(key) {
+                            continue;
+                        }
+                        if let Some(value) = inherited_page_attribute(previous, page, key) {
+                            values.push((key.to_vec(), value));
+                        }
+                    }
+                }
+                (*page_id, values)
+            })
+            .collect()
+    };
+
+    let blank_sizes: std::collections::HashMap<lopdf::ObjectId, (f32, f32)> = edit
+        .blanks
+        .iter()
+        .map(|(id, size)| (*id, (size.width, size.height)))
+        .collect();
+
+    for (page_id, values) in &inherited {
+        incremental
+            .opt_clone_object_to_new_document(*page_id)
+            .map_err(|error| lopdf_error("could not clone a page for the page tree", error))?;
+        let page = incremental
+            .new_document
+            .get_dictionary_mut(*page_id)
+            .map_err(|error| lopdf_error("could not edit a page for the page tree", error))?;
+        page.set(b"Parent".to_vec(), lopdf::Object::Reference(edit.pages_id));
+        for (key, value) in values {
+            page.set(key.clone(), value.clone());
+        }
+        if let Some((width, height)) = blank_sizes.get(page_id) {
+            let media_box = vec![
+                lopdf::Object::Integer(0),
+                lopdf::Object::Integer(0),
+                lopdf::Object::Real(*width),
+                lopdf::Object::Real(*height),
+            ];
+            page.set(
+                b"MediaBox".to_vec(),
+                lopdf::Object::Array(media_box.clone()),
+            );
+            page.set(b"CropBox".to_vec(), lopdf::Object::Array(media_box));
+            if !page.has(b"Resources") {
+                page.set(
+                    b"Resources".to_vec(),
+                    lopdf::Object::Dictionary(lopdf::Dictionary::new()),
+                );
+            }
+        }
+    }
+
+    incremental
+        .opt_clone_object_to_new_document(edit.pages_id)
+        .map_err(|error| lopdf_error("could not clone the page tree root", error))?;
+    let pages = incremental
+        .new_document
+        .get_dictionary_mut(edit.pages_id)
+        .map_err(|error| lopdf_error("could not edit the page tree root", error))?;
+    pages.set(
+        b"Kids".to_vec(),
+        lopdf::Object::Array(
+            edit.kids
+                .iter()
+                .map(|id| lopdf::Object::Reference(*id))
+                .collect(),
+        ),
+    );
+    pages.set(
+        b"Count".to_vec(),
+        lopdf::Object::Integer(edit.kids.len() as i64),
+    );
+    Ok(())
 }
 
 /// Serializes the live document.
@@ -567,61 +985,6 @@ fn annotation_dictionary_edits(
         }
     }
     (page_edits, referenced_edits)
-}
-
-/// Writes deferred standard entries for PDFX annotations into one appended
-/// revision.
-///
-/// Pdfium's annotation API cannot set an integer dictionary entry, and it cannot
-/// write a page destination, so both are mirrored as private keys while editing
-/// and translated here on every save. The pass is stateless: it reads the
-/// current PDFium output, so undo, redo and repeated saves all produce the same
-/// result and never accumulate duplicate annotations.
-pub fn apply_annotation_dictionary_edits(base: Vec<u8>) -> Result<Vec<u8>, CommandError> {
-    let previous = lopdf::Document::load_mem(&base).map_err(|error| {
-        lopdf_error(
-            "could not parse the PDFium revision for annotation dictionary edits",
-            error,
-        )
-    })?;
-    let edits = annotation_dictionary_edits(&previous);
-    let (page_edits, referenced_edits) = edits;
-    if page_edits.is_empty() && referenced_edits.is_empty() {
-        return Ok(base);
-    }
-
-    let mut incremental = lopdf::IncrementalDocument::create_from(base, previous);
-    for edit in &page_edits {
-        incremental
-            .opt_clone_object_to_new_document(edit.page_id)
-            .map_err(|error| lopdf_error("could not clone a page for annotation edits", error))?;
-        let page = incremental
-            .new_document
-            .get_dictionary_mut(edit.page_id)
-            .map_err(|error| lopdf_error("could not edit a page for annotation edits", error))?;
-        page.set(
-            b"Annots".to_vec(),
-            lopdf::Object::Array(edit.annots.clone()),
-        );
-    }
-    for edit in &referenced_edits {
-        incremental
-            .opt_clone_object_to_new_document(edit.id)
-            .map_err(|error| {
-                lopdf_error("could not clone an annotation for dictionary edits", error)
-            })?;
-        let dictionary = incremental
-            .new_document
-            .get_dictionary_mut(edit.id)
-            .map_err(|error| lopdf_error("could not edit an annotation dictionary", error))?;
-        apply_dictionary_edit(dictionary, &edit.edit);
-    }
-
-    let mut output = Vec::new();
-    incremental
-        .save_to(&mut output)
-        .map_err(|error| lopdf_error("could not append the annotation revision", error))?;
-    Ok(output)
 }
 
 fn apply_object_edit(

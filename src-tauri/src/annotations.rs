@@ -42,7 +42,7 @@ use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 
 use crate::commands::{
-    load_page, with_open_document, CommandError, CommandErrorCode, DisplayGeometry,
+    load_page, with_open_document, CommandError, CommandErrorCode, DisplayGeometry, OpenDocument,
 };
 use crate::fonts::{missing_glyph_error, noto_sans_sc};
 use crate::pdfium_adapter::{
@@ -516,6 +516,23 @@ pub struct AnnotationMutationView {
     pub annotation: Option<AnnotationView>,
     pub page_index: u32,
     pub history: EditHistoryView,
+}
+
+/// Rewrites an annotation result so its page indexes are logical slots.
+///
+/// Internals address PDFium pages by physical index; the command boundary
+/// reports the pages the user sees. A deleted page (only reachable through
+/// history) falls back to the first slot.
+fn logical_mutation(
+    mut view: AnnotationMutationView,
+    entry: &OpenDocument,
+) -> AnnotationMutationView {
+    let logical = entry.logical_page(view.page_index).unwrap_or(0);
+    view.page_index = logical;
+    if let Some(annotation) = &mut view.annotation {
+        annotation.page_index = logical;
+    }
+    view
 }
 
 /// Everything undo/redo needs to recreate an annotation or restyle it.
@@ -2501,13 +2518,14 @@ pub(crate) fn remove_annotation_named(
 pub fn create_text_markup_with_author(
     document_id: String,
     author: String,
-    request: CreateTextMarkupRequest,
+    mut request: CreateTextMarkupRequest,
 ) -> Result<AnnotationMutationView, CommandError> {
     let author = normalize_author(&author)?;
     let rgb = validate_request(&request)?;
     let color = format_color(rgb.0, rgb.1, rgb.2);
     with_open_document(&document_id, |entry| {
         ensure_annotation_editable(&entry.document)?;
+        request.page_index = entry.physical_page(request.page_index)?;
         let geometry = page_geometry(&entry.document, request.page_index)?;
         let quads: Vec<[f32; 8]> = request
             .rects
@@ -2545,11 +2563,14 @@ pub fn create_text_markup_with_author(
         let snapshot = capture_snapshot(&entry.document, request.page_index, target, &geometry)?;
         let view = snapshot.view(&geometry);
         let history = push_annotation_action(entry, request.page_index, name, None, Some(snapshot));
-        Ok(AnnotationMutationView {
-            annotation: Some(view),
-            page_index: request.page_index,
-            history,
-        })
+        Ok(logical_mutation(
+            AnnotationMutationView {
+                annotation: Some(view),
+                page_index: request.page_index,
+                history,
+            },
+            entry,
+        ))
     })
 }
 
@@ -2566,7 +2587,7 @@ pub fn create_text_markup_from_settings(
 pub fn create_note_with_author(
     document_id: String,
     author: String,
-    request: CreateNoteRequest,
+    mut request: CreateNoteRequest,
 ) -> Result<AnnotationMutationView, CommandError> {
     let author = normalize_author(&author)?;
     let rgb = validate_color_opacity(&request.color, request.opacity)?;
@@ -2575,6 +2596,7 @@ pub fn create_note_with_author(
     let text = normalize_note_text(&request.text)?;
     with_open_document(&document_id, |entry| {
         ensure_annotation_editable(&entry.document)?;
+        request.page_index = entry.physical_page(request.page_index)?;
         let geometry = page_geometry(&entry.document, request.page_index)?;
         let bounds = pdf_rect_for_display(&geometry, request.rect);
         let name = next_annotation_name();
@@ -2607,11 +2629,14 @@ pub fn create_note_with_author(
         let snapshot = capture_snapshot(&entry.document, request.page_index, target, &geometry)?;
         let view = snapshot.view(&geometry);
         let history = push_annotation_action(entry, request.page_index, name, None, Some(snapshot));
-        Ok(AnnotationMutationView {
-            annotation: Some(view),
-            page_index: request.page_index,
-            history,
-        })
+        Ok(logical_mutation(
+            AnnotationMutationView {
+                annotation: Some(view),
+                page_index: request.page_index,
+                history,
+            },
+            entry,
+        ))
     })
 }
 
@@ -2628,13 +2653,14 @@ pub fn create_note_from_settings(
 pub fn create_ink_with_author(
     document_id: String,
     author: String,
-    request: CreateInkRequest,
+    mut request: CreateInkRequest,
 ) -> Result<AnnotationMutationView, CommandError> {
     let author = normalize_author(&author)?;
     let rgb = validate_ink_request(&request)?;
     let color = format_color(rgb.0, rgb.1, rgb.2);
     with_open_document(&document_id, |entry| {
         ensure_annotation_editable(&entry.document)?;
+        request.page_index = entry.physical_page(request.page_index)?;
         let geometry = page_geometry(&entry.document, request.page_index)?;
         let strokes: Vec<Vec<(f32, f32)>> = request
             .strokes
@@ -2682,11 +2708,14 @@ pub fn create_ink_with_author(
         let snapshot = capture_snapshot(&entry.document, request.page_index, target, &geometry)?;
         let view = snapshot.view(&geometry);
         let history = push_annotation_action(entry, request.page_index, name, None, Some(snapshot));
-        Ok(AnnotationMutationView {
-            annotation: Some(view),
-            page_index: request.page_index,
-            history,
-        })
+        Ok(logical_mutation(
+            AnnotationMutationView {
+                annotation: Some(view),
+                page_index: request.page_index,
+                history,
+            },
+            entry,
+        ))
     })
 }
 
@@ -2708,7 +2737,7 @@ pub fn create_ink_from_settings(
 pub fn create_free_text_with_author(
     document_id: String,
     author: String,
-    request: CreateFreeTextRequest,
+    mut request: CreateFreeTextRequest,
 ) -> Result<AnnotationMutationView, CommandError> {
     let author = normalize_author(&author)?;
     let rgb = validate_color_opacity(&request.color, request.opacity)?;
@@ -2718,6 +2747,7 @@ pub fn create_free_text_with_author(
     let color = format_color(rgb.0, rgb.1, rgb.2);
     with_open_document(&document_id, |entry| {
         ensure_annotation_editable(&entry.document)?;
+        request.page_index = entry.physical_page(request.page_index)?;
         let geometry = page_geometry(&entry.document, request.page_index)?;
         let bounds = pdf_rect_for_display(&geometry, request.rect);
         let appearance = free_text_appearance_stream(
@@ -2797,11 +2827,14 @@ pub fn create_free_text_with_author(
         let snapshot = capture_snapshot(&entry.document, request.page_index, target, &geometry)?;
         let view = snapshot.view(&geometry);
         let history = push_annotation_action(entry, request.page_index, name, None, Some(snapshot));
-        Ok(AnnotationMutationView {
-            annotation: Some(view),
-            page_index: request.page_index,
-            history,
-        })
+        Ok(logical_mutation(
+            AnnotationMutationView {
+                annotation: Some(view),
+                page_index: request.page_index,
+                history,
+            },
+            entry,
+        ))
     })
 }
 
@@ -2845,7 +2878,7 @@ pub fn create_text_markup_annotation(
 pub fn create_stamp_with_author(
     document_id: String,
     author: String,
-    request: CreateStampRequest,
+    mut request: CreateStampRequest,
 ) -> Result<AnnotationMutationView, CommandError> {
     let author = normalize_author(&author)?;
     validate_frame(&request.frame)?;
@@ -2856,6 +2889,7 @@ pub fn create_stamp_with_author(
     }
     with_open_document(&document_id, |entry| {
         ensure_annotation_editable(&entry.document)?;
+        request.page_index = entry.physical_page(request.page_index)?;
         let geometry = page_geometry(&entry.document, request.page_index)?;
         let frame = StampFrame::from_view(&geometry, request.frame)?;
         let name = next_annotation_name();
@@ -2880,11 +2914,14 @@ pub fn create_stamp_with_author(
         let snapshot = capture_snapshot(&entry.document, request.page_index, target, &geometry)?;
         let view = snapshot.view(&geometry);
         let history = push_annotation_action(entry, request.page_index, name, None, Some(snapshot));
-        Ok(AnnotationMutationView {
-            annotation: Some(view),
-            page_index: request.page_index,
-            history,
-        })
+        Ok(logical_mutation(
+            AnnotationMutationView {
+                annotation: Some(view),
+                page_index: request.page_index,
+                history,
+            },
+            entry,
+        ))
     })
 }
 
@@ -2917,13 +2954,14 @@ pub fn create_ink_annotation(
 pub fn create_shape_with_author(
     document_id: String,
     author: String,
-    request: CreateShapeRequest,
+    mut request: CreateShapeRequest,
 ) -> Result<AnnotationMutationView, CommandError> {
     let author = normalize_author(&author)?;
     let shape_geometry = normalize_shape_geometry(request.geometry)?;
     let style = normalize_shape_style(request.style)?;
     with_open_document(&document_id, |entry| {
         ensure_annotation_editable(&entry.document)?;
+        request.page_index = entry.physical_page(request.page_index)?;
         let page = page_geometry(&entry.document, request.page_index)?;
         let appearance = shape_appearance(&page, request.kind, &shape_geometry, &style)?;
         let name = next_annotation_name();
@@ -2954,11 +2992,14 @@ pub fn create_shape_with_author(
         let snapshot = capture_snapshot(&entry.document, request.page_index, target, &page)?;
         let view = snapshot.view(&page);
         let history = push_annotation_action(entry, request.page_index, name, None, Some(snapshot));
-        Ok(AnnotationMutationView {
-            annotation: Some(view),
-            page_index: request.page_index,
-            history,
-        })
+        Ok(logical_mutation(
+            AnnotationMutationView {
+                annotation: Some(view),
+                page_index: request.page_index,
+                history,
+            },
+            entry,
+        ))
     })
 }
 
@@ -3024,11 +3065,14 @@ pub fn transform_stamp_annotation(
         let view = after.view(&geometry);
         let history =
             push_annotation_action(entry, page_index, request.name, Some(before), Some(after));
-        Ok(AnnotationMutationView {
-            annotation: Some(view),
-            page_index,
-            history,
-        })
+        Ok(logical_mutation(
+            AnnotationMutationView {
+                annotation: Some(view),
+                page_index,
+                history,
+            },
+            entry,
+        ))
     })
 }
 
@@ -3080,11 +3124,14 @@ fn update_shape(
         restore_annotation_snapshot(&entry.document, &after)?;
         let view = after.view(&geometry);
         let history = push_annotation_action(entry, page_index, name, Some(before), Some(after));
-        Ok(AnnotationMutationView {
-            annotation: Some(view),
-            page_index,
-            history,
-        })
+        Ok(logical_mutation(
+            AnnotationMutationView {
+                annotation: Some(view),
+                page_index,
+                history,
+            },
+            entry,
+        ))
     })
 }
 
@@ -3140,26 +3187,31 @@ pub fn update_shape_style(
     })
 }
 
-/// Lists every named annotation PDFX manages, grouped by page order.
+/// Lists every named annotation PDFX manages, grouped by logical page order.
+/// Annotations on deleted pages are hidden until the deletion is undone.
 #[tauri::command]
 pub fn list_annotations(document_id: String) -> Result<Vec<AnnotationView>, CommandError> {
     with_open_document(&document_id, |entry| {
         let document = &entry.document;
-        let page_count = document.pages().len();
+        let logical_count = entry.logical_page_count();
         let mut views = Vec::new();
-        for page_index in 0..page_count {
+        for logical_index in 0..logical_count {
+            let physical_index = entry.physical_page(logical_index)?;
             let count = {
-                let page = document.pages().get(page_index).map_err(|error| {
-                    internal_error(format!("could not load page {page_index}: {error:?}"))
-                })?;
+                let page = document
+                    .pages()
+                    .get(physical_index as i32)
+                    .map_err(|error| {
+                        internal_error(format!("could not load page {physical_index}: {error:?}"))
+                    })?;
                 page.annotations().len()
             };
             if count == 0 {
                 continue;
             }
-            let geometry = page_geometry(document, page_index as u32)?;
+            let geometry = page_geometry(document, physical_index)?;
             for index in 0..count {
-                let target = AnnotationRef::new(page_index, index);
+                let target = AnnotationRef::new(physical_index as i32, index);
                 let Ok(annotation_type) = annotation_type(document, target) else {
                     continue;
                 };
@@ -3173,8 +3225,10 @@ pub fn list_annotations(document_id: String) -> Result<Vec<AnnotationView>, Comm
                 if !named {
                     continue;
                 }
-                let snapshot = capture_snapshot(document, page_index as u32, target, &geometry)?;
-                views.push(snapshot.view(&geometry));
+                let snapshot = capture_snapshot(document, physical_index, target, &geometry)?;
+                let mut view = snapshot.view(&geometry);
+                view.page_index = logical_index;
+                views.push(view);
             }
         }
         Ok(views)
@@ -3232,11 +3286,14 @@ pub fn update_annotation_style(
             .unwrap_or(after);
         let view = after.view(&geometry);
         let history = push_annotation_action(entry, page_index, name, Some(before), Some(after));
-        Ok(AnnotationMutationView {
-            annotation: Some(view),
-            page_index,
-            history,
-        })
+        Ok(logical_mutation(
+            AnnotationMutationView {
+                annotation: Some(view),
+                page_index,
+                history,
+            },
+            entry,
+        ))
     })
 }
 
@@ -3283,11 +3340,14 @@ pub fn update_free_text(
         let view = after.view(&geometry);
         let history =
             push_annotation_action(entry, page_index, request.name, Some(before), Some(after));
-        Ok(AnnotationMutationView {
-            annotation: Some(view),
-            page_index,
-            history,
-        })
+        Ok(logical_mutation(
+            AnnotationMutationView {
+                annotation: Some(view),
+                page_index,
+                history,
+            },
+            entry,
+        ))
     })
 }
 
@@ -3324,11 +3384,14 @@ pub fn transform_free_text_annotation(
             .unwrap_or(after);
         let view = after.view(&geometry);
         let history = push_annotation_action(entry, page_index, name, Some(before), Some(after));
-        Ok(AnnotationMutationView {
-            annotation: Some(view),
-            page_index,
-            history,
-        })
+        Ok(logical_mutation(
+            AnnotationMutationView {
+                annotation: Some(view),
+                page_index,
+                history,
+            },
+            entry,
+        ))
     })
 }
 
@@ -3362,11 +3425,14 @@ pub fn update_note_text(
             .unwrap_or(after);
         let view = after.view(&geometry);
         let history = push_annotation_action(entry, page_index, name, Some(before), Some(after));
-        Ok(AnnotationMutationView {
-            annotation: Some(view),
-            page_index,
-            history,
-        })
+        Ok(logical_mutation(
+            AnnotationMutationView {
+                annotation: Some(view),
+                page_index,
+                history,
+            },
+            entry,
+        ))
     })
 }
 
@@ -3403,11 +3469,14 @@ pub fn transform_note_annotation(
             .unwrap_or(after);
         let view = after.view(&geometry);
         let history = push_annotation_action(entry, page_index, name, Some(before), Some(after));
-        Ok(AnnotationMutationView {
-            annotation: Some(view),
-            page_index,
-            history,
-        })
+        Ok(logical_mutation(
+            AnnotationMutationView {
+                annotation: Some(view),
+                page_index,
+                history,
+            },
+            entry,
+        ))
     })
 }
 
@@ -3428,11 +3497,14 @@ pub fn delete_annotation(
         let before = capture_snapshot(&entry.document, page_index, target, &geometry)?;
         remove_annotation(&entry.document, target).map_err(map_adapter_error)?;
         let history = push_annotation_action(entry, page_index, name, Some(before), None);
-        Ok(AnnotationMutationView {
-            annotation: None,
-            page_index,
-            history,
-        })
+        Ok(logical_mutation(
+            AnnotationMutationView {
+                annotation: None,
+                page_index,
+                history,
+            },
+            entry,
+        ))
     })
 }
 
@@ -3487,10 +3559,13 @@ pub fn erase_ink_stroke(
         };
 
         let history = push_annotation_action(entry, page_index, name, Some(before), after);
-        Ok(AnnotationMutationView {
-            annotation: view,
-            page_index,
-            history,
-        })
+        Ok(logical_mutation(
+            AnnotationMutationView {
+                annotation: view,
+                page_index,
+                history,
+            },
+            entry,
+        ))
     })
 }

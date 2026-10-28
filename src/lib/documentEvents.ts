@@ -15,7 +15,20 @@ export const DOCUMENT_CHANGED_EVENT = "pdfx://document-changed";
 
 export interface DocumentChangedDetail {
   documentId: string;
+  /**
+   * The page to refresh. For a page operation this is the page the viewer
+   * should select after the change.
+   */
   pageIndex: number;
+  /**
+   * Visible page count after a page operation. Selection is clamped to it.
+   */
+  pageCount?: number;
+  /**
+   * Page order, count or rotation changed. Caches keyed by page index — page
+   * metadata and thumbnails — must be cleared, not just the one page's pixels.
+   */
+  pageStructureChanged?: boolean;
   /**
    * The tool that made the change, when another overlay needs to refresh
    * tool-specific state such as the shared undo availability. Omitted by
@@ -55,6 +68,15 @@ export function onDocumentChanged(
         documentId: detail.documentId,
         pageIndex: detail.pageIndex,
       };
+      if (
+        typeof detail.pageCount === "number" &&
+        Number.isFinite(detail.pageCount)
+      ) {
+        message.pageCount = detail.pageCount;
+      }
+      if (detail.pageStructureChanged === true) {
+        message.pageStructureChanged = true;
+      }
       if (
         detail.source === "text" ||
         detail.source === "image" ||

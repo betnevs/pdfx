@@ -4,10 +4,25 @@
 
 **Blocked by:** 05 (翻页、缩放与缩略图), 10 (Save As / Save Changes 管线)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] 旋转 90°/180°/270° 正确，页面内容与文本层同步。
-- [ ] 删除 Page 后页码与缩略图更新；重排通过拖拽完成。
-- [ ] 插入空白 Page 的尺寸可选（与原页一致或常用纸张）。
-- [ ] 保存后页序、旋转与空白页正确；未操作页面的书签/链接/内容保留。
-- [ ] 撤销/重做覆盖所有页面操作。
+- [x] 旋转 90°/180°/270° 正确，页面内容与文本层同步。
+- [x] 删除 Page 后页码与缩略图更新；重排通过拖拽完成。
+- [x] 插入空白 Page 的尺寸可选（与原页一致或常用纸张）。
+- [x] 保存后页序、旋转与空白页正确；未操作页面的书签/链接/内容保留。
+- [x] 撤销/重做覆盖所有页面操作。
+
+**Verification notes:**
+
+- **合并与关闭**：ticket worktree `/Users/nevs/Projects/pdfx-worktrees/26-page-operations`，分支 `ticket/26-page-operations` tip `66bb0e1`（页面操作实现 `19bdc19` + 分支内合并集成 tip `8b6e73b`）。主仓库 `integration/pdfx` 先在 worktree 把集成 tip `6b63c58` 合入分支（`5013b03`，无冲突），再以 `git merge --no-ff ticket/26-page-operations` 合入为合并提交 **`13da95c`**（无冲突，合并范围 25 文件 +3209/−187）。合并后独立审计修复：**`0783ad9`**（创建的表单控件外观按保存时页面当前旋转重算，3 文件 +125/−29）、**`8a5803c`**（同一 lopdf revision 内的写入顺序、末页删除中文错误、删除页的既有表单字段从 `/Fields` 清理，3 文件 +418/−6）、**`555a0bd`**（书签/链接目标处理注释与回归测试，2 文件 +64）。关闭提交为本文件所在提交 `chore: close ticket 26`。相对 `6b63c58` 未修改 spec、ADR、`Cargo.toml`/`Cargo.lock`、`package.json`/`package-lock.json`、Tauri 打包配置、capabilities 或 `src-tauri/vendor`（vendor 零 diff），未新增依赖、网络或遥测。
+- **旋转（勾选 1）**：`rotate_page` 只接受 90/180/270，按 `(当前 + delta) % 360` 写入并在 `PageEditAction` 中记录前后旋转；非法角度返回 `InvalidArgument`。`rotate_pages_by_each_angle_and_save_reopen` 对三页分别旋转 90/180/270 后断言 `page_info` 的显示尺寸交换（612×792 → 792×612）、`extract_text_layer.rotation` 与每个字符框都落在旋转后的页面边界内、保存后的 `/Rotate` 为 90/180/270 且内容流文字原样保留；重新以 PDFium 打开看到相同旋转与文字；撤销/重做恢复 `/Rotate` 并把 dirty 基线随保存移动。创建的表单控件此前会沿用“创建时”的旋转生成外观：页面创建后再旋转、保存时外观矩阵错误；审计新增 `created_field_appearance_follows_a_later_page_rotation`，修复后保存时从每个物理页重新读取当前 `/Rotate` 并重写 text/checkbox/radio/choice/signature 规格的旋转（radio 每个 kid 都重写），测试断言旋转回 0° 后外观矩阵为 `1 0 0 1 250 120 cm`、`/Rect` 不变且重开仍可发现字段。
+- **删除、页码与缩略图（勾选 2）**：删除只把物理页从逻辑排列 `PageModel.order` 隐藏，物理 PDFium 页不删除，因此撤销能原样恢复内容、批注与表单控件。`delete_page_updates_views_and_undo_restores_page_and_annotations` 断言页数 3→2、剩余页立即重编号、越界页返回 `PageOutOfRange`、注释列表清空、撤销后页面/批注在原槽位恢复、重做再次隐藏。缩略图与页码：操作返回 `PageOperationView { pageCount, pageIndex }`，前端 `applyPageOperation` 更新 `DocumentView.pageCount` 并广播 `pageStructureChanged` 文档事件；`PageViewer`/`useDocumentViewer` 在结构变化时使缩略图缓存失效、重新加载覆盖层并把当前页夹到新范围（`documentEvents.test.ts`、`PageViewer.test.tsx`、`App.test.tsx`）。拖拽重排由缩略图栏 HTML5 drag（`draggable`、`dataTransfer`、dragOver/drop）触发 `onMovePage`，后端 `move_page` 移动逻辑槽位；`PageViewer.test.tsx` 覆盖拖拽调用与只读时 `draggable="false"`，只读文档所有页面操作命令在改动状态前返回 `PermissionDenied`（`restricted_documents_refuse_page_operations_without_touching_history` 断言历史完全不变）。
+- **删除页的批注/表单/链接不泄漏**：`delete_page_hides_and_undo_restores_its_form_field` 覆盖本会话创建的字段在删除页后不再列出、保存时不写入、撤销恢复字段 id/页码、再次保存只写一次且重新挂在原页。审计新增 `deleting_the_page_of_an_existing_form_field_does_not_leak_it`：源 PDF 已有的 AcroForm 字段随页删除后列出隐藏；保存时从 `/Fields` 去掉该页的根字段（保留保留页上的文本/复选框/单选组/列表/下拉字段），重开后只剩保留页字段且都可填；在保留页新建字段仍追加进清理后的 `/Fields`；撤销删除后再次保存字段全部回来。该清理只删根字段、不递归改写字段对象，也不改动未操作页。删除最后页返回中文 `文档至少需要保留一页，不能删除最后一页。`，且历史不变（`deleting_the_last_page_is_refused_in_chinese_without_history_change`）。
+- **重排（勾选 2）**：`move_page` 调整 `order` 中一个元素并作为单个动作入栈；`move_page_reorders_content_annotations_and_saved_page_tree` 断言移动后文字层、注释列表与文本盒的 `page_index` 都跟随页面对象而不是槽位号；保存后的 page tree 只包含两个未删除页且顺序正确，创建的形状只出现在用户编辑过的那一页，未操作页不获得形状；撤销移动/创建时返回的 `page_index` 是逻辑槽位。
+- **插入空白页（勾选 3）**：前端对话框提供“与当前页相同 / A4（595.28×841.89 pt）/ Letter（612×792 pt）”，并显示插入位置（“第 N 页之后”或“文档末尾”）；插入点固定为当前页之后（`App.tsx` `afterIndex = pageIndex + 1`）。后端校验尺寸有限、正数且 ≤14400 pt，把新物理页追加到 PDFium 文档尾并把逻辑槽位放到请求位置，因此现有物理索引不变。`insert_blank_page_with_chosen_size_saves_valid_page_tree` 断言插入后立即渲染、宽高与旋转（595×842、0°）、文字层为空、前后页文字正确重编号；保存后空白页 `MediaBox`/`CropBox` 为请求尺寸并带 `/Resources`，未操作页的 page object id、内容、书签和链接目标不变；PDFium 重开在逻辑位置看到空白页；撤销移除、重做恢复、再撤销后保存回到原三页。
+- **保存保真（勾选 4）**：保存仍是“PDFium 一次 incremental save + 至多一个 lopdf combined revision”。页树收尾、自由文本 `/Q`/`/IT`、既有字段清理、本会话对象编辑全部写在同一个 `IncrementalDocument` 里；`free_text_and_created_form_field_share_one_save_revision` 专门覆盖同一页同时有自由文本与新建表单控件时 `/Annots` 不被互相覆盖（审计修复前新建控件被自由文本 pass 覆盖）。逻辑排列等于物理顺序时不重写 page tree；只有非恒等排列才把 `/Pages /Kids` 展平为逻辑顺序、设置 `/Count`、把继承的 `MediaBox`/`CropBox`/`Rotate`/`Resources` 物化到页字典并把 `/Parent` 指向根节点；空白页额外写显式页面框和资源。未操作页的 page object id、内容流、书签与链接注释保留（测试按对象 id 与解析内容断言；不做二进制流比对）。`delete_page_saves_reduced_page_tree_and_keeps_bookmark` 断言删除页从 page tree 移除、页码重编号、指向保留页的书签标题与目标对象不变；删除→保存→撤销→保存→重做→保存不会累积页树。源文件字节与 mtime 在旋转/删除/插入/重排测试中均断言不变；Save As 与 Save Changes 路径都有测试。`clean` 且无输出时返回源字节快速路径保持不变。
+- **书签/链接目标（限制，故意不重写）**：书签与链接的 `/Dest` 指向 page object，重排/插入后自然跟随该页；删除目标页时目标保留为指向“已不在 page tree 中”的 page object（阅读器视为未解析），而不是改写未操作页上的注释。该决定写在 `save.rs` 的 `PageTreeEdit` 文档注释中，并由 `deleting_a_link_target_leaves_untouched_destinations_alone` 固定：删除第 3 页后第 1 页的链接注释仍在、`/D` 仍指向原第 3 页对象，指向保留页的书签不变。删除页的 page object 仍留在文件里（PDFium 物理页从不删除、保存不做对象回收），只是不再从 page tree 可达；因此文件大小不会因删页而减少对应字节。
+- **撤销/重做与混合编辑（勾选 5）**：旋转、删除、重排、插入各记录一个统一的 `EditAction::Page`，携带前后 `PageModel`、可选前后旋转、前后选中的逻辑页；`undo_page`/`redo_page` 同时恢复排列与旋转并把目标页夹到结果范围，恢复后的 `EditStepView` 带 `pageCount` 与 `pageStructureChanged`。各测试分别覆盖四种操作的撤销/重做（含保存之后）。`edits_after_page_operations_follow_the_visible_page` 覆盖页面操作后再创建/撤销文本盒与注释：会话状态与历史按物理页保存、对边界返回逻辑槽位，删除页后再对其操作不会错位。只读文档拒绝四类操作且历史不 dirty。
+- **前端与回归**：中文对话框（旋转菜单、删除确认含“删除后可以用撤销恢复该页及其批注和表单”、插入空白页）；只读时工具栏/菜单项以中文原因禁用，命令层再次拒绝；页面操作成功后广播 `pageStructureChanged` 使画布、缩略图、页面输入框和菜单页码同步，当前页夹紧；缩略图拖拽与选中态、键盘态由 `PageViewer.test.tsx` 覆盖；`App.test.tsx` 覆盖页面操作后的视图/菜单状态。未新增依赖、网络、遥测或 capabilities。
+- **自动化验证（最终集成树，仓库根）**：`npm run typecheck` 通过；`npm test` **40 个文件、471 项通过**（基线 462，合并的页面操作前端测试 +9）；`npm run build` 通过；`npm run test:e2e` **12 项通过**；`cargo fmt --check` 通过；`cargo clippy -- -D warnings` exit 0（仅 vendored `pdfium-render` 的 4 条既有 dead_code warning，无 `--all-targets`）；`cargo test` **349 项通过、3 项忽略、0 失败**（31 个测试二进制 + doc-tests；其中 `page_operations` 12 项、`form_creation` 29 项）。审计新增 5 项 Rust 集成测试（`page_operations` 4 项、`form_creation` 1 项）。
+- **人工/限制**：1) 缩略图拖拽只在 jsdom 的 HTML5 drag 事件上验证，真实窗口的拖拽手感、拖拽指示线、选中/键盘焦点样式与触控板行为需人工验收。2) 未在真实阅读器矩阵（Acrobat、Preview、Chrome/PDFium、Windows 阅读器）上验证旋转页、空白页框、重排后的 page tree、删页后的 `/Fields` 清理结果与悬空目标；PDFium 重开覆盖了 PDFX 自身读取路径。3) 打包应用上的菜单启用状态、缩略图刷新、dirty/关闭守卫与保存对话框未人工验收。4) 书签/链接指向被删页时保留悬空目标（见上），不重定向、不删除未操作页注释。5) 删除页的物理对象保留在文件中，不做垃圾回收。6) PDFX 不重写源 PDF 已有表单控件的外观流：页面旋转会把它们与页面内容一起旋转（与其他原生注释一致）；只有 PDFX 创建的控件在保存时按当前旋转补偿外观。

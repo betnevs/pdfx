@@ -12,6 +12,7 @@ pub mod line_edit;
 pub mod links;
 pub mod logging;
 mod menu;
+pub mod page_ops;
 pub mod pdfium_adapter;
 pub mod print_export;
 pub mod recovery;
@@ -62,6 +63,10 @@ pub fn run() {
             commands::extract_text,
             commands::extract_text_layer,
             commands::close_document,
+            page_ops::rotate_page,
+            page_ops::delete_page,
+            page_ops::move_page,
+            page_ops::insert_blank_page,
             text_edit::text_edit_target,
             text_edit::apply_text_edit,
             text_edit::delete_text_box,

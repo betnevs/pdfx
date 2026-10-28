@@ -311,6 +311,28 @@ export interface TextEditResultView {
 export interface EditStepView {
   /** Page whose content changed, so only that page needs refreshing. */
   pageIndex: number;
+  /** Visible page count after the step. */
+  pageCount: number;
+  /**
+   * True when the page order, count or rotation changed; caches keyed by
+   * page index (page metadata, thumbnails) must be refreshed.
+   */
+  pageStructureChanged: boolean;
+  history: EditHistoryView;
+}
+
+/** Paper size of an inserted blank page, in PDF points. */
+export interface BlankPageSize {
+  width: number;
+  height: number;
+}
+
+/** The outcome of a rotate, delete, move or blank-page insertion. */
+export interface PageOperationView {
+  /** Visible page count after the operation. */
+  pageCount: number;
+  /** Logical page the viewer should select next, clamped to range. */
+  pageIndex: number;
   history: EditHistoryView;
 }
 
@@ -1222,6 +1244,53 @@ export async function renderThumbnail(
     documentId,
     pageIndex,
     maxEdge,
+  });
+}
+
+/** Rotates one page clockwise by 90, 180 or 270 degrees. */
+export async function rotatePage(
+  documentId: string,
+  pageIndex: number,
+  deltaDegrees: 90 | 180 | 270,
+): Promise<PageOperationView> {
+  return invoke<PageOperationView>("rotate_page", {
+    documentId,
+    pageIndex,
+    deltaDegrees,
+  });
+}
+
+/** Hides one page. Undo restores it with its content and annotations. */
+export async function deletePage(
+  documentId: string,
+  pageIndex: number,
+): Promise<PageOperationView> {
+  return invoke<PageOperationView>("delete_page", { documentId, pageIndex });
+}
+
+/** Moves the page at `fromIndex` to the slot `toIndex`. */
+export async function movePage(
+  documentId: string,
+  fromIndex: number,
+  toIndex: number,
+): Promise<PageOperationView> {
+  return invoke<PageOperationView>("move_page", {
+    documentId,
+    fromIndex,
+    toIndex,
+  });
+}
+
+/** Inserts a blank page at `pageIndex` (0..=pageCount) with a paper size. */
+export async function insertBlankPage(
+  documentId: string,
+  pageIndex: number,
+  size: BlankPageSize,
+): Promise<PageOperationView> {
+  return invoke<PageOperationView>("insert_blank_page", {
+    documentId,
+    pageIndex,
+    size,
   });
 }
 

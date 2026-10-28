@@ -76,7 +76,12 @@ beforeEach(() => {
     async (_documentId, _pageIndex, _lineId, style) =>
       resultFor({ ...line, style }),
   );
-  deleteLineObjectMock.mockResolvedValue({ pageIndex: 0, history: dirtyHistory });
+  deleteLineObjectMock.mockResolvedValue({
+    pageIndex: 0,
+    pageCount: 1,
+    pageStructureChanged: false,
+    history: dirtyHistory,
+  });
   Element.prototype.getBoundingClientRect = () =>
     ({
       x: 0,
