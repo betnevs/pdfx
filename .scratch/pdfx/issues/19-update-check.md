@@ -4,10 +4,25 @@
 
 **Blocked by:** 16 (设置、持久化与日志), 17 (macOS 打包), 18 (Windows 打包)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] 点击“检查更新”才发起网络请求；启动与后台不联网。
-- [ ] 有新版本时显示版本号与说明，并提供打开下载页的按钮。
-- [ ] 无新版本或网络失败时显示明确状态，不重试轰炸。
-- [ ] 不自动下载、不自动安装；更新检查不发送文件内容或使用数据。
-- [ ] 版本 JSON 的地址可配置，便于更换下载页。
+- [x] 点击“检查更新”才发起网络请求；启动与后台不联网。
+- [x] 有新版本时显示版本号与说明，并提供打开下载页的按钮。
+- [x] 无新版本或网络失败时显示明确状态，不重试轰炸。
+- [x] 不自动下载、不自动安装；更新检查不发送文件内容或使用数据。
+- [x] 版本 JSON 的地址可配置，便于更换下载页。
+
+**Verification notes:**
+
+- 合并提交 `077b217`（ticket/19-update-check `319d719`，feature `4a98192`，merge base `3548c61`），`git merge --no-ff`。本次合并无文本冲突：`src/lib/settings.ts` 与 `src/settings.css` 由 git 自动合并，`settings.ts` 同时保留 ticket 28 的 `import { applyTheme } from "./theme"` / `export { applyTheme }` 与 ticket 19 的 `updateManifestUrl` 字段、默认值；`useSettings.ts` 未被合并改动，仍经 `applySettings` → `theme.ts` 应用主题。但合并后暴露一处跨 ticket 的测试冲突：ticket 19 新增的 `.settings-error { color: #b3261e; }` 硬编码颜色触发 ticket 28 `src/theme.test.ts` 的“组件 CSS 不得出现硬编码颜色/rgba”断言，`npm test` 首轮 1 项失败；已在合并提交中改为 `var(--pdfx-danger-text)`（`src/theme.css` 浅色与深色 palette 均定义），行为不变，合并提交因此包含这 1 行修正。ticket 未修改 spec、ADR、打包配置或 `package.json`/`package-lock.json`。
+- 勾选 1：唯一联网代码是 `commands::check_for_updates` → `updater::check_for_updates`；`src-tauri/src/lib.rs` 的 `.setup` 只初始化日志与 PDF 引擎，命令只在 `invoke_handler` 注册，启动/后台无任何调用。前端 `checkForUpdates()` 仅由 `SettingsPanel` 的“检查更新”按钮 `onClick` 调用，无挂载 effect；`lib.rs`/`App.tsx` 无自动调用，源码中无 `fetch`/`XMLHttpRequest`/`WebSocket`/`reqwest`。测试证据：`loading_settings_never_connects_and_the_check_uses_the_persisted_address`（加载后 0 请求，显式检查后 1 请求）、`does not check for updates when the panel opens`（打开面板不 invoke）、`checks only when the user clicks and shows the checking state`（1 次 invoke）；成功、HTTP 500、超时三条路径均只产生 1 次请求（`request_count() == 1`），ureq 3.5 无 HTTP 层自动重试（仅 EINTR 安全重读），代码只有一次 `.call()`。
+- 勾选 2：`SettingsPanel` 的 `available` 状态渲染“发现新版本 {version}”、说明文本（`.settings-notes` 保留换行；manifest 缺失或全空白 notes 归一为 `null`）和“打开下载页”按钮，按钮调用 `open_download_page` 打开系统浏览器；版本比较用 `semver::Version`（manifest 版本严格 x.y.z，预发布语义遵循 semver）。测试覆盖 `a_newer_manifest_reports_an_available_update`、`a_manifest_without_notes_is_valid`、`shows the version notes and opens the download page`（断言版本、说明与 `open_download_page` 参数）。
+- 勾选 3：`up_to_date` 状态显示“已是最新版本（{version}）”；失败经 `describeUpdateError` 映射为“检查更新失败：…请稍后重试。”/“更新信息格式不正确…”/“更新地址无效…”/“无法打开下载页…”，并用 `role="alert"` 呈现；无自动重试。测试 `shows a retryable failure and never retries on its own` 在失败后等待 50ms 断言 invoke 仍为 1 次、按钮恢复可点；`server_errors_are_retryable_failures_not_manifests`、`malformed_json_is_reported_as_an_invalid_manifest`、`manifests_with_invalid_versions_or_download_pages_are_rejected`、`oversized_manifests_are_rejected_without_buffering_them_whole`、`the_check_times_out_instead_of_hanging`、`redirect_loops_stop_after_a_few_hops` 覆盖各类失败均单次尝试且快速返回。
+- 勾选 4：无下载/安装代码，唯一 UI 动作是 `open::that_detached` 调用系统浏览器，且仅限用户点击“打开下载页”；`check_for_updates` 命令不接收 Document/Session，只读 `settings.json` 中的 manifest 地址。请求为无 body 的 GET，仅带 `Accept: application/json` 与 `User-Agent: PDFX/<version>`；`ureq` 以 `default-features = false, features = ["rustls"]` 构建，未启用 cookies，无凭据、文件内容或使用数据上行。`open_download_page` 在执行前再次校验：仅 http/https、必须有主机名、拒绝内嵌用户名/密码；manifest 的 `downloadUrl` 也在检查阶段校验。测试 `unsafe_download_addresses_never_reach_the_system_browser` 断言 `file:`/`javascript:`/非 URL/空串/带凭据地址均不触达 opener，`a_failing_system_opener_is_reported_instead_of_silently_ignored` 断言启动失败会回报。依赖中没有 `tauri-plugin-updater` 或自动更新端点。
+- 勾选 5：`Settings.updateManifestUrl` 持久化到 `settings.json` 的 camelCase 字段（`settings_file_uses_the_frontend_camel_case_contract`），保存时 trim、限制 ≤2048 字符并校验 http/https + 主机名 + 无凭据，空值允许并清除设置、禁用按钮（`update_manifest_url_survives_a_restart_and_is_trimmed`、`invalid_update_manifest_urls_are_rejected_without_writing`、`an_empty_update_manifest_url_is_allowed_and_clears_the_setting`）。设置页输入框失焦/回车即保存；若地址刚被编辑就点击检查，前端先 `update_settings` 再 `check_for_updates`（`saves a newly typed manifest address before checking` 断言保存先于检查）。后端每次检查都从持久化设置读取地址，代码中无硬编码 URL；下载页由 manifest 的 `downloadUrl` 决定，更换清单或下载页无需改代码。
+- 边界：单次检查总预算 `timeout_global` 10 秒（含 DNS/连接/读 body）、最多 3 次重定向、body 上限 64 KiB；`the_check_times_out_instead_of_hanging`（注入 100ms 预算，实测 <2s 返回）、`one_redirect_is_followed`、`redirect_loops_stop_after_a_few_hops`（2–6 次连接后失败）、`oversized_manifests_are_rejected_without_buffering_them_whole` 覆盖。
+- 隐私/日志审查：成功只记录 `status`/`version`/`currentVersion`，失败只记录映射后的错误文本；`settings.update` 日志不包含 manifest 地址。核对 ureq 3.5 `Error::Display`：传输/超时/状态码错误均不含请求 URL，故“检查更新失败”日志不会带出用户配置的地址；打开失败只记录错误码。日志仍为本地滚动文件，诊断包需用户手动导出。
+- 依赖/许可：新增直接依赖 `ureq 3.5.0`（MIT OR Apache-2.0）、`semver 1.0.28`（MIT OR Apache-2.0，`3548c61` 已在依赖图中）、`url 2.5.8`（MIT OR Apache-2.0，已在依赖图中）、`open 5.4.5`（MIT，Windows 使用 `shellexecute-on-windows` 的 ShellExecuteW，不经 shell）；传递依赖 `ureq-proto`（MIT/Apache-2.0）、`rustls`（Apache-2.0/ISC/MIT）、`ring`（Apache-2.0 AND ISC）、`rustls-webpki`（ISC）、`rustls-pki-types`（MIT/Apache-2.0）、`webpki-roots`（CDLA-Permissive-2.0），均为宽松许可。`Cargo.toml` 中对四项直接依赖的去留理由有注释。
+- 自动化验证（合并后于仓库根执行）：`npm run typecheck` 通过；`npm test` 19 个文件、184 项通过（合并前 18 文件/171 项，本 ticket 新增 13 项：`updater.test.ts` 4 项 + `SettingsPanel.test.tsx` 9 项）；`npm run build` 通过；`npm run test:e2e` 12 项通过（主题 10 项 = 5 × 2 视口，原型布局 2 项，确认 ticket 28 行为未回退）；`cargo fmt --check` 通过；`cargo clippy -- -D warnings` exit 0（仅 vendored `pdfium-render` 4 条 dead_code warning，符合预期）；`cargo test` 123 项通过、0 失败、3 项忽略（合并前 104/3；本 ticket 新增 19 项：`update_check` 16 项 + `settings` 3 项）。`npm ci` 与 `npm run setup:native` 未重跑：`package.json`/`package-lock.json` 未变，`src-tauri/vendor/pdfium` 已存在；新增 Rust crate 由 cargo 从 crates.io 解析，`Cargo.lock` 合并后完整且构建/测试未再改写。
+- 未验证的人工项：真实 HTTPS 清单请求（自动测试只用 127.0.0.1 明文 HTTP 服务，rustls/webpki-roots TLS 路径仅通过编译验证）；真实系统浏览器启动（测试用注入的 `RecordingOpener`，生产 `SystemOpener` 的 macOS `open` 与 Windows ShellExecuteW 未实际执行）；打包后的 macOS universal `.app` / Windows 构建中设置页的完整流程、系统代理/防火墙环境；浅色/深色下更新状态的视觉检查。`check_for_updates(AppHandle)`/`open_download_page` 两个 Tauri 命令外壳本身未单测（内部函数已覆盖）。同步命令在 Tauri 2 的 sync threadpool 执行，10 秒超时不会阻塞 UI 线程，但检查期间界面只靠按钮禁用与“正在检查更新…”提示。
+- 后续/发现：manifest 与下载页目前允许 `http`（测试与本地调试需要），公开分发建议使用 `https` 清单并在将来考虑强制；若用户先失焦保存地址又立即点击检查，窄窗口内可能触发两次 `update_settings`，但仍只有一次清单 GET，无功能影响；`tests/support/http.rs` 沿用既有 `tests/support/*` 模块模式，`cargo clippy --all-targets` 的 dead_code 失败属已知既有问题，未在本次修复。
