@@ -2,6 +2,7 @@ pub mod commands;
 pub mod engine;
 mod menu;
 pub mod pdfium_adapter;
+pub mod save;
 pub mod text_edit;
 
 use tauri::{Emitter, Manager};
@@ -55,6 +56,7 @@ pub fn run() {
             text_edit::undo_text_edit,
             text_edit::redo_text_edit,
             text_edit::mark_document_saved,
+            save::save_document,
         ])
         .setup(|app| {
             // A missing library must not stop the shell from starting; opening a

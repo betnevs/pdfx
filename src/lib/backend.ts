@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 
 /** Application identity exposed by the Rust command boundary. */
 export interface AppInfo {
@@ -29,6 +29,11 @@ export type CommandErrorCode =
   | "unsupported_font"
   | "render_failed"
   | "window_failed"
+  | "save_failed"
+  | "save_target_is_source"
+  | "no_output_document"
+  | "unencrypted_output_confirmation_required"
+  | "read_only_document"
   | "internal";
 
 /** A structured error crossing the Tauri command boundary. */
@@ -279,6 +284,50 @@ export interface EditStepView {
   history: EditHistoryView;
 }
 
+/** The two save entry points. */
+export type SaveKind = "save_as" | "save_changes";
+
+/** Stages of one save, emitted in order; `done` is last. */
+export type SaveStage =
+  | "preparing"
+  | "serializing"
+  | "finalizing"
+  | "writing"
+  | "done";
+
+/** One progress update from the save command. */
+export interface SaveProgress {
+  documentId: string;
+  stage: SaveStage;
+  completed: number;
+  total: number;
+}
+
+/**
+ * A save request. `saveAsPath` is the chosen Output Document path for Save As
+ * and null for Save Changes to the remembered output.
+ */
+export interface SaveDocumentRequest {
+  saveAsPath: string | null;
+  /** True only after the user accepted the unencrypted-output warning. */
+  confirmUnencryptedOutput: boolean;
+}
+
+/** The outcome of a completed save. */
+export interface SaveResultView {
+  documentId: string;
+  outputPath: string;
+  kind: SaveKind;
+  bytesWritten: number;
+  /** The previous Output Document, preserved before it was replaced. */
+  backupPath: string | null;
+  /** Clean state after the write; undo/redo history is untouched. */
+  history: EditHistoryView;
+}
+
+/** Tauri event carrying save progress for the window that started the save. */
+export const SAVE_PROGRESS_EVENT = "pdfx://save-progress";
+
 /** Event emitted to the focused window for native menu activation. */
 export const MENU_EVENT = "pdfx://menu";
 
@@ -298,6 +347,11 @@ const COMMAND_ERROR_CODES: ReadonlySet<string> = new Set<CommandErrorCode>([
   "unsupported_font",
   "render_failed",
   "window_failed",
+  "save_failed",
+  "save_target_is_source",
+  "no_output_document",
+  "unencrypted_output_confirmation_required",
+  "read_only_document",
   "internal",
 ]);
 
@@ -539,11 +593,48 @@ export async function redoTextEdit(documentId: string): Promise<EditStepView> {
  * Records that the current in-memory state was written to disk. The save
  * pipeline must call this after a successful write; it moves the clean
  * baseline without clearing undo/redo, so history survives Save Changes.
+ *
+ * The `save_document` command performs the same baseline update internally
+ * while it holds the document, so the frontend uses the history it returns
+ * instead of making a second call.
  */
 export async function markDocumentSaved(
   documentId: string,
 ): Promise<EditHistoryView> {
   return invoke<EditHistoryView>("mark_document_saved", { documentId });
+}
+
+/**
+ * Opens the Save As dialog filtered to PDFs. Returns null when cancelled.
+ * `defaultName` preselects the Source Document's file name.
+ */
+export async function chooseSaveFile(
+  defaultName: string | null = null,
+): Promise<string | null> {
+  const selection = await saveDialog({
+    defaultPath: defaultName ?? undefined,
+    filters: [{ name: "PDF", extensions: ["pdf"] }],
+  });
+  return typeof selection === "string" ? selection : null;
+}
+
+/**
+ * Writes the Output Document. Save As passes the chosen path; Save Changes
+ * passes null and overwrites the remembered output. An encrypted Source
+ * Document is written unencrypted only when `confirmUnencryptedOutput` is true.
+ */
+export async function saveDocument(
+  documentId: string,
+  request: SaveDocumentRequest,
+): Promise<SaveResultView> {
+  return invoke<SaveResultView>("save_document", { documentId, request });
+}
+
+/** Subscribes to save progress for the current window. */
+export function onSaveProgress(
+  handler: (progress: SaveProgress) => void,
+): Promise<UnlistenFn> {
+  return listen<SaveProgress>(SAVE_PROGRESS_EVENT, (event) => handler(event.payload));
 }
 
 /** Releases a document from the backend registry. Unknown ids are ignored. */

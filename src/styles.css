@@ -85,6 +85,17 @@ body {
   white-space: nowrap;
 }
 
+.dirty-indicator {
+  padding: 2px 7px;
+  border: 1px solid #e0b56d;
+  border-radius: 999px;
+  background: #fff6e6;
+  color: #7a4c10;
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
 button {
   font: inherit;
 }
@@ -843,6 +854,43 @@ button {
   font-size: 12px;
   line-height: 1.5;
   text-align: center;
+}
+
+.save-progress,
+.save-result {
+  margin: 0;
+  color: #4b5563;
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: center;
+}
+
+.save-error {
+  max-width: 720px;
+  padding: 8px 12px;
+  border: 1px solid #e3b4ae;
+  border-radius: 7px;
+  background: #fdf1ef;
+  color: #8a2f27;
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: center;
+}
+
+.save-error p {
+  margin: 0;
+}
+
+.save-error-actions {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.save-error-actions button {
+  padding: 4px 10px;
+  font-size: 12px;
 }
 
 .password-overlay {

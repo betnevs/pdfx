@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { DocumentAccess } from "./components/DocumentAccess";
 import { DocumentToolbar, PageSurface, ThumbnailRail } from "./components/PageViewer";
 import { PasswordPrompt } from "./components/PasswordPrompt";
+import { SaveConfirmDialog } from "./components/SaveConfirmDialog";
 import {
   choosePdfFile,
   closeDocument,
@@ -22,6 +23,7 @@ import {
   type DocumentView,
 } from "./lib/backend";
 import { scaleToPercent } from "./lib/pageGeometry";
+import { useDocumentSave } from "./lib/useDocumentSave";
 import { useDocumentViewer } from "./lib/useDocumentViewer";
 
 type AppInfoState =
@@ -83,14 +85,9 @@ export function App() {
   const [notice, setNotice] = useState<CommandError | null>(null);
   const [passwordPrompt, setPasswordPrompt] = useState<PasswordPromptState | null>(null);
 
-  // Editing arrives in a later ticket; the scaffold tracks dirty state and the
-  // close guard so nothing silently discards future unsaved changes.
-  const [dirty] = useState(false);
-
   const editorRef = useRef(editor);
   editorRef.current = editor;
-  const dirtyRef = useRef(dirty);
-  dirtyRef.current = dirty;
+  const dirtyRef = useRef(false);
   const openingRef = useRef(false);
 
   const handleViewerError = useCallback((error: CommandError) => {
@@ -111,6 +108,26 @@ export function App() {
   const viewer = useDocumentViewer(openDocumentView, handleViewerError);
   const viewerRef = useRef(viewer);
   viewerRef.current = viewer;
+
+  // Save state lives next to the viewer so the header, title and close guard
+  // all read the same dirty flag the backend reports.
+  const save = useDocumentSave(openDocumentView);
+  const saveRef = useRef(save);
+  saveRef.current = save;
+  dirtyRef.current = save.dirty;
+
+  const openDocumentId = openDocumentView?.documentId ?? null;
+  const openDocumentName = openDocumentView?.name ?? null;
+
+  useEffect(() => {
+    if (!openDocumentName) {
+      return;
+    }
+    const marker = save.dirty ? "（未保存）" : "";
+    void setWindowTitle(`${openDocumentName}${marker} — PDFX`).catch(() => {
+      // The title is cosmetic; a missing window capability must not fail open.
+    });
+  }, [openDocumentId, openDocumentName, save.dirty]);
 
   useEffect(() => {
     let cancelled = false;
@@ -161,10 +178,6 @@ export function App() {
       const document = await openDocument(path, password);
       openedDocumentId = document.documentId;
       setPasswordPrompt(null);
-
-      await setWindowTitle(`${document.name} — PDFX`).catch(() => {
-        // The title is cosmetic; a missing window capability must not fail open.
-      });
 
       setEditor({ status: "open", document });
     } catch (error) {
@@ -232,6 +245,12 @@ export function App() {
     switch (menuId) {
       case "file.open":
         promptOpen();
+        break;
+      case "file.save":
+        saveRef.current.saveChanges();
+        break;
+      case "file.save_as":
+        saveRef.current.saveAs();
         break;
       case "view.zoom_in":
         current.zoomBy(ZOOM_STEP);
@@ -337,6 +356,11 @@ export function App() {
               {open.document.name}
             </span>
           )}
+          {open && save.dirty && (
+            <span className="dirty-indicator" title="有未保存的更改">
+              未保存
+            </span>
+          )}
           <span className="app-mode">本地 PDF 编辑器</span>
           <button type="button" className="open-button" onClick={promptOpen}>
             打开 PDF…
@@ -360,6 +384,15 @@ export function App() {
           busy={passwordPrompt.busy}
           onSubmit={submitPassword}
           onCancel={cancelPasswordPrompt}
+        />
+      )}
+
+      {open && save.confirmation && (
+        <SaveConfirmDialog
+          documentName={open.document.name}
+          busy={save.busy}
+          onConfirm={save.confirmUnencrypted}
+          onCancel={save.cancelConfirmation}
         />
       )}
 
@@ -416,7 +449,7 @@ export function App() {
               onActualSize={viewer.actualSize}
               onToggleFullscreen={viewer.toggleFullscreen}
             />
-            <DocumentAccess document={open.document} />
+            <DocumentAccess document={open.document} save={save} />
             <div className="document-body">
               <ThumbnailRail
                 documentId={open.document.documentId}
