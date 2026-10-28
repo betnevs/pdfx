@@ -34,6 +34,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 
 use crate::commands::{with_open_document, CommandError, CommandErrorCode};
+use crate::logging;
 use crate::pdfium_adapter::{save_document_with_mode, SaveMode};
 use crate::text_edit::EditHistoryView;
 
@@ -171,6 +172,26 @@ pub fn save_document_with_progress(
 
         emit(document_id, SaveStage::Writing, 3, progress);
         let written = write_output_atomically(&target, &output_bytes)?;
+
+        // The successful disk-write point for ticket 16's local log: path and
+        // outcome only, never file contents.
+        logging::event(
+            "document.save",
+            &format!(
+                "documentId={document_id} kind={} path={} bytes={} outcome=ok{}",
+                match kind {
+                    SaveKind::SaveAs => "save_as",
+                    SaveKind::SaveChanges => "save_changes",
+                },
+                target.display(),
+                written.bytes_written,
+                written
+                    .backup_path
+                    .as_ref()
+                    .map(|path| format!(" backup={}", path.display()))
+                    .unwrap_or_default(),
+            ),
+        );
 
         // The output now exists and is complete; only now move the clean
         // baseline and remember the target. A failure above leaves both dirty
