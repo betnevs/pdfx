@@ -526,6 +526,38 @@ pub fn embedded_files_pdf() -> TempPdf {
     write_pdf("embedded-files", build_pdf(objects, 1))
 }
 
+/// A 612x792 page with one existing attachment whose name-tree key and
+/// `/Filespec /F` are single-byte PDFDocEncoding (`café.txt`, byte 0xE9) and
+/// which has no `/UF`, the form other writers emit.
+pub fn embedded_files_pdfdoc_encoding_pdf() -> TempPdf {
+    let data = b"pdfdoc attachment\n";
+    let objects = vec![
+        (
+            1,
+            b"<< /Type /Catalog /Pages 2 0 R /Names << /EmbeddedFiles 5 0 R >> >>".to_vec(),
+        ),
+        (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+        (
+            3,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R >>".to_vec(),
+        ),
+        (4, stream("", b"")),
+        (5, b"<< /Names [(caf\xE9.txt) 6 0 R] >>".to_vec()),
+        (
+            6,
+            b"<< /Type /Filespec /F (caf\xE9.txt) /EF << /F 7 0 R >> >>".to_vec(),
+        ),
+        (
+            7,
+            stream(
+                "/Type /EmbeddedFile /Subtype /text#2Fplain /Params << /Size 18 >>",
+                data,
+            ),
+        ),
+    ];
+    write_pdf("embedded-files-pdfdoc", build_pdf(objects, 1))
+}
+
 /// A 612x792 page using a non-embedded, non-standard font name. Pdfium
 /// substitutes a rendering font, but the text object still advertises the
 /// document's original (non-standard) font.

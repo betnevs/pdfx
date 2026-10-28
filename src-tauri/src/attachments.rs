@@ -170,15 +170,12 @@ impl AttachmentStore {
         }
         let (stem, extension) = split_extension(desired);
         for counter in 2..10_000 {
-            let candidate = match extension {
-                Some(extension) => format!("{stem} ({counter}).{extension}"),
-                None => format!("{stem} ({counter})"),
-            };
+            let candidate = suffixed_name(stem, extension, &format!(" ({counter})"));
             if !taken.contains(candidate.as_str()) {
                 return candidate;
             }
         }
-        format!("{stem}-{}.{}", self.next_id + 1, extension.unwrap_or("bin"))
+        suffixed_name(stem, extension, &format!("-{}", self.next_id + 1))
     }
 
     /// The attachment list to apply on the next save, or `None` when the
@@ -222,6 +219,25 @@ fn split_extension(name: &str) -> (&str, Option<&str>) {
         }
         _ => (name, None),
     }
+}
+
+/// Appends `suffix` to `stem` while keeping the whole name within
+/// [`MAX_ATTACHMENT_NAME_CHARS`]. The stem gives way first; an extension that
+/// cannot fit next to the suffix is dropped instead of copied whole.
+fn suffixed_name(stem: &str, extension: Option<&str>, suffix: &str) -> String {
+    let extension = extension.filter(|extension| {
+        extension.chars().count() + suffix.chars().count() + 2 <= MAX_ATTACHMENT_NAME_CHARS
+    });
+    let reserved =
+        suffix.chars().count() + extension.map_or(0, |extension| extension.chars().count() + 1);
+    let keep = MAX_ATTACHMENT_NAME_CHARS.saturating_sub(reserved).max(1);
+    let mut name: String = stem.chars().take(keep).collect();
+    name.push_str(suffix);
+    if let Some(extension) = extension {
+        name.push('.');
+        name.push_str(extension);
+    }
+    name
 }
 
 /// The `/Names /EmbeddedFiles` rewrite derived from the session lists.
@@ -633,11 +649,14 @@ fn truncate_name(name: String) -> String {
         return name;
     }
     let (stem, extension) = split_extension(&name);
-    let extension = extension.unwrap_or_default();
-    let reserved = extension.chars().count() + 1;
+    // An extension that leaves no room for even one stem character is dropped:
+    // keeping it whole would push the name past the cap.
+    let extension =
+        extension.filter(|extension| extension.chars().count() + 2 <= MAX_ATTACHMENT_NAME_CHARS);
+    let reserved = extension.map_or(0, |extension| extension.chars().count() + 1);
     let keep = MAX_ATTACHMENT_NAME_CHARS.saturating_sub(reserved).max(1);
     let mut truncated: String = stem.chars().take(keep).collect();
-    if !extension.is_empty() {
+    if let Some(extension) = extension {
         truncated.push('.');
         truncated.push_str(extension);
     }

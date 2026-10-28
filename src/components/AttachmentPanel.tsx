@@ -26,6 +26,14 @@ export function formatAttachmentSize(bytes: number): string {
   return `${megabytes.toFixed(megabytes < 10 ? 1 : 0)} MB`;
 }
 
+/** The file name offered to the native save dialog. */
+export function attachmentDefaultName(name: string): string {
+  // An existing PDF may carry a name written by another tool; only its base
+  // name belongs in the dialog so the name cannot preselect a directory.
+  const base = name.split(/[\\/]/).pop() ?? "";
+  return base.trim() === "" ? "attachment" : base;
+}
+
 const ATTACHMENT_ERROR_MESSAGES: Partial<Record<CommandErrorCode, string>> = {
   file_not_found: "找不到文件，它可能已被移动或删除。",
   file_read_failed: "无法读取该文件。",
@@ -131,7 +139,9 @@ export function AttachmentPanel({
     setNotice(null);
     let destination: string | null;
     try {
-      destination = await chooseAttachmentDestination(attachment.name);
+      destination = await chooseAttachmentDestination(
+        attachmentDefaultName(attachment.name),
+      );
     } catch (error) {
       setActionError(attachmentErrorMessage(toCommandError(error).code));
       return;

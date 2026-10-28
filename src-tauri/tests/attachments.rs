@@ -926,6 +926,156 @@ fn attachment_file_errors_are_reported_before_touching_the_document() {
     close_document(document.document_id).expect("close");
 }
 
+/// Counts the cross-reference sections in a file. Each incremental revision
+/// appends exactly one, so a delta proves who wrote how many revisions.
+fn startxref_count(bytes: &[u8]) -> usize {
+    bytes
+        .windows(b"startxref".len())
+        .filter(|window| *window == b"startxref")
+        .count()
+}
+
+#[test]
+fn deleting_a_pdfdocencoding_named_attachment_removes_it_from_the_saved_tree() {
+    let dir = TempDir::new("pdfdoc-name");
+    let fixture = synthetic::embedded_files_pdfdoc_encoding_pdf();
+    let output = dir.path().join("output.pdf");
+
+    let document = open(Path::new(&fixture.path_string()));
+    let listed = list_attachments(document.document_id.clone()).expect("list");
+    assert_eq!(
+        names(&listed),
+        vec!["café.txt"],
+        "PDFium decodes the single-byte PDFDocEncoding name"
+    );
+    delete_attachment(document.document_id.clone(), listed[0].id).expect("delete attachment");
+
+    save_document_with_progress(
+        &document.document_id,
+        SaveDocumentRequest {
+            save_as_path: Some(path_string(&output)),
+            confirm_unencrypted_output: false,
+        },
+        &mut |_| {},
+    )
+    .expect("save the deletion");
+
+    let saved = lopdf::Document::load(&output).expect("parse the saved PDF");
+    assert!(
+        embedded_entries(&saved).is_empty(),
+        "the deleted attachment must not survive under its PDFDocEncoding key"
+    );
+
+    close_document(document.document_id).expect("close");
+}
+
+#[test]
+fn attachment_names_stay_within_the_character_cap() {
+    let dir = TempDir::new("name-cap");
+    let fixture = synthetic::single_line_pdf();
+    let document = open(Path::new(&fixture.path_string()));
+
+    // A long stem keeps its extension by shortening the stem.
+    let long_stem = "n".repeat(200);
+    let long_path = dir.path().join(format!("{long_stem}.txt"));
+    fs::write(&long_path, b"long stem").expect("write long stem");
+    let result =
+        add_attachment(document.document_id.clone(), path_string(&long_path)).expect("add");
+    let long = result.attachments.last().expect("added attachment");
+    assert_eq!(
+        long.name.chars().count(),
+        120,
+        "the stem is shortened to the cap: {}",
+        long.name
+    );
+    assert!(long.name.ends_with(".txt"), "the extension survives");
+
+    // An extension too long to fit next to a stem is dropped rather than
+    // pushing the name past the cap.
+    let long_extension = format!("x.{}", "e".repeat(130));
+    let extension_path = dir.path().join(&long_extension);
+    fs::write(&extension_path, b"long extension").expect("write long extension");
+    let result = add_attachment(document.document_id.clone(), path_string(&extension_path))
+        .expect("add long extension");
+    let added = result.attachments.last().expect("added attachment");
+    assert!(
+        added.name.chars().count() <= 120,
+        "the name cap must hold for a long extension: {} chars",
+        added.name.chars().count()
+    );
+
+    // A name already at the cap that collides is suffixed without exceeding
+    // the cap, and the two names stay distinct.
+    let base = "b".repeat(116);
+    let first_dir = dir.path().join("first");
+    let second_dir = dir.path().join("second");
+    fs::create_dir_all(&first_dir).expect("create first directory");
+    fs::create_dir_all(&second_dir).expect("create second directory");
+    let first = first_dir.join(format!("{base}.txt"));
+    let second = second_dir.join(format!("{base}.txt"));
+    fs::write(&first, b"first").expect("write first");
+    fs::write(&second, b"second").expect("write second");
+    let first_result =
+        add_attachment(document.document_id.clone(), path_string(&first)).expect("add first");
+    let first_name = first_result
+        .attachments
+        .last()
+        .expect("first attachment")
+        .name
+        .clone();
+    let second_result =
+        add_attachment(document.document_id.clone(), path_string(&second)).expect("add second");
+    let suffixed = second_result
+        .attachments
+        .iter()
+        .find(|attachment| attachment.name.contains("(2)"))
+        .expect("suffixed duplicate");
+    assert!(
+        suffixed.name.chars().count() <= 120,
+        "the suffix must not exceed the cap: {} chars",
+        suffixed.name.chars().count()
+    );
+    assert_ne!(suffixed.name, first_name);
+    assert!(suffixed.name.ends_with(".txt"));
+
+    close_document(document.document_id).expect("close");
+}
+
+#[test]
+fn an_attachment_save_appends_one_pdfium_and_one_lopdf_revision() {
+    let dir = TempDir::new("attachment-revision");
+    let fixture = synthetic::embedded_files_pdf();
+    let source_bytes = fs::read(fixture.path_string()).expect("read the source");
+    let output = dir.path().join("output.pdf");
+    let added_path = dir.path().join("revision.bin");
+    fs::write(&added_path, b"revision").expect("write attachment");
+
+    let document = open(Path::new(&fixture.path_string()));
+    add_attachment(document.document_id.clone(), path_string(&added_path)).expect("add");
+    save_document_with_progress(
+        &document.document_id,
+        SaveDocumentRequest {
+            save_as_path: Some(path_string(&output)),
+            confirm_unencrypted_output: false,
+        },
+        &mut |_| {},
+    )
+    .expect("save");
+
+    let saved = fs::read(&output).expect("read the saved output");
+    assert!(
+        saved.starts_with(&source_bytes),
+        "the source stays untouched and revisions are appended"
+    );
+    assert_eq!(
+        startxref_count(&saved),
+        startxref_count(&source_bytes) + 2,
+        "attachments travel in PDFium's revision plus exactly one lopdf revision"
+    );
+
+    close_document(document.document_id).expect("close");
+}
+
 /// The decoded keys of one catalog name tree.
 fn name_tree_keys(document: &lopdf::Document, tree: &[u8]) -> Vec<String> {
     let catalog = document.catalog().expect("catalog");

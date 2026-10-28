@@ -1794,9 +1794,13 @@ fn apply_object_edit(
     }
 }
 
-/// Decodes a PDF text string: UTF-16BE when it carries the BOM, otherwise the
-/// bytes are compared as-is (PDFDocEncoding is ASCII-compatible for the
-/// characters form option labels use in practice).
+/// Decodes a PDF text string: UTF-16BE when it carries the BOM, otherwise
+/// PDFDocEncoding (PDF 32000-1 Annex D.2).
+///
+/// PDFium reports attachment, field and bookmark names decoded the same way, so
+/// a name read from a lopdf object (a name-tree key, for example) compares equal
+/// to the session name even when the file stored it as single-byte
+/// PDFDocEncoding rather than UTF-16BE.
 pub(crate) fn decode_pdf_text(bytes: &[u8]) -> String {
     if let Some(utf16) = bytes.strip_prefix(&[0xFE, 0xFF]) {
         let units: Vec<u16> = utf16
@@ -1805,7 +1809,60 @@ pub(crate) fn decode_pdf_text(bytes: &[u8]) -> String {
             .collect();
         String::from_utf16_lossy(&units)
     } else {
-        String::from_utf8_lossy(bytes).into_owned()
+        bytes.iter().map(|byte| pdfdoc_character(*byte)).collect()
+    }
+}
+
+/// One PDFDocEncoding code point. Undefined codes decode to U+FFFD so a name
+/// still has the same length and cannot silently merge with another.
+fn pdfdoc_character(byte: u8) -> char {
+    match byte {
+        0x09 => '\t',
+        0x0A => '\n',
+        0x0D => '\r',
+        0x18 => '\u{02D8}',
+        0x19 => '\u{02C7}',
+        0x1A => '\u{02C6}',
+        0x1B => '\u{02D9}',
+        0x1C => '\u{02DD}',
+        0x1D => '\u{02DB}',
+        0x1E => '\u{02DA}',
+        0x1F => '\u{02DC}',
+        0x20..=0x7E => byte as char,
+        0x80 => '\u{2022}',
+        0x81 => '\u{2020}',
+        0x82 => '\u{2021}',
+        0x83 => '\u{2026}',
+        0x84 => '\u{2014}',
+        0x85 => '\u{2013}',
+        0x86 => '\u{0192}',
+        0x87 => '\u{2044}',
+        0x88 => '\u{2039}',
+        0x89 => '\u{203A}',
+        0x8A => '\u{2212}',
+        0x8B => '\u{2030}',
+        0x8C => '\u{201E}',
+        0x8D => '\u{201C}',
+        0x8E => '\u{201D}',
+        0x8F => '\u{2018}',
+        0x90 => '\u{2019}',
+        0x91 => '\u{201A}',
+        0x92 => '\u{2122}',
+        0x93 => '\u{FB01}',
+        0x94 => '\u{FB02}',
+        0x95 => '\u{0141}',
+        0x96 => '\u{0152}',
+        0x97 => '\u{0160}',
+        0x98 => '\u{0178}',
+        0x99 => '\u{017D}',
+        0x9A => '\u{0131}',
+        0x9B => '\u{0142}',
+        0x9C => '\u{0153}',
+        0x9D => '\u{0161}',
+        0x9E => '\u{017E}',
+        0xA0 => '\u{20AC}',
+        0xA1..=0xFF => char::from_u32(u32::from(byte)).expect("Latin-1 is valid Unicode"),
+        _ => '\u{FFFD}',
     }
 }
 

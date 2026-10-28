@@ -231,6 +231,26 @@ describe("AttachmentPanel", () => {
     ).toBeInTheDocument();
   });
 
+  it("offers only the base name of a hostile attachment to the save dialog", async () => {
+    const hostile: AttachmentView = {
+      id: 3,
+      name: "../../outside.txt",
+      size: 4,
+      mediaType: "text/plain",
+    };
+    vi.mocked(saveDialog).mockResolvedValue(null);
+    renderPanel({ attachments: [hostile] });
+
+    fireEvent.click(screen.getByRole("button", { name: "另存为 ../../outside.txt" }));
+
+    await waitFor(() =>
+      expect(saveDialog).toHaveBeenCalledWith({
+        defaultPath: "outside.txt",
+        title: "另存附件",
+      }),
+    );
+  });
+
   it("does nothing when the attachment save dialog is cancelled", async () => {
     vi.mocked(saveDialog).mockResolvedValue(null);
     renderPanel();
