@@ -32,6 +32,8 @@ export type CommandErrorCode =
   | "image_too_large"
   | "render_failed"
   | "file_write_failed"
+  | "export_target_is_source"
+  | "export_target_is_output"
   | "print_failed"
   | "window_failed"
   | "save_failed"
@@ -337,6 +339,64 @@ export interface ImageTransformRequest {
 export interface ImageEditResultView {
   pageIndex: number;
   image: ImageObjectView;
+  history: EditHistoryView;
+}
+
+/**
+ * The two linear page-content objects PDFX creates.
+ *
+ * Lines and arrows are path objects written into the page content stream, not
+ * annotations. They therefore never appear in [`AnnotationView`] or the
+ * annotation list, and they have no annotation thread or standard annotation
+ * delete semantics; deleting one is an undoable content edit.
+ */
+export type LineKind = "line" | "arrow";
+
+/** Endpoints in display-space points (top-left origin). */
+export interface LineGeometry {
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+}
+
+/**
+ * Stroke colour, opacity and width of a line or arrow. Lines always have a
+ * stroke, so there is no fill control. Opacity is a percentage (0-100) applied
+ * to the stroke (and to the arrow head's fill). Line width is in page points.
+ */
+export interface LineStyle {
+  strokeColor: string;
+  opacity: number;
+  lineWidth: number;
+}
+
+/** Draws a line or arrow on one page. */
+export interface CreateLineRequest {
+  pageIndex: number;
+  kind: LineKind;
+  geometry: LineGeometry;
+  style: LineStyle;
+}
+
+/** New endpoints for an existing line; rotation is expressed by the endpoints. */
+export interface LineTransformRequest {
+  geometry: LineGeometry;
+}
+
+/** A line or arrow this editing session created on a page. */
+export interface LineObjectView {
+  lineId: number;
+  pageIndex: number;
+  kind: LineKind;
+  geometry: LineGeometry;
+  style: LineStyle;
+}
+
+/** The outcome of creating or changing one linear object. */
+export interface LineEditResultView {
+  pageIndex: number;
+  line: LineObjectView;
   history: EditHistoryView;
 }
 
@@ -736,6 +796,8 @@ const COMMAND_ERROR_CODES: ReadonlySet<string> = new Set<CommandErrorCode>([
   "image_too_large",
   "render_failed",
   "file_write_failed",
+  "export_target_is_source",
+  "export_target_is_output",
   "print_failed",
   "window_failed",
   "save_failed",
@@ -1092,6 +1154,74 @@ export async function deleteImage(
     documentId,
     pageIndex,
     imageId,
+  });
+}
+
+/**
+ * Draws a line or arrow as one undoable page-content object. The object is
+ * written into the page content stream, never into the annotation dictionary.
+ */
+export async function createLineObject(
+  documentId: string,
+  request: CreateLineRequest,
+): Promise<LineEditResultView> {
+  return invoke<LineEditResultView>("create_line_object", {
+    documentId,
+    request,
+  });
+}
+
+/** Lists the lines and arrows this session created on a page. */
+export async function pageLineObjects(
+  documentId: string,
+  pageIndex: number,
+): Promise<LineObjectView[]> {
+  return invoke<LineObjectView[]>("page_line_objects", { documentId, pageIndex });
+}
+
+/**
+ * Replaces a line's endpoints. Moving, endpoint dragging and rotation all
+ * commit through this one command, so each gesture is one history action.
+ */
+export async function transformLineObject(
+  documentId: string,
+  pageIndex: number,
+  lineId: number,
+  transform: LineTransformRequest,
+): Promise<LineEditResultView> {
+  return invoke<LineEditResultView>("transform_line_object", {
+    documentId,
+    pageIndex,
+    lineId,
+    transform,
+  });
+}
+
+/** Changes a line's stroke colour, opacity or width as one undoable action. */
+export async function updateLineStyle(
+  documentId: string,
+  pageIndex: number,
+  lineId: number,
+  style: LineStyle,
+): Promise<LineEditResultView> {
+  return invoke<LineEditResultView>("update_line_style", {
+    documentId,
+    pageIndex,
+    lineId,
+    style,
+  });
+}
+
+/** Removes a line from the page content; undo restores it exactly. */
+export async function deleteLineObject(
+  documentId: string,
+  pageIndex: number,
+  lineId: number,
+): Promise<EditStepView> {
+  return invoke<EditStepView>("delete_line_object", {
+    documentId,
+    pageIndex,
+    lineId,
   });
 }
 

@@ -4,10 +4,33 @@
 
 **Blocked by:** 20 (矩形与椭圆形状)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] 直线/箭头可绘制，端点、颜色、线宽、透明度可调。
-- [ ] 可移动、缩放、旋转；属性面板与矩形/椭圆一致。
-- [ ] 保存后作为页面内容显示，不出现在 Annotation 列表；在 Preview、Chrome 中位置与样式一致。
-- [ ] 文档明确说明这类对象没有注释线程与标准删除语义。
-- [ ] 撤销/重做覆盖绘制、变换与属性修改。
+- [x] 直线/箭头可绘制，端点、颜色、线宽、透明度可调。
+- [x] 可移动、缩放、旋转；属性面板与矩形/椭圆一致。
+- [ ] 保存后作为页面内容显示，不出现在 Annotation 列表；在 Preview、Chrome 中位置与样式一致。（页面内容、保存/重开、像素与 `/Subtype /Line` 缺失已由 PDFium/lopdf 测试与独立探针验证；Preview、Chrome、Adobe Acrobat Reader 未人工打开验证，保持未勾选）
+- [x] 文档明确说明这类对象没有注释线程与标准删除语义。
+- [x] 撤销/重做覆盖绘制、变换与属性修改。
+
+**Verification notes:**
+
+- 合并（独立复核）：feature `5a6f50f`；分支首次合并 `d8b49b4`（合入 integration `edcc117`，含 ticket 13 便签/手绘与 ticket 25 图章）；本次合并前把 integration tip `5f308dd`（ticket 31 表单创建、ticket 46 打印/导出加固）合入分支得到 `234381e`，再以 `42c43d1` `merge: ticket 21 lines and arrows` 合入 integration。ticket 21 的净改动为 17 个文件（+3941/−16，含新增 `line_edit.rs`、`tests/lines.rs`、`LineLayer.tsx`、`lineGeometry.ts` 及各自测试）；未修改 `Cargo.toml`/`Cargo.lock`/`package.json`/`package-lock.json`/`tauri.conf.json`。
+- 冲突与解决：文本冲突 3 处，全部在 `src-tauri/src/text_edit.rs`：`EditSession` 字段（Line 的 `lines`/`next_line_id` 与 ticket 31 的 `created_fields`）、`undo_for` 与 `redo_for` 的权限分派 arm（`Box/Image/Line/FormStructure` 合并为同一个 `ensure_content_editable` 分支），均取并集并把注释补为“Box, Image, Line or created-field”。`lib.rs`、`backend.ts`、`App.test.tsx`、`AnnotationPanel.tsx`、`documentEvents.ts`、`styles.css` 自动合并；`EditAction` 的 Line/Field/FormStructure/Annotation 分支、ticket 13/25 的便签/手绘/图章动作与 ticket 20 的形状动作同时保留。**自动合并的语义冲突**：ticket 46 与 ticket 21 都新增了 `PageSurface`/`App` 的 `canModifyContent` prop（前者给 FormLayer，后者给 LineLayer），git 在 `PageViewer.tsx`/`App.tsx` 留下了重复 prop 与重复类型字段；已合并为单一 prop（注释写明同时覆盖表单结构与线条），保留 ticket 46 的 `permissions.canModifyContent && !readOnly` 取值，`FormLayer` 与 `LineLayer` 共用。合并前 typecheck 即报重复 prop，修复后通过；ticket 31/46/25/13/20 的表单、打印导出、图章、便签/手绘、形状代码与命令注册均未丢。
+- 勾选 1（绘制、端点、颜色、线宽、透明度）：`LineLayer` 用 `lineGeometry` 的同一组函数生成 SVG 拖拽预览，并把同一 `geometry`/`style` 发给 `create_line_object`；`LineLayer.test.tsx` “draws a line whose preview matches the committed request” 逐项断言预览 `data-kind`/`opacity`/`stroke`/`stroke-width`/`x1..y2` 与随后请求一致（100,300→400,300、#cc0000、线宽 5、透明度 70）并在提交后退出绘制态；“previews an arrow head with the backend's head geometry” 断言头部三点 (400,300)/(392,302.8)/(392,297.2) 与后端公式一致。`lineGeometry.test.ts` 11 项覆盖页面夹取、点击/过短拖拽拒绝、端点与整体平移、绕中点旋转、Shift 15° 吸附、箭头头部 clamp。后端 `build_line_object` 用 `PdfPagePathObject`（圆头线帽）把两个显示空间端点经 `DisplayGeometry::point_inverse` 映射到用户空间；箭头为同一路径的第二条闭合子路径。非法颜色/透明度/线宽/长度/坐标/页码均被拒绝且不弄脏历史（`invalid_line_requests_are_rejected_without_dirtying_the_document`，含 NaN/∞/超限坐标、`red` 颜色、101 透明度、0 与 101 线宽）。真实 Tauri 窗口中的指针手感未人工验证。
+- 勾选 2（移动/缩放/旋转与属性面板）：主体拖动移动、两端手柄拖动改变长度（即线条语义下的缩放）、顶部旋转手柄绕中点旋转并提交真实端点；`LineLayer.test.tsx` 覆盖移动一次 `transform_line_object`、仅移动被拖端点、90° 旋转后的端点 (200,200)/(200,400)、单击不提交；“restyles and deletes…” 断言属性面板文本“直线 · 长度 200 pt · 角度 0°”、描边颜色/宽度/透明度提交与中文删除。属性面板为页面内覆盖面板 `aria-label="线条属性"`（线条不是注释，因此不进入 `AnnotationPanel`），提供与形状描边一致的 `线条描边颜色`/`线条描边宽度`/`线条描边透明度`、`应用样式`、`删除线条`；形状的填充控件对纯描边线条不适用。后端 `normalize_style` 要求 `#rrggbb`、0–100 透明度、>0 且 ≤100pt 线宽。
+- 勾选 3（部分自动化、人工未验证）：线条是内容流路径对象。`line_edit.rs` 只调用 `page.objects_mut().add_object`/`remove_object_at_index`/`insert_object_at_index`，不调用任何 annotation API；`AnnotationKind` 没有 line 变体，`list_annotations`/`AnnotationPanel` 不包含线条。`a_straight_line_is_page_content_and_never_an_annotation` 断言创建后与重开后 `list_annotations` 为空、输出页 `/Annots` 无 `/Subtype /Line`、内容流有 `m`/`l`/`S` 且端点为 `100 492`→`400 492`、保存重开像素中点红/线外白；`saved_lines_use_display_geometry_on_rotated_and_cropped_pages` 覆盖 90°/180°/270° + `[50 80 450 680]` CropBox 三页，保存重开后各自显示中点命中、线外为白。独立临时探针（已删除、未提交）另用 0° + `[100 100 500 700]` CropBox 页绘制直线与 70% 透明度箭头：保存后源文件字节与 **mtime 均未变**，输出可被独立 lopdf 解析且无 `/Line` 注释，重开后直线中点 (200,150) 与箭头头部 (292,303) 像素正确、线外/头外为白，重开后 `page_line_objects` 为空（符合“重开后是普通路径”的限制）。**未人工验证**：Preview、Chrome、Adobe Acrobat Reader 中的实际可见性与样式；本机未安装 Acrobat，Preview GUI 会话不可用，保持未勾选。
+- 勾选 4（无注释线程/标准删除语义的说明）：`line_edit.rs` 模块文档明确写明线条/箭头是 page path object，“no annotation thread, no annotation selection and no standard comment delete semantics”，不出现在 `list_annotations`；`AnnotationPanel` 空状态与属性面板均有中文说明；删除只经 `delete_line_object`（内容对象移除，可撤销），不复用 `delete_annotation`。
+- 勾选 5（统一撤销/重做）：`EditAction::Line(LineEditAction)` 与 Box/Image/Field/FormStructure/Annotation 同栈；创建/变换/改样式/删除各 push 一条动作，快照含 `LineRecord` 与 detach 的 page objects。`rotating_restyling_and_deleting_a_line_are_undoable` 覆盖创建→旋转→改样式→删除的逐级 undo/redo（每步像素断言：撤销样式保留旋转、撤销变换移除旧足迹、撤销创建回到 revision 0 且不脏、重做恢复同一 id/几何/样式）；`undo_for`/`redo_for` 的 Line 走 `ensure_content_editable`（内容权限），与 Box/Image/FormStructure 同支，match 穷尽保证 Field/Annotation 分支未被覆盖。
+- 对象索引同步：`line_actions_keep_text_box_and_image_object_ranges_in_sync` 先插图片、再建线条与文本框，删除图片后线条/文本框仍可变换/编辑；撤销图片删除把对象插回后再次操作仍正确。`shift_object_indexes` 已扩展 `ObjectRef::Line`，并与 Box/Image 的 `start` 同步。
+- 保存与保真：无独立保存路径，只走 ticket 10 的 `save_document_with_progress`；`repeat_saves_do_not_duplicate_the_line_content` 断言两次保存后 `300 492 l` 与 ` S` 各只出现一次，移动后再保存只有新端点 `300 392 l` 且旧线段消失；源文件字节不变（探针另验证 mtime 不变）；箭头保存后内容流含填充+描边与至少两条子路径，重开后头部命中、头外为白。无 `/NeedAppearances` 或额外注释对象。
+- 权限/只读：四个写命令在修改前调用 `ensure_content_editable`（PDFium `can_modify_document_content`）；`read_only_documents_refuse_line_changes_but_still_list_them` 用 `encrypted-owner-restrictions` fixture 断言创建/变换/改样式/删除均 `PermissionDenied`、列表可用、历史不脏、不可撤销；前端 `LineLayer` 在 `!canModifyContent || readOnly` 时隐藏工具条/属性面板/手柄并禁用拖动，`App.tsx` 传入 `permissions.canModifyContent && !readOnly`（与 ticket 46 合并后的单一 prop）。
+- 事件/刷新/错误：`documentEvents` 的 source 联合与白名单加入 `"line"`；`LineLayer` 成功后通知 `source:"line"`、忽略自身通知，其他 source（撤销/其他工具）触发重取；`documentEvents.test.ts` 与 `LineLayer.test.tsx` 覆盖透传、重取；后端错误映射为中文（权限、文档关闭、页码、位置/样式、绘制、通用“线条操作失败，请重试。”），失败不插入半成品。
+- 隐私/依赖/文案/seam：新增代码无网络、无遥测、无上传；合入 integration 后相对 `5f308dd` 无依赖/锁文件/`tauri.conf.json` 变化（已用 `git diff --name-only` 核对为 0）。新增 UI 文案均为中文。唯一 seam 是 Tauri 命令边界：`create_line_object`、`page_line_objects`、`transform_line_object`、`update_line_style`、`delete_line_object`，前端只经 `src/lib/backend.ts` 调用，`LineLayer` 无直接 `invoke`；测试全部通过命令函数与 fixture 驱动。`.gitignore` 的 `src-tauri/vendor/pdfium/` 改为无尾斜杠以忽略 `setup-native.sh` 可能创建的符号链接，仍匹配该目录。
+- 自动化验证（独立执行）：ticket worktree 合并后与 integration 合并后在 integration 树分别跑完整门禁，计数一致：`npm run typecheck` 通过；`npm test` **34 文件 / 350 项**全部通过（ticket 46 关闭时基线 32/328，本票新增 `LineLayer` 10、`lineGeometry` 11、`documentEvents` 1，共 +2 文件/+22 项）；`npm run build` 通过（59 modules）；`npm run test:e2e` **12 项**通过；`cargo fmt --check` 通过；`cargo clippy -- -D warnings` exit 0（仅 vendored `pdfium-render` 4 条既有 dead_code warning，未用 `--all-targets`）；`cargo test` **249 通过 / 0 失败 / 3 ignored（26 个 integration suite + doc-tests）**，其中 `lines.rs` 8 项全部通过（基线 241/0/3，本票 +8）。回归套件同时通过：`form_creation` 11、`form_fields` 10、`print_export` 11、`stamps` 9、`note_ink` 16、`shapes` 8、`image_insertion` 13、`text_markup` 9、`save_document` 22、`text_boxes` 11、`open_render` 13；`App.test.tsx` 已注册 `page_line_objects` 空实现。
+- 已知限制/带入后续：
+  - 只有**本次编辑会话创建**的线条可选中/编辑：`page_line_objects` 只返回 `EditSession` 记录；保存重开后线条是普通内容路径，不再列出、不可选中，也不暴露外部 PDF 已有路径（避免误认）。独立探针已确认重开后列表为空。若后续要求重开后编辑，需要内容对象私有标记或旁路记录，本次未做。
+  - 线条/箭头没有注释线程、回复、作者、创建时间与标准注释删除语义（规格要求）；删除只能撤销，不能像注释那样在列表中管理。
+  - “缩放”实现为拖动端点改变长度，没有矩形/椭圆式的外接框按比例缩放手柄；旋转绕线段中点、Shift 吸附 15°。属性面板位于页面覆盖层而非注释侧栏，因为线条不是注释；控件语义与形状的描边一致（无填充）。
+  - 箭头头部公式在前端预览与后端内容流各实现一次（`clamp(width*4, 8, 24)`、半宽 0.35×长度，短于线长时夹取），两侧测试锁定同一数值，后续修改必须同步。
+  - 多覆盖层同时显示时的视觉层叠（`ShapeLayer` → `StampLayer` → `LineLayer`）与高倍缩放下箭头接头/线帽未人工检查。
+  - **人工项未完成**：Preview、Chrome、Adobe Acrobat Reader 的跨阅读器矩阵；真实 Tauri 窗口中的绘制/拖动/旋转/端点手感。与 ticket 14/20 的对应勾选一致。

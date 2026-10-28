@@ -25,6 +25,7 @@ import {
 } from "../lib/pageGeometry";
 import type { PageRender, ZoomMode } from "../lib/useDocumentViewer";
 import { FormLayer } from "./FormLayer";
+import { LineLayer } from "./LineLayer";
 import { PageImageLayer } from "./PageImageLayer";
 import { PageTextLayer } from "./PageTextLayer";
 import { ShapeLayer } from "./ShapeLayer";
@@ -426,7 +427,10 @@ export function PageSurface({
   surfaceRef: RefObject<HTMLDivElement | null>;
   /** Permission Restrictions allow filling existing form fields. */
   canFillForms?: boolean;
-  /** Permission Restrictions allow creating and changing form fields. */
+  /**
+   * Permission Restrictions allow changing page content: form field
+   * structure, lines and arrows, and other content-object edits.
+   */
   canModifyContent?: boolean;
   /** Widget to focus after the caller navigated to its page. */
   formFocusFieldId?: string | null;
@@ -551,6 +555,18 @@ export function PageSurface({
           onPlaced={onStampPlaced}
           onArmedChange={onArmedStampChange}
           onChanged={onAnnotationsChanged}
+        />
+      )}
+      {info && (
+        <LineLayer
+          key={`${documentId}:${pageIndex}:lines`}
+          documentId={documentId}
+          pageIndex={pageIndex}
+          pageWidth={info.width}
+          pageHeight={info.height}
+          scale={scale}
+          readOnly={readOnly}
+          canModifyContent={canModifyContent}
         />
       )}
     </div>

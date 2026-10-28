@@ -21,6 +21,20 @@ describe("document change events", () => {
     unsubscribe();
   });
 
+  it("passes the line source used by the content-object overlay", () => {
+    const handler = vi.fn();
+    const unsubscribe = onDocumentChanged(handler);
+
+    notifyDocumentChanged({ documentId: "doc-1", pageIndex: 0, source: "line" });
+
+    expect(handler).toHaveBeenCalledWith({
+      documentId: "doc-1",
+      pageIndex: 0,
+      source: "line",
+    });
+    unsubscribe();
+  });
+
   it("omits a missing or unknown source", () => {
     const handler = vi.fn();
     const unsubscribe = onDocumentChanged(handler);

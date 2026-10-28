@@ -37,7 +37,11 @@ type PrintScale = "fit" | "actual";
 
 interface PrintPage {
   pageIndex: number;
-  pngBase64: string;
+  /**
+   * Object URL for the page's compressed PNG Blob. The print surface never
+   * embeds base64, and the Blob is released when the print job ends.
+   */
+  imageUrl: string;
   /** Display size in points (CSS pixels at 72 DPI). */
   width: number;
   height: number;
@@ -59,7 +63,9 @@ const EXPORT_ERROR_MESSAGES: Partial<Record<CommandError["code"], string>> = {
   permission_denied: "没有写入该位置的权限，请选择其他位置。",
   file_write_failed: "无法写入文件，请检查目标位置与磁盘空间。",
   page_out_of_range: "页面不存在，文档可能已关闭。",
-  invalid_argument: "不能覆盖源 PDF 文件，请选择其他位置。",
+  export_target_is_source: "不能覆盖源 PDF 文件，请选择其他位置。",
+  export_target_is_output: "不能覆盖当前输出 PDF 文件，请选择其他位置。",
+  invalid_argument: "导出参数无效，请检查后重试。",
 };
 
 const PRINT_ERROR_MESSAGES: Partial<Record<CommandError["code"], string>> = {
@@ -102,33 +108,74 @@ function printPageBoxSize(
   return { width: page.width, height: page.height };
 }
 /**
- * Decodes every print bitmap before the native print operation starts, so the
- * first page never prints blank. Browsers without `HTMLImageElement.decode`
- * (the jsdom test environment) skip this step.
+ * Converts one rendered page into a Blob object URL. The base64 payload is
+ * released as soon as the Blob exists, so the print surface never embeds it.
  */
-async function decodePrintImages(pages: PrintPage[]): Promise<void> {
+function printBitmapUrl(pngBase64: string): string {
+  const binary = atob(pngBase64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return URL.createObjectURL(new Blob([bytes], { type: "image/png" }));
+}
+
+/**
+ * Decodes one prepared print bitmap before the next page is prepared, so the
+ * print job never has every page's decoded RGBA in memory at once. Browsers
+ * without `HTMLImageElement.decode` (the jsdom test environment) skip this
+ * step. A decode failure keeps the page in the surface: the platform can still
+ * render it from the Blob when it reaches that page.
+ */
+async function decodePrintImage(imageUrl: string): Promise<void> {
   if (typeof Image === "undefined") {
     return;
   }
-  const probe = new Image();
-  if (typeof probe.decode !== "function") {
+  const image = new Image();
+  if (typeof image.decode !== "function") {
     return;
   }
-  await Promise.all(
-    pages.map(
-      (page) =>
-        new Promise<void>((resolve) => {
-          const image = new Image();
-          image.onload = () => resolve();
-          image.onerror = () => resolve();
-          image.src = `data:image/png;base64,${page.pngBase64}`;
-          image.decode().then(
-            () => resolve(),
-            () => resolve(),
-          );
-        }),
-    ),
-  );
+  image.src = imageUrl;
+  try {
+    await image.decode();
+  } catch {
+    // Printing proceeds; a page that cannot be decoded here may still print.
+  }
+}
+
+/**
+ * Renders one page at print resolution, decodes it and releases its base64
+ * payload. Returns null when the job was cancelled, in which case any object
+ * URL it created has already been revoked.
+ */
+async function preparePrintPage(
+  documentId: string,
+  pageIndex: number,
+  isCancelled: () => boolean,
+): Promise<PrintPage | null> {
+  const [image, info] = await Promise.all([
+    renderPage(documentId, pageIndex, PRINT_DPI / 72),
+    pageInfo(documentId, pageIndex),
+  ]);
+  if (isCancelled()) {
+    return null;
+  }
+  const imageUrl = printBitmapUrl(image.pngBase64);
+  if (isCancelled()) {
+    URL.revokeObjectURL(imageUrl);
+    return null;
+  }
+  await decodePrintImage(imageUrl);
+  if (isCancelled()) {
+    URL.revokeObjectURL(imageUrl);
+    return null;
+  }
+  return {
+    pageIndex,
+    imageUrl,
+    width: info.width,
+    height: info.height,
+  };
 }
 
 /**
@@ -140,10 +187,14 @@ async function decodePrintImages(pages: PrintPage[]): Promise<void> {
  * deny it.
  *
  * Printing renders the selected Pages into a hidden print-only surface (one
- * bitmap per Page, a `@page` box in points and a page break between Pages).
+ * PNG Blob per Page, a `@page` box in points and a page break between Pages).
  * The platform dialog therefore offers the correct page range, orientation
- * and scaling options. Preparation reports progress and can be cancelled,
- * which keeps large Documents usable.
+ * and scaling options. Pages are prepared and decoded strictly one at a time:
+ * the print DOM holds object URLs, never base64, and at most one page's
+ * decoded RGBA bitmap exists during preparation, so decoded pixel memory is
+ * one page regardless of whether the job has 2 or 2000 Pages. Preparation
+ * reports progress and can be cancelled, which releases every prepared Blob
+ * and the print surface.
  */
 export const PrintExport = forwardRef<PrintExportHandle, PrintExportProps>(
   function PrintExport({ document, pageIndex }, ref) {
@@ -168,11 +219,24 @@ export const PrintExport = forwardRef<PrintExportHandle, PrintExportProps>(
     const [printPages, setPrintPages] = useState<PrintPage[] | null>(null);
     const [printSize, setPrintSize] = useState<PrintSize | null>(null);
     const cancelPrintRef = useRef(false);
+    /** Invalidates a preparation loop when the user cancels or starts over. */
+    const preparationGenerationRef = useRef(0);
+    /** Object URLs alive in the print surface or still being prepared. */
+    const livePrintUrlsRef = useRef<Set<string>>(new Set());
     const preparing = progress !== null;
+
+    function releaseAllPrintUrls() {
+      for (const url of livePrintUrlsRef.current) {
+        URL.revokeObjectURL(url);
+      }
+      livePrintUrlsRef.current.clear();
+    }
 
     // A new Document invalidates everything prepared for the previous one.
     useEffect(() => {
       cancelPrintRef.current = true;
+      preparationGenerationRef.current += 1;
+      releaseAllPrintUrls();
       setDialog(null);
       setNotice(null);
       setDialogError(null);
@@ -184,9 +248,11 @@ export const PrintExport = forwardRef<PrintExportHandle, PrintExportProps>(
       setCustomFrom("1");
       setCustomTo(String(document.pageCount));
       // Closing the Document unmounts this component; stop any preparation
-      // loop that is still awaiting a page render.
+      // loop that is still awaiting a page render and release its bitmaps.
       return () => {
         cancelPrintRef.current = true;
+        preparationGenerationRef.current += 1;
+        releaseAllPrintUrls();
       };
     }, [document.documentId, document.pageCount]);
 
@@ -210,6 +276,7 @@ export const PrintExport = forwardRef<PrintExportHandle, PrintExportProps>(
         return;
       }
       const clear = () => {
+        releaseAllPrintUrls();
         setPrintPages(null);
         setPrintSize(null);
       };
@@ -260,9 +327,13 @@ export const PrintExport = forwardRef<PrintExportHandle, PrintExportProps>(
 
     function cancelPreparation() {
       cancelPrintRef.current = true;
+      preparationGenerationRef.current += 1;
+      releaseAllPrintUrls();
       setProgress(null);
       setDialogError(null);
       setDialog(null);
+      setPrintPages(null);
+      setPrintSize(null);
     }
 
     async function startPrint() {
@@ -272,34 +343,49 @@ export const PrintExport = forwardRef<PrintExportHandle, PrintExportProps>(
         return;
       }
 
+      // Invalidate any earlier preparation loop and release its bitmaps before
+      // starting over.
+      preparationGenerationRef.current += 1;
+      const generation = preparationGenerationRef.current;
       cancelPrintRef.current = false;
+      releaseAllPrintUrls();
       setDialogError(null);
       setPrintPages(null);
       setPrintSize(null);
       setProgress({ done: 0, total: indices.length });
+      const isCancelled = () =>
+        cancelPrintRef.current ||
+        preparationGenerationRef.current !== generation;
 
       const pages: PrintPage[] = [];
       try {
+        // Preparation is deliberately sequential: at most one page's base64
+        // payload and one decoded RGBA bitmap exist at a time, so a 2000-page
+        // job never decodes every page at once. The backend serializes renders
+        // on the document registry anyway, so batching would only multiply
+        // peak decoded memory without making the job faster.
         for (const [offset, index] of indices.entries()) {
-          const [image, info] = await Promise.all([
-            renderPage(document.documentId, index, PRINT_DPI / 72),
-            pageInfo(document.documentId, index),
-          ]);
-          if (cancelPrintRef.current) {
+          if (isCancelled()) {
             return;
           }
-          pages.push({
-            pageIndex: index,
-            pngBase64: image.pngBase64,
-            width: info.width,
-            height: info.height,
-          });
+          const page = await preparePrintPage(
+            document.documentId,
+            index,
+            isCancelled,
+          );
+          if (!page) {
+            return;
+          }
+          livePrintUrlsRef.current.add(page.imageUrl);
+          pages.push(page);
           setProgress({ done: offset + 1, total: indices.length });
         }
       } catch (error) {
-        if (cancelPrintRef.current) {
+        // A stale loop must not release bitmaps owned by a newer print job.
+        if (isCancelled()) {
           return;
         }
+        releaseAllPrintUrls();
         setProgress(null);
         setDialogError(
           describeError(toCommandError(error), PRINT_ERROR_MESSAGES, "打印准备失败"),
@@ -307,7 +393,7 @@ export const PrintExport = forwardRef<PrintExportHandle, PrintExportProps>(
         return;
       }
 
-      if (cancelPrintRef.current || pages.length === 0) {
+      if (isCancelled() || pages.length === 0) {
         return;
       }
 
@@ -321,11 +407,18 @@ export const PrintExport = forwardRef<PrintExportHandle, PrintExportProps>(
       });
 
       try {
-        await decodePrintImages(pages);
         await printDocument(document.documentId);
+        if (isCancelled()) {
+          return;
+        }
         setNotice(`已准备打印：${pages.length} 页`);
         setDialog(null);
       } catch (error) {
+        // A stale job must not clear the surface of a newer print job.
+        if (isCancelled()) {
+          return;
+        }
+        releaseAllPrintUrls();
         setPrintPages(null);
         setPrintSize(null);
         setDialogError(
@@ -646,7 +739,7 @@ export const PrintExport = forwardRef<PrintExportHandle, PrintExportProps>(
                     }}
                   >
                     <img
-                      src={`data:image/png;base64,${page.pngBase64}`}
+                      src={page.imageUrl}
                       alt=""
                       className={
                         printScale === "actual"
