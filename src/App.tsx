@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { DocumentAccess } from "./components/DocumentAccess";
 import { AnnotationPanel } from "./components/AnnotationPanel";
+import { StampPanel } from "./components/StampPanel";
 import { DocumentToolbar, PageSurface, ThumbnailRail } from "./components/PageViewer";
 import {
   PrintExport,
@@ -29,6 +30,7 @@ import {
   type CommandErrorCode,
   type DocumentView,
   type FormFieldView,
+  type StampKind,
 } from "./lib/backend";
 import { scaleToPercent } from "./lib/pageGeometry";
 import { useAnnotations } from "./lib/useAnnotations";
@@ -129,6 +131,7 @@ export function App() {
   const annotations = useAnnotations(openDocumentView?.documentId ?? null);
   const [selectedAnnotation, setSelectedAnnotation] =
     useState<AnnotationView | null>(null);
+  const [armedStamp, setArmedStamp] = useState<StampKind | null>(null);
 
   // A list refresh can remove the selected annotation (delete, undo). Drop the
   // outline with it; the panel clears its property controls the same way.
@@ -144,13 +147,20 @@ export function App() {
 
   useEffect(() => {
     setSelectedAnnotation(null);
+    setArmedStamp(null);
   }, [openDocumentView?.documentId]);
 
   function selectAnnotation(annotation: AnnotationView | null) {
     setSelectedAnnotation(annotation);
+    setArmedStamp(null);
     if (annotation) {
       viewer.goToPage(annotation.pageIndex);
     }
+  }
+
+  function handleStampPlaced(annotation: AnnotationView) {
+    setArmedStamp(null);
+    setSelectedAnnotation(annotation);
   }
 
   // Required-field validation navigates to the page of the first empty widget
@@ -576,7 +586,11 @@ export function App() {
                     canAnnotate={open.document.permissions.canAnnotate}
                     annotations={annotations.annotations}
                     selectedAnnotation={selectedAnnotation}
+                    armedStamp={armedStamp}
                     onSelectAnnotation={selectAnnotation}
+                    onStampPlaced={handleStampPlaced}
+                    onArmedStampChange={setArmedStamp}
+                    onAnnotationsChanged={() => void annotations.reload()}
                     surfaceRef={viewer.surfaceRef}
                     canFillForms={
                       open.document.permissions.canFillForms &&
@@ -593,17 +607,25 @@ export function App() {
                   />
                 </div>
               </div>
-              <AnnotationPanel
-                documentId={open.document.documentId}
-                annotations={annotations.annotations}
-                selectedName={selectedAnnotation?.name ?? null}
-                loading={annotations.status === "loading"}
-                error={annotations.error?.message ?? null}
-                canAnnotate={open.document.permissions.canAnnotate}
-                readOnly={open.document.readOnly}
-                onSelect={selectAnnotation}
-                onChanged={() => void annotations.reload()}
-              />
+              <div className="annotation-column">
+                <StampPanel
+                  armed={armedStamp}
+                  canAnnotate={open.document.permissions.canAnnotate}
+                  readOnly={open.document.readOnly}
+                  onPick={setArmedStamp}
+                />
+                <AnnotationPanel
+                  documentId={open.document.documentId}
+                  annotations={annotations.annotations}
+                  selectedName={selectedAnnotation?.name ?? null}
+                  loading={annotations.status === "loading"}
+                  error={annotations.error?.message ?? null}
+                  canAnnotate={open.document.permissions.canAnnotate}
+                  readOnly={open.document.readOnly}
+                  onSelect={selectAnnotation}
+                  onChanged={() => void annotations.reload()}
+                />
+              </div>
             </div>
           </section>
         )}
