@@ -306,7 +306,7 @@ fn assert_no_need_appearances(document: &lopdf::Document) {
 }
 
 fn assert_no_comment_thread(annotation: &lopdf::Dictionary) {
-    for key in [b"Popup".as_slice(), b"Parent", b"IRT"] {
+    for key in [b"Popup".as_slice(), b"Parent", b"IRT", b"CL"] {
         assert!(
             annotation.get(key).is_err(),
             "a callout box must not carry /{}: {annotation:?}",
