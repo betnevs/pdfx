@@ -584,7 +584,6 @@ export function App() {
                     render={viewer.render}
                     readOnly={open.document.readOnly}
                     canAnnotate={open.document.permissions.canAnnotate}
-                    canModifyContent={open.document.permissions.canModifyContent}
                     annotations={annotations.annotations}
                     selectedAnnotation={selectedAnnotation}
                     armedStamp={armedStamp}
@@ -595,6 +594,10 @@ export function App() {
                     surfaceRef={viewer.surfaceRef}
                     canFillForms={
                       open.document.permissions.canFillForms &&
+                      !open.document.readOnly
+                    }
+                    canModifyContent={
+                      open.document.permissions.canModifyContent &&
                       !open.document.readOnly
                     }
                     formFocusFieldId={formFocusFieldId}

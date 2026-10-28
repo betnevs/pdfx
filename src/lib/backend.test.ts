@@ -10,6 +10,8 @@ import {
   choosePdfFile,
   chooseSaveFile,
   closeDocument,
+  createFormTextField,
+  deleteFormTextField,
   exportPage,
   extractTextLayer,
   fillFormField,
@@ -33,6 +35,7 @@ import {
   setFullscreen,
   setWindowTitle,
   toCommandError,
+  updateFormTextField,
 } from "./backend";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -420,12 +423,26 @@ describe("backend command seam", () => {
     }
   });
 
+  it("recognizes the page export target error codes", () => {
+    for (const code of [
+      "export_target_is_source",
+      "export_target_is_output",
+    ] as const) {
+      expect(toCommandError({ code, message: "detail" })).toEqual({
+        code,
+        message: "detail",
+      });
+    }
+  });
+
   it("recognizes the form error codes", () => {
     for (const code of [
       "form_field_not_found",
       "form_field_read_only",
       "form_fill_not_permitted",
       "form_value_invalid",
+      "form_field_name_invalid",
+      "form_field_name_duplicate",
     ] as const) {
       expect(toCommandError({ code, message: "detail" })).toEqual({
         code,
@@ -484,6 +501,56 @@ describe("backend command seam", () => {
       documentId: "doc-1",
       fieldId: "0:1",
       value: { kind: "text", text: "Ada" },
+    });
+
+    const createRequest = {
+      rect: { x: 72, y: 100, width: 180, height: 24 },
+      name: null,
+      tooltip: null,
+      required: false,
+      multiline: false,
+      fontSize: 12,
+    };
+    const createResult = {
+      fieldId: "new:1",
+      fields: [field],
+      history: result.history,
+    };
+    invokeMock.mockResolvedValue(createResult);
+    await expect(
+      createFormTextField("doc-1", 0, createRequest),
+    ).resolves.toEqual(createResult);
+    expect(invokeMock).toHaveBeenCalledWith("create_form_text_field", {
+      documentId: "doc-1",
+      pageIndex: 0,
+      request: createRequest,
+    });
+
+    const updateRequest = {
+      name: "customer_name",
+      tooltip: "请输入客户姓名",
+      required: true,
+      multiline: false,
+      fontSize: 16,
+    };
+    const structureResult = { fields: [field], history: result.history };
+    invokeMock.mockResolvedValue(structureResult);
+    await expect(
+      updateFormTextField("doc-1", "new:1", updateRequest),
+    ).resolves.toEqual(structureResult);
+    expect(invokeMock).toHaveBeenCalledWith("update_form_text_field", {
+      documentId: "doc-1",
+      fieldId: "new:1",
+      request: updateRequest,
+    });
+
+    invokeMock.mockResolvedValue(structureResult);
+    await expect(
+      deleteFormTextField("doc-1", "new:1"),
+    ).resolves.toEqual(structureResult);
+    expect(invokeMock).toHaveBeenCalledWith("delete_form_text_field", {
+      documentId: "doc-1",
+      fieldId: "new:1",
     });
   });
 

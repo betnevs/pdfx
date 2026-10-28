@@ -395,7 +395,6 @@ export function PageSurface({
   render,
   readOnly,
   canAnnotate,
-  canModifyContent = false,
   annotations,
   selectedAnnotation,
   armedStamp,
@@ -405,6 +404,7 @@ export function PageSurface({
   onAnnotationsChanged,
   surfaceRef,
   canFillForms = false,
+  canModifyContent = false,
   formFocusFieldId = null,
   onFormFocusHandled,
   onSelectPage,
@@ -417,8 +417,6 @@ export function PageSurface({
   render: PageRender;
   readOnly: boolean;
   canAnnotate: boolean;
-  /** Permission Restrictions allow changing page content (lines, images…). */
-  canModifyContent?: boolean;
   annotations: AnnotationView[];
   selectedAnnotation: AnnotationView | null;
   armedStamp: StampKind | null;
@@ -429,6 +427,11 @@ export function PageSurface({
   surfaceRef: RefObject<HTMLDivElement | null>;
   /** Permission Restrictions allow filling existing form fields. */
   canFillForms?: boolean;
+  /**
+   * Permission Restrictions allow changing page content: form field
+   * structure, lines and arrows, and other content-object edits.
+   */
+  canModifyContent?: boolean;
   /** Widget to focus after the caller navigated to its page. */
   formFocusFieldId?: string | null;
   onFormFocusHandled?: () => void;
@@ -515,6 +518,7 @@ export function PageSurface({
             pageHeight={info.height}
             scale={scale}
             canFillForms={canFillForms}
+            canModifyContent={canModifyContent}
             focusFieldId={formFocusFieldId}
             onFocusHandled={onFormFocusHandled}
             onSelectPage={onSelectPage}

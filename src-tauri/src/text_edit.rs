@@ -586,6 +586,7 @@ pub(crate) enum EditAction {
     Image(ImageEditAction),
     Line(LineEditAction),
     Field(FieldEditAction),
+    FormStructure(FormStructureEditAction),
     Annotation(Box<AnnotationEditAction>),
 }
 
@@ -612,6 +613,22 @@ pub(crate) struct FieldEditAction {
     pub(crate) after_state: u64,
     pub(crate) before: FieldValueSnapshot,
     pub(crate) after: FieldValueSnapshot,
+}
+
+/// One committed change to a form field this session created.
+///
+/// Creation, property updates and deletion all use the same shape: `before`
+/// is `None` when the action created the field, `after` is `None` when it
+/// removed the field. Created fields do not exist in the PDFium document until
+/// the next save, so the action snapshots the whole session record (geometry,
+/// properties, value) and undo/redo restores it directly.
+pub(crate) struct FormStructureEditAction {
+    pub(crate) uid: u64,
+    pub(crate) page_index: u32,
+    pub(crate) before_state: u64,
+    pub(crate) after_state: u64,
+    pub(crate) before: Option<crate::form_create::CreatedFieldSnapshot>,
+    pub(crate) after: Option<crate::form_create::CreatedFieldSnapshot>,
 }
 
 /// One committed annotation change.
@@ -725,6 +742,9 @@ pub struct EditSession {
     /// Boxes rather than in the annotation dictionary.
     pub(crate) lines: HashMap<u32, Vec<crate::line_edit::LineRecord>>,
     pub(crate) next_line_id: u64,
+    /// Text fields created by this session; materialized into the saved output
+    /// by the save pipeline and merged into discovery until then.
+    pub(crate) created_fields: crate::form_create::CreatedFieldStore,
     pub(crate) undo_stack: Vec<EditAction>,
     pub(crate) redo_stack: Vec<EditAction>,
     /// Id of the document state currently on the page.
@@ -2026,6 +2046,83 @@ fn push_action(
     entry.edit.current_state = after_state;
 }
 
+/// Appends a committed created-field change (creation, property update,
+/// deletion or value) to the unified undo stack.
+pub(crate) fn push_form_structure_action(
+    entry: &mut OpenDocument,
+    uid: u64,
+    page_index: u32,
+    before: Option<crate::form_create::CreatedFieldSnapshot>,
+    after: Option<crate::form_create::CreatedFieldSnapshot>,
+) -> EditHistoryView {
+    let before_state = entry.edit.current_state;
+    let after_state = entry.edit.next_state + 1;
+    entry.edit.next_state = after_state;
+    entry
+        .edit
+        .undo_stack
+        .push(EditAction::FormStructure(FormStructureEditAction {
+            uid,
+            page_index,
+            before_state,
+            after_state,
+            before,
+            after,
+        }));
+    entry.edit.redo_stack.clear();
+    entry.edit.current_state = after_state;
+    entry.edit.history_view()
+}
+
+/// Applies one side of a created-field action. `None` means the field did not
+/// exist on that side, so it is removed from the session store.
+fn apply_form_structure(
+    entry: &mut OpenDocument,
+    uid: u64,
+    target: Option<&crate::form_create::CreatedFieldSnapshot>,
+) {
+    match target {
+        Some(snapshot) => entry.edit.created_fields.restore(snapshot.field.clone()),
+        None => {
+            entry.edit.created_fields.remove(uid);
+        }
+    }
+}
+
+fn undo_form_structure(
+    entry: &mut OpenDocument,
+    action: FormStructureEditAction,
+) -> Result<EditStepView, CommandError> {
+    apply_form_structure(entry, action.uid, action.before.as_ref());
+    let page_index = action.page_index;
+    entry.edit.current_state = action.before_state;
+    entry
+        .edit
+        .redo_stack
+        .push(EditAction::FormStructure(action));
+    Ok(EditStepView {
+        page_index,
+        history: entry.edit.history_view(),
+    })
+}
+
+fn redo_form_structure(
+    entry: &mut OpenDocument,
+    action: FormStructureEditAction,
+) -> Result<EditStepView, CommandError> {
+    apply_form_structure(entry, action.uid, action.after.as_ref());
+    let page_index = action.page_index;
+    entry.edit.current_state = action.after_state;
+    entry
+        .edit
+        .undo_stack
+        .push(EditAction::FormStructure(action));
+    Ok(EditStepView {
+        page_index,
+        history: entry.edit.history_view(),
+    })
+}
+
 /// Appends a committed annotation change to the unified undo stack.
 pub(crate) fn push_annotation_action(
     entry: &mut OpenDocument,
@@ -2110,13 +2207,14 @@ fn redo_field(
 
 fn undo_for(entry: &mut OpenDocument) -> Result<EditStepView, CommandError> {
     // Check the permission of the action that is about to be applied without
-    // popping it: a Box or Image action needs content permission, a Field
-    // action needs form-filling permission, an annotation action needs
-    // annotation permission.
+    // popping it: a Box, Image, Line or created-field action needs content
+    // permission, a Field action needs form-filling permission, an annotation
+    // action needs annotation permission.
     match entry.edit.undo_stack.last() {
-        Some(EditAction::Box(_)) | Some(EditAction::Image(_)) | Some(EditAction::Line(_)) => {
-            ensure_content_editable(&entry.document)?
-        }
+        Some(EditAction::Box(_))
+        | Some(EditAction::Image(_))
+        | Some(EditAction::Line(_))
+        | Some(EditAction::FormStructure(_)) => ensure_content_editable(&entry.document)?,
         Some(EditAction::Field(_)) => crate::form::ensure_forms_editable(&entry.document)?,
         Some(EditAction::Annotation(_)) => ensure_annotation_editable(&entry.document)?,
         None => {
@@ -2134,6 +2232,7 @@ fn undo_for(entry: &mut OpenDocument) -> Result<EditStepView, CommandError> {
         EditAction::Image(action) => crate::image_edit::undo_image(entry, action),
         EditAction::Line(action) => crate::line_edit::undo_line(entry, action),
         EditAction::Field(action) => undo_field(entry, action),
+        EditAction::FormStructure(action) => undo_form_structure(entry, action),
         EditAction::Annotation(action) => undo_annotation(entry, action),
     }
 }
@@ -2215,13 +2314,14 @@ fn undo_box(
 
 fn redo_for(entry: &mut OpenDocument) -> Result<EditStepView, CommandError> {
     // Check the permission of the action that is about to be applied without
-    // popping it: a Box or Image action needs content permission, a Field
-    // action needs form-filling permission, an annotation action needs
-    // annotation permission.
+    // popping it: a Box, Image, Line or created-field action needs content
+    // permission, a Field action needs form-filling permission, an annotation
+    // action needs annotation permission.
     match entry.edit.redo_stack.last() {
-        Some(EditAction::Box(_)) | Some(EditAction::Image(_)) | Some(EditAction::Line(_)) => {
-            ensure_content_editable(&entry.document)?
-        }
+        Some(EditAction::Box(_))
+        | Some(EditAction::Image(_))
+        | Some(EditAction::Line(_))
+        | Some(EditAction::FormStructure(_)) => ensure_content_editable(&entry.document)?,
         Some(EditAction::Field(_)) => crate::form::ensure_forms_editable(&entry.document)?,
         Some(EditAction::Annotation(_)) => ensure_annotation_editable(&entry.document)?,
         None => {
@@ -2239,6 +2339,7 @@ fn redo_for(entry: &mut OpenDocument) -> Result<EditStepView, CommandError> {
         EditAction::Image(action) => crate::image_edit::redo_image(entry, action),
         EditAction::Line(action) => crate::line_edit::redo_line(entry, action),
         EditAction::Field(action) => redo_field(entry, action),
+        EditAction::FormStructure(action) => redo_form_structure(entry, action),
         EditAction::Annotation(action) => redo_annotation(entry, action),
     }
 }
