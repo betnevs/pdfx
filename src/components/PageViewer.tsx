@@ -27,6 +27,7 @@ import type { PageRender, ZoomMode } from "../lib/useDocumentViewer";
 import { EraserLayer } from "./EraserLayer";
 import { FormLayer } from "./FormLayer";
 import { FreeTextLayer } from "./FreeTextLayer";
+import { LineLayer } from "./LineLayer";
 import { PageImageLayer } from "./PageImageLayer";
 import { PageTextLayer } from "./PageTextLayer";
 import { ShapeLayer } from "./ShapeLayer";
@@ -405,6 +406,7 @@ export function PageSurface({
   onAnnotationsChanged,
   surfaceRef,
   canFillForms = false,
+  canModifyContent = false,
   formFocusFieldId = null,
   onFormFocusHandled,
   onSelectPage,
@@ -427,6 +429,11 @@ export function PageSurface({
   surfaceRef: RefObject<HTMLDivElement | null>;
   /** Permission Restrictions allow filling existing form fields. */
   canFillForms?: boolean;
+  /**
+   * Permission Restrictions allow changing page content: form field
+   * structure, lines and arrows, and other content-object edits.
+   */
+  canModifyContent?: boolean;
   /** Widget to focus after the caller navigated to its page. */
   formFocusFieldId?: string | null;
   onFormFocusHandled?: () => void;
@@ -513,6 +520,7 @@ export function PageSurface({
             pageHeight={info.height}
             scale={scale}
             canFillForms={canFillForms}
+            canModifyContent={canModifyContent}
             focusFieldId={formFocusFieldId}
             onFocusHandled={onFormFocusHandled}
             onSelectPage={onSelectPage}
@@ -562,6 +570,18 @@ export function PageSurface({
           onPlaced={onStampPlaced}
           onArmedChange={onArmedStampChange}
           onChanged={onAnnotationsChanged}
+        />
+      )}
+      {info && (
+        <LineLayer
+          key={`${documentId}:${pageIndex}:lines`}
+          documentId={documentId}
+          pageIndex={pageIndex}
+          pageWidth={info.width}
+          pageHeight={info.height}
+          scale={scale}
+          readOnly={readOnly}
+          canModifyContent={canModifyContent}
         />
       )}
       {info && (

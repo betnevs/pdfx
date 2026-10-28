@@ -1,12 +1,25 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { KeyboardEvent as ReactKeyboardEvent } from "react";
+import type {
+  KeyboardEvent as ReactKeyboardEvent,
+  PointerEvent as ReactPointerEvent,
+} from "react";
 
 import {
+  createFormField,
+  deleteFormField,
+  editHistory,
   fillFormField,
   formFields,
+  redoTextEdit,
   toCommandError,
+  undoTextEdit,
+  updateFormField,
+  type CreateFormFieldRequest,
+  type EditHistoryView,
+  type FormFieldRect,
   type FormFieldView,
   type FormFieldValueInput,
+  type UpdateFormFieldRequest,
 } from "../lib/backend";
 import { notifyDocumentChanged, onDocumentChanged } from "../lib/documentEvents";
 
@@ -21,7 +34,131 @@ const FILLABLE_KINDS: ReadonlySet<FormFieldView["kind"]> = new Set([
 
 const FORMS_DISABLED_REASON = "此文档不允许填写表单";
 const LOAD_FAILED_REASON = "表单字段无法载入";
+const STRUCTURE_DISABLED_REASON = "此文档的权限限制不允许创建表单字段";
 const REQUIRED_MARK = "必填";
+const DEFAULT_FIELD_WIDTH = 180;
+const DEFAULT_FIELD_HEIGHT = 24;
+/** Buttons and radio widgets are placed at this size unless dragged larger. */
+const SMALL_FIELD_SIZE = 16;
+/** A drag shorter than this in either direction uses the default size. */
+const MIN_DRAG_SIZE = 12;
+const DEFAULT_FONT_SIZE = 12;
+
+type CreateKind = "text" | "checkbox" | "radio";
+
+const TOOL_LABELS: Record<CreateKind, string> = {
+  text: "添加文本字段",
+  checkbox: "添加复选框",
+  radio: "添加单选按钮组",
+};
+
+interface PagePoint {
+  x: number;
+  y: number;
+}
+
+interface FieldPanelDraft {
+  fieldId: string;
+  kind: FormFieldView["kind"];
+  name: string;
+  tooltip: string;
+  required: boolean;
+  multiline: boolean;
+  /** Kept as text so an invalid entry can be reported instead of lost. */
+  fontSize: string;
+  checked: boolean;
+  /** Radio group option labels in display order. */
+  options: string[];
+  /** Radio group default option index. */
+  selectedIndex: number | null;
+}
+
+/** A radio group is one panel entry even though it has one widget per option. */
+function baseCreatedId(field: FormFieldView): string {
+  if (field.kind !== "radio" || !field.created) {
+    return field.fieldId;
+  }
+  const separator = field.fieldId.lastIndexOf(":");
+  return separator > 0 ? field.fieldId.slice(0, separator) : field.fieldId;
+}
+
+function draftFor(field: FormFieldView): FieldPanelDraft {
+  return {
+    fieldId: field.fieldId,
+    kind: field.kind,
+    name: field.name,
+    tooltip: field.tooltip ?? "",
+    required: field.required,
+    multiline: field.multiline,
+    fontSize: String(field.fontSize ?? DEFAULT_FONT_SIZE),
+    checked: field.checked,
+    options: [...field.options],
+    selectedIndex: field.selectedIndex,
+  };
+}
+
+function sameOptions(left: string[], right: string[]): boolean {
+  return (
+    left.length === right.length &&
+    left.every((option, index) => option === right[index])
+  );
+}
+
+function sameDraft(draft: FieldPanelDraft, field: FormFieldView): boolean {
+  if (
+    draft.name !== field.name ||
+    draft.tooltip.trim() !== (field.tooltip ?? "") ||
+    draft.required !== field.required
+  ) {
+    return false;
+  }
+  switch (field.kind) {
+    case "text":
+      return (
+        draft.multiline === field.multiline &&
+        Number.parseFloat(draft.fontSize) ===
+          (field.fontSize ?? DEFAULT_FONT_SIZE)
+      );
+    case "checkbox":
+      return draft.checked === field.checked;
+    case "radio":
+      return (
+        sameOptions(draft.options, field.options) &&
+        draft.selectedIndex === field.selectedIndex
+      );
+    default:
+      return true;
+  }
+}
+
+/** Clamps a proposed placement rectangle to the page and enforces the minimum. */
+function placementRect(
+  kind: CreateKind,
+  anchor: PagePoint,
+  current: PagePoint | null,
+  pageWidth: number,
+  pageHeight: number,
+): FormFieldRect {
+  const dragged =
+    current !== null &&
+    Math.abs(current.x - anchor.x) >= MIN_DRAG_SIZE &&
+    Math.abs(current.y - anchor.y) >= MIN_DRAG_SIZE;
+  const defaultWidth = kind === "text" ? DEFAULT_FIELD_WIDTH : SMALL_FIELD_SIZE;
+  const defaultHeight = kind === "text" ? DEFAULT_FIELD_HEIGHT : SMALL_FIELD_SIZE;
+  let width = dragged
+    ? Math.abs(current.x - anchor.x)
+    : Math.min(defaultWidth, pageWidth);
+  let height = dragged
+    ? Math.abs(current.y - anchor.y)
+    : Math.min(defaultHeight, pageHeight);
+  width = Math.min(width, pageWidth);
+  height = Math.min(height, pageHeight);
+  let x = dragged ? Math.min(anchor.x, current.x) : anchor.x;
+  let y = dragged ? Math.min(anchor.y, current.y) : anchor.y;
+  x = Math.min(Math.max(x, 0), Math.max(pageWidth - width, 0));
+  y = Math.min(Math.max(y, 0), Math.max(pageHeight - height, 0));
+  return { x, y, width, height };
+}
 
 export interface FormLayerProps {
   documentId: string;
@@ -31,6 +168,9 @@ export interface FormLayerProps {
   pageHeight: number;
   /** The document's Permission Restrictions allow changing form values. */
   canFillForms: boolean;
+  /** The document's Permission Restrictions allow changing content, which
+   * includes creating, editing and deleting Form Fields. */
+  canModifyContent?: boolean;
   /** Page render scale, used to size the overlaid text controls. */
   scale?: number;
   /** Widget to focus after the caller navigated to it. */
@@ -44,8 +184,20 @@ export interface FormLayerProps {
 }
 
 function labelFor(field: FormFieldView): string {
-  if (field.kind === "radio" && field.exportValue) {
-    return `${field.name}（${field.exportValue}）`;
+  if (field.kind === "radio") {
+    if (field.created && field.options.length > 0) {
+      const optionIndex = Number.parseInt(
+        field.fieldId.slice(field.fieldId.lastIndexOf(":") + 1),
+        10,
+      );
+      const option = field.options[optionIndex];
+      if (option) {
+        return `${field.name}（${option}）`;
+      }
+    }
+    if (field.exportValue) {
+      return `${field.name}（${field.exportValue}）`;
+    }
   }
   return field.name;
 }
@@ -70,6 +222,7 @@ export function FormLayer({
   pageWidth,
   pageHeight,
   canFillForms,
+  canModifyContent = true,
   scale = 1,
   focusFieldId,
   onFocusHandled,
@@ -82,6 +235,15 @@ export function FormLayer({
   const [notice, setNotice] = useState<string | null>(null);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [busyFieldId, setBusyFieldId] = useState<string | null>(null);
+  const [history, setHistory] = useState<EditHistoryView | null>(null);
+  const [placingKind, setPlacingKind] = useState<CreateKind | null>(null);
+  const [placementStart, setPlacementStart] = useState<PagePoint | null>(null);
+  const [placementCurrent, setPlacementCurrent] = useState<PagePoint | null>(null);
+  const [structureBusy, setStructureBusy] = useState(false);
+  const [selectedFieldId, setSelectedFieldId] = useState<string | null>(null);
+  const [panelDraft, setPanelDraft] = useState<FieldPanelDraft | null>(null);
+  const [panelError, setPanelError] = useState<string | null>(null);
+  const layerRef = useRef<HTMLDivElement>(null);
   const controls = useRef(new Map<string, HTMLElement>());
   const inFlight = useRef(new Set<string>());
   const loadSequence = useRef(0);
@@ -112,12 +274,58 @@ export function FormLayer({
     setNotice(null);
     setLoaded(false);
     setLoadError(null);
+    setPlacingKind(null);
+    setPlacementStart(null);
+    setPlacementCurrent(null);
+    setSelectedFieldId(null);
+    setPanelDraft(null);
+    setPanelError(null);
     reload();
     return () => {
       // Invalidate responses from the previous document.
       loadSequence.current += 1;
     };
-  }, [documentId, reload]);
+  }, [documentId, pageIndex, reload]);
+
+  // The shared history drives the form toolbar's undo/redo. It is refreshed
+  // after this layer's own commands (which return it directly) and whenever a
+  // different tool announces a change.
+  useEffect(() => {
+    let cancelled = false;
+    editHistory(documentId)
+      .then((next) => {
+        if (!cancelled) {
+          setHistory(next);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setHistory(null);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [documentId, pageIndex]);
+
+  // Drop the property panel when undo, redo or a deletion removes its field.
+  useEffect(() => {
+    setSelectedFieldId((current) =>
+      current !== null &&
+      fields.some(
+        (field) => field.created && baseCreatedId(field) === current,
+      )
+        ? current
+        : null,
+    );
+  }, [fields]);
+
+  useEffect(() => {
+    if (!selectedFieldId) {
+      setPanelDraft(null);
+      setPanelError(null);
+    }
+  }, [selectedFieldId]);
 
   // Undo, redo or another tool's edit can change field values; the tool that
   // made a form change already applied the command result, so its own event
@@ -125,8 +333,14 @@ export function FormLayer({
   useEffect(
     () =>
       onDocumentChanged((detail) => {
-        if (detail.documentId === documentId && detail.source !== "form") {
+        if (detail.documentId !== documentId) {
+          return;
+        }
+        if (detail.source !== "form") {
           reload();
+          editHistory(documentId)
+            .then((next) => setHistory(next))
+            .catch(() => {});
         }
       }),
     [documentId, reload],
@@ -183,6 +397,367 @@ export function FormLayer({
   const pageFields = fields.filter(
     (field) => field.pageIndex === pageIndex && FILLABLE_KINDS.has(field.kind),
   );
+  const createdPageFields = fields.filter(
+    (field) => field.pageIndex === pageIndex && field.created,
+  );
+  // One panel entry per created field; a radio group's option widgets collapse
+  // onto their base id.
+  const createdGroups = (() => {
+    const groups = new Map<string, FormFieldView>();
+    for (const field of createdPageFields) {
+      const base = baseCreatedId(field);
+      if (!groups.has(base)) {
+        groups.set(base, field);
+      }
+    }
+    return [...groups.entries()];
+  })();
+  const selectedField =
+    selectedFieldId === null
+      ? null
+      : (createdGroups.find(([base]) => base === selectedFieldId)?.[1] ??
+        null);
+
+  const pointFromEvent = (event: {
+    clientX: number;
+    clientY: number;
+  }): PagePoint | null => {
+    const layer = layerRef.current;
+    if (!layer || pageWidth <= 0 || pageHeight <= 0) {
+      return null;
+    }
+    const box = layer.getBoundingClientRect();
+    if (box.width <= 0 || box.height <= 0) {
+      return null;
+    }
+    const x = ((event.clientX - box.left) / box.width) * pageWidth;
+    const y = ((event.clientY - box.top) / box.height) * pageHeight;
+    return {
+      x: Math.min(Math.max(x, 0), pageWidth),
+      y: Math.min(Math.max(y, 0), pageHeight),
+    };
+  };
+
+  function togglePlacing(kind: CreateKind) {
+    if (!canModifyContent || structureBusy) {
+      return;
+    }
+    setPlacingKind((current) => (current === kind ? null : kind));
+    setPlacementStart(null);
+    setPlacementCurrent(null);
+    setNotice(null);
+    setPanelError(null);
+  }
+
+  function selectField(fieldId: string) {
+    const group = createdGroups.find(([base]) => base === fieldId);
+    const field =
+      group?.[1] ??
+      fields.find(
+        (candidate) => candidate.fieldId === fieldId && candidate.created,
+      );
+    if (!field) {
+      return;
+    }
+    const base = baseCreatedId(field);
+    const representative =
+      createdGroups.find(([candidate]) => candidate === base)?.[1] ?? field;
+    setSelectedFieldId(base);
+    setPanelDraft(draftFor(representative));
+    setPanelError(null);
+  }
+
+  function openPropertyPanel() {
+    if (selectedField) {
+      setSelectedFieldId(null);
+      return;
+    }
+    const first = createdGroups[0];
+    if (first) {
+      selectField(first[0]);
+    }
+  }
+
+  async function placeField(rect: FormFieldRect) {
+    const kind = placingKind;
+    if (kind === null) {
+      return;
+    }
+    setStructureBusy(true);
+    setNotice(null);
+    try {
+      const request: CreateFormFieldRequest =
+        kind === "text"
+          ? {
+              kind: "text",
+              rect,
+              name: null,
+              tooltip: null,
+              required: false,
+              multiline: false,
+              fontSize: DEFAULT_FONT_SIZE,
+            }
+          : kind === "checkbox"
+            ? {
+                kind: "checkbox",
+                rect,
+                name: null,
+                tooltip: null,
+                required: false,
+                checked: false,
+              }
+            : {
+                kind: "radio",
+                rect,
+                name: null,
+                tooltip: null,
+                required: false,
+                options: ["选项 1"],
+                selectedIndex: null,
+              };
+      const result = await createFormField(documentId, pageIndex, request);
+      setFields(result.fields);
+      setHistory(result.history);
+      setLoaded(true);
+      setPlacingKind(null);
+      const created = result.fields.find(
+        (field) => field.fieldId === result.fieldId,
+      );
+      setSelectedFieldId(created ? baseCreatedId(created) : result.fieldId);
+      setPanelDraft(created ? draftFor(created) : null);
+      setPanelError(null);
+      notifyDocumentChanged({ documentId, pageIndex, source: "form" });
+    } catch (error) {
+      setNotice(toCommandError(error).message);
+    } finally {
+      setStructureBusy(false);
+    }
+  }
+
+  async function commitPanel(next: FieldPanelDraft | null = panelDraft) {
+    const field = selectedField;
+    if (!field || !next) {
+      return;
+    }
+    if (structureBusy) {
+      return;
+    }
+    if (sameDraft(next, field)) {
+      setPanelDraft(draftFor(field));
+      setPanelError(null);
+      return;
+    }
+    const tooltip = next.tooltip.trim() === "" ? null : next.tooltip;
+    let request: UpdateFormFieldRequest;
+    if (field.kind === "text") {
+      const fontSize = Number.parseFloat(next.fontSize);
+      if (!Number.isFinite(fontSize) || fontSize < 4 || fontSize > 200) {
+        setPanelError("字号必须在 4 到 200 点之间。");
+        return;
+      }
+      request = {
+        kind: "text",
+        name: next.name,
+        tooltip,
+        required: next.required,
+        multiline: next.multiline,
+        fontSize,
+      };
+    } else if (field.kind === "checkbox") {
+      request = {
+        kind: "checkbox",
+        name: next.name,
+        tooltip,
+        required: next.required,
+        checked: next.checked,
+      };
+    } else if (field.kind === "radio") {
+      request = {
+        kind: "radio",
+        name: next.name,
+        tooltip,
+        required: next.required,
+        options: next.options,
+        selectedIndex: next.selectedIndex,
+      };
+    } else {
+      return;
+    }
+    setStructureBusy(true);
+    setPanelError(null);
+    setNotice(null);
+    try {
+      const result = await updateFormField(
+        documentId,
+        field.fieldId,
+        request,
+      );
+      setFields(result.fields);
+      setHistory(result.history);
+      const base = baseCreatedId(field);
+      const updated = result.fields.find(
+        (candidate) =>
+          candidate.created && baseCreatedId(candidate) === base,
+      );
+      if (updated) {
+        setPanelDraft(draftFor(updated));
+      }
+      notifyDocumentChanged({ documentId, pageIndex, source: "form" });
+    } catch (error) {
+      setPanelError(toCommandError(error).message);
+    } finally {
+      setStructureBusy(false);
+    }
+  }
+
+  async function deleteSelectedField() {
+    const field = selectedField;
+    if (!field || structureBusy) {
+      return;
+    }
+    setStructureBusy(true);
+    setNotice(null);
+    try {
+      const result = await deleteFormField(documentId, field.fieldId);
+      setFields(result.fields);
+      setHistory(result.history);
+      setSelectedFieldId(null);
+      setPanelDraft(null);
+      setPanelError(null);
+      notifyDocumentChanged({ documentId, pageIndex, source: "form" });
+    } catch (error) {
+      setNotice(toCommandError(error).message);
+    } finally {
+      setStructureBusy(false);
+    }
+  }
+
+  function applyDraftChange(change: Partial<FieldPanelDraft>) {
+    if (!panelDraft) {
+      return;
+    }
+    const next = { ...panelDraft, ...change };
+    setPanelDraft(next);
+    void commitPanel(next);
+  }
+
+  function addPanelOption() {
+    if (!panelDraft || selectedField?.kind !== "radio") {
+      return;
+    }
+    const options = [
+      ...panelDraft.options,
+      `选项 ${panelDraft.options.length + 1}`,
+    ];
+    applyDraftChange({ options });
+  }
+
+  function removePanelOption(index: number) {
+    if (
+      !panelDraft ||
+      selectedField?.kind !== "radio" ||
+      panelDraft.options.length <= 1
+    ) {
+      return;
+    }
+    const options = panelDraft.options.filter(
+      (_option, position) => position !== index,
+    );
+    let selectedIndex = panelDraft.selectedIndex;
+    if (selectedIndex === index) {
+      selectedIndex = null;
+    } else if (selectedIndex !== null && selectedIndex > index) {
+      selectedIndex -= 1;
+    }
+    applyDraftChange({ options, selectedIndex });
+  }
+
+  async function runStructureHistory(kind: "undo" | "redo") {
+    if (
+      (kind === "undo" ? !history?.canUndo : !history?.canRedo) ||
+      structureBusy
+    ) {
+      return;
+    }
+    setStructureBusy(true);
+    setNotice(null);
+    setPlacingKind(null);
+    setSelectedFieldId(null);
+    setPanelDraft(null);
+    try {
+      const step =
+        kind === "undo"
+          ? await undoTextEdit(documentId)
+          : await redoTextEdit(documentId);
+      setHistory(step.history);
+      const next = await formFields(documentId);
+      setFields(next);
+      setLoaded(true);
+      setLoadError(null);
+      notifyDocumentChanged({
+        documentId,
+        pageIndex: step.pageIndex,
+        source: "form",
+      });
+    } catch (error) {
+      setNotice(toCommandError(error).message);
+    } finally {
+      setStructureBusy(false);
+    }
+  }
+
+  const handleStructurePointerDown = (
+    event: ReactPointerEvent<HTMLDivElement>,
+  ) => {
+    if (!placingKind || structureBusy || event.button !== 0) {
+      return;
+    }
+    const point = pointFromEvent(event);
+    if (!point) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    setPlacementStart(point);
+    setPlacementCurrent(point);
+    try {
+      event.currentTarget.setPointerCapture?.(event.pointerId);
+    } catch {
+      // Pointer capture is unavailable in some embedded webviews.
+    }
+  };
+
+  const handleStructurePointerMove = (
+    event: ReactPointerEvent<HTMLDivElement>,
+  ) => {
+    if (!placingKind || placementStart === null) {
+      return;
+    }
+    const point = pointFromEvent(event);
+    if (point) {
+      setPlacementCurrent(point);
+    }
+  };
+
+  const handleStructurePointerUp = (
+    event: ReactPointerEvent<HTMLDivElement>,
+  ) => {
+    if (!placingKind || placementStart === null) {
+      return;
+    }
+    const current = pointFromEvent(event) ?? placementCurrent;
+    const start = placementStart;
+    setPlacementStart(null);
+    setPlacementCurrent(null);
+    try {
+      event.currentTarget.releasePointerCapture?.(event.pointerId);
+    } catch {
+      // Pointer capture may never have been acquired.
+    }
+    void placeField(
+      placementRect(placingKind, start, current, pageWidth, pageHeight),
+    );
+  };
 
   // Focus a widget the caller asked for (required-field validation, or the
   // next page during document-wide Tab order). The control must already be
@@ -275,10 +850,6 @@ export function FormLayer({
   };
 
   if (!loaded) {
-    return null;
-  }
-
-  if (pageFields.length === 0 && !loadError && !notice) {
     return null;
   }
 
@@ -472,7 +1043,360 @@ export function FormLayer({
   };
 
   return (
-    <div className="form-layer" role="group" aria-label="表单字段">
+    <div
+      ref={layerRef}
+      className={`form-layer${placingKind ? " form-layer--placing" : ""}`}
+      role="group"
+      aria-label="表单字段"
+      onPointerDown={handleStructurePointerDown}
+      onPointerMove={handleStructurePointerMove}
+      onPointerUp={handleStructurePointerUp}
+      onPointerCancel={() => {
+        setPlacementStart(null);
+        setPlacementCurrent(null);
+      }}
+    >
+      <div
+        className="form-layer-toolbar"
+        role="group"
+        aria-label="表单工具"
+        onPointerDown={(event) => event.stopPropagation()}
+      >
+        {(Object.keys(TOOL_LABELS) as CreateKind[]).map((kind) => (
+          <button
+            key={kind}
+            type="button"
+            className="form-create-toggle"
+            aria-pressed={placingKind === kind}
+            disabled={!canModifyContent || structureBusy}
+            title={
+              !canModifyContent
+                ? STRUCTURE_DISABLED_REASON
+                : placingKind === kind
+                  ? "退出表单字段工具"
+                  : kind === "text"
+                    ? "在页面上点击或拖动以放置文本字段"
+                    : kind === "checkbox"
+                      ? "在页面上点击或拖动以放置复选框"
+                      : "在页面上点击或拖动以放置单选按钮组"
+            }
+            onClick={() => togglePlacing(kind)}
+          >
+            {TOOL_LABELS[kind]}
+          </button>
+        ))}
+        <span className="toolbar-divider" aria-hidden="true" />
+        <button
+          type="button"
+          disabled={!history?.canUndo || structureBusy}
+          title={history?.canUndo ? "撤销上一步编辑" : "没有可撤销的操作"}
+          onClick={() => void runStructureHistory("undo")}
+        >
+          撤销
+        </button>
+        <button
+          type="button"
+          disabled={!history?.canRedo || structureBusy}
+          title={history?.canRedo ? "重做上一步编辑" : "没有可重做的操作"}
+          onClick={() => void runStructureHistory("redo")}
+        >
+          重做
+        </button>
+        {createdPageFields.length > 0 && (
+          <button
+            type="button"
+            aria-expanded={selectedField !== null}
+            disabled={structureBusy}
+            onClick={openPropertyPanel}
+          >
+            字段属性
+          </button>
+        )}
+        {!canModifyContent && (
+          <span className="form-edit-reason">{STRUCTURE_DISABLED_REASON}</span>
+        )}
+      </div>
+
+      {placingKind && placementStart && (
+        <div
+          className="form-field-create-preview"
+          data-testid="form-field-create-preview"
+          aria-hidden="true"
+          style={(() => {
+            const preview = placementRect(
+              placingKind,
+              placementStart,
+              placementCurrent,
+              pageWidth,
+              pageHeight,
+            );
+            return {
+              left: `${(preview.x / pageWidth) * 100}%`,
+              top: `${(preview.y / pageHeight) * 100}%`,
+              width: `${(preview.width / pageWidth) * 100}%`,
+              height: `${(preview.height / pageHeight) * 100}%`,
+            };
+          })()}
+        />
+      )}
+
+      {selectedField && panelDraft && (
+        <div
+          className="form-field-panel"
+          role="group"
+          aria-label="表单字段属性"
+          onPointerDown={(event) => event.stopPropagation()}
+        >
+          <div className="form-field-panel-heading">
+            <strong>字段属性</strong>
+            <button
+              type="button"
+              aria-label="关闭属性面板"
+              onClick={() => setSelectedFieldId(null)}
+            >
+              关闭
+            </button>
+          </div>
+          {createdGroups.length > 1 && (
+            <label className="form-field-panel-row">
+              字段
+              <select
+                aria-label="选择要编辑的字段"
+                value={selectedFieldId ?? ""}
+                disabled={structureBusy}
+                onChange={(event) => selectField(event.target.value)}
+              >
+                {createdGroups.map(([base, field]) => (
+                  <option key={base} value={base}>
+                    {field.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+          <label className="form-field-panel-row">
+            名称
+            <input
+              type="text"
+              aria-label="字段名称"
+              value={panelDraft.name}
+              disabled={structureBusy}
+              spellCheck={false}
+              onChange={(event) =>
+                setPanelDraft({ ...panelDraft, name: event.target.value })
+              }
+              onBlur={() => void commitPanel()}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  void commitPanel();
+                } else if (event.key === "Escape") {
+                  event.preventDefault();
+                  setPanelDraft(draftFor(selectedField));
+                  setPanelError(null);
+                }
+              }}
+            />
+          </label>
+          <label className="form-field-panel-row">
+            提示文字
+            <input
+              type="text"
+              aria-label="字段提示"
+              value={panelDraft.tooltip}
+              disabled={structureBusy}
+              spellCheck={false}
+              onChange={(event) =>
+                setPanelDraft({ ...panelDraft, tooltip: event.target.value })
+              }
+              onBlur={() => void commitPanel()}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  void commitPanel();
+                } else if (event.key === "Escape") {
+                  event.preventDefault();
+                  setPanelDraft(draftFor(selectedField));
+                  setPanelError(null);
+                }
+              }}
+            />
+          </label>
+          <label className="form-field-panel-row form-field-panel-row--check">
+            <input
+              type="checkbox"
+              aria-label="必填字段"
+              checked={panelDraft.required}
+              disabled={structureBusy}
+              onChange={(event) => {
+                const next = {
+                  ...panelDraft,
+                  required: event.target.checked,
+                };
+                setPanelDraft(next);
+                void commitPanel(next);
+              }}
+            />
+            必填
+          </label>
+          {selectedField.kind === "text" && (
+            <>
+              <label className="form-field-panel-row form-field-panel-row--check">
+                <input
+                  type="checkbox"
+                  aria-label="多行文本"
+                  checked={panelDraft.multiline}
+                  disabled={structureBusy}
+                  onChange={(event) => {
+                    const next = {
+                      ...panelDraft,
+                      multiline: event.target.checked,
+                    };
+                    setPanelDraft(next);
+                    void commitPanel(next);
+                  }}
+                />
+                多行
+              </label>
+              <label className="form-field-panel-row">
+                字号
+                <input
+                  type="number"
+                  aria-label="字号"
+                  min={4}
+                  max={200}
+                  step={1}
+                  value={panelDraft.fontSize}
+                  disabled={structureBusy}
+                  onChange={(event) =>
+                    setPanelDraft({
+                      ...panelDraft,
+                      fontSize: event.target.value,
+                    })
+                  }
+                  onBlur={() => void commitPanel()}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      void commitPanel();
+                    }
+                  }}
+                />
+              </label>
+            </>
+          )}
+          {selectedField.kind === "checkbox" && (
+            <label className="form-field-panel-row form-field-panel-row--check">
+              <input
+                type="checkbox"
+                aria-label="默认选中"
+                checked={panelDraft.checked}
+                disabled={structureBusy}
+                onChange={(event) =>
+                  applyDraftChange({ checked: event.target.checked })
+                }
+              />
+              默认选中
+            </label>
+          )}
+          {selectedField.kind === "radio" && (
+            <div className="form-field-panel-options">
+              <span className="form-field-panel-row">选项</span>
+              {panelDraft.options.map((option, index) => (
+                <div
+                  className="form-field-panel-row"
+                  key={`option-${index}`}
+                >
+                  <input
+                    type="text"
+                    aria-label={`选项 ${index + 1}`}
+                    value={option}
+                    disabled={structureBusy}
+                    spellCheck={false}
+                    onChange={(event) => {
+                      const options = [...panelDraft.options];
+                      options[index] = event.target.value;
+                      setPanelDraft({ ...panelDraft, options });
+                    }}
+                    onBlur={() => void commitPanel()}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        void commitPanel();
+                      } else if (event.key === "Escape") {
+                        event.preventDefault();
+                        setPanelDraft(
+                          selectedField ? draftFor(selectedField) : null,
+                        );
+                        setPanelError(null);
+                      }
+                    }}
+                  />
+                  <button
+                    type="button"
+                    aria-label={`删除选项 ${index + 1}`}
+                    disabled={structureBusy || panelDraft.options.length <= 1}
+                    onClick={() => removePanelOption(index)}
+                  >
+                    删除
+                  </button>
+                </div>
+              ))}
+              <div className="form-field-panel-row">
+                <button
+                  type="button"
+                  disabled={structureBusy}
+                  onClick={addPanelOption}
+                >
+                  添加选项
+                </button>
+              </div>
+              <label className="form-field-panel-row">
+                默认选项
+                <select
+                  aria-label="默认选项"
+                  value={
+                    panelDraft.selectedIndex === null
+                      ? ""
+                      : String(panelDraft.selectedIndex)
+                  }
+                  disabled={structureBusy}
+                  onChange={(event) => {
+                    const selectedIndex =
+                      event.target.value === ""
+                        ? null
+                        : Number.parseInt(event.target.value, 10);
+                    applyDraftChange({ selectedIndex });
+                  }}
+                >
+                  <option value="">无</option>
+                  {panelDraft.options.map((option, index) => (
+                    <option key={`default-${index}`} value={index}>
+                      {option || `选项 ${index + 1}`}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+          )}
+          <div className="form-field-panel-actions">
+            <button
+              type="button"
+              className="form-field-delete"
+              disabled={structureBusy}
+              onClick={() => void deleteSelectedField()}
+            >
+              删除字段
+            </button>
+          </div>
+          {panelError && (
+            <span className="form-field-panel-error" role="alert">
+              {panelError}
+            </span>
+          )}
+        </div>
+      )}
+
       {pageFields.map(renderControl)}
       {!canFillForms && (
         <span className="form-layer-notice" role="status">

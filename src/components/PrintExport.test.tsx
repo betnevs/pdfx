@@ -3,7 +3,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { invoke } from "@tauri-apps/api/core";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { DocumentPermissions, DocumentView } from "../lib/backend";
 import { PRINT_DISABLED_REASON } from "../lib/document-policy";
@@ -14,6 +14,32 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({ save: vi.fn(), open: vi.fn() }));
 
 const invokeMock = vi.mocked(invoke);
 const saveMock = vi.mocked(saveDialog);
+
+// jsdom does not implement object URLs; the print surface uses them instead of
+// embedding base64 in the DOM, so the tests record their lifecycle.
+const createdObjectUrls: string[] = [];
+const revokedObjectUrls: string[] = [];
+let objectUrlCounter = 0;
+
+beforeAll(() => {
+  Object.assign(URL, {
+    createObjectURL: (_blob: Blob) => {
+      objectUrlCounter += 1;
+      const url = `blob:pdfx-print-${objectUrlCounter}`;
+      createdObjectUrls.push(url);
+      return url;
+    },
+    revokeObjectURL: (url: string) => {
+      revokedObjectUrls.push(url);
+    },
+  });
+});
+
+beforeEach(() => {
+  objectUrlCounter = 0;
+  createdObjectUrls.length = 0;
+  revokedObjectUrls.length = 0;
+});
 
 const allGranted: DocumentPermissions = {
   canModifyContent: true,
@@ -47,6 +73,7 @@ function renderPrintExport(document = documentView()) {
 
 afterEach(() => {
   vi.resetAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe("PrintExport", () => {
@@ -167,7 +194,7 @@ describe("PrintExport", () => {
     const user = userEvent.setup();
     saveMock.mockResolvedValue("/tmp/report.pdf");
     invokeMock.mockRejectedValue({
-      code: "invalid_argument",
+      code: "export_target_is_source",
       message: "/tmp/report.pdf is the open Source Document",
     });
     renderPrintExport();
@@ -182,6 +209,28 @@ describe("PrintExport", () => {
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "不能覆盖源 PDF 文件，请选择其他位置。",
+    );
+  });
+
+  it("explains why the current output PDF cannot be used as the export target", async () => {
+    const user = userEvent.setup();
+    saveMock.mockResolvedValue("/tmp/report-output.pdf");
+    invokeMock.mockRejectedValue({
+      code: "export_target_is_output",
+      message: "/tmp/report-output.pdf is the current Output Document",
+    });
+    renderPrintExport();
+
+    await user.click(screen.getByRole("button", { name: "导出当前页…" }));
+    await user.click(
+      within(screen.getByRole("dialog", { name: "导出当前页" })).getByRole(
+        "button",
+        { name: "导出…" },
+      ),
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "不能覆盖当前输出 PDF 文件，请选择其他位置。",
     );
   });
 });
@@ -257,6 +306,12 @@ describe("PrintExport printing", () => {
     const printRoot = document.querySelector(".print-root");
     expect(printRoot).not.toBeNull();
     expect(printRoot!.querySelectorAll("img")).toHaveLength(3);
+    expect(
+      Array.from(printRoot!.querySelectorAll("img")).map((image) =>
+        image.getAttribute("src"),
+      ),
+    ).toEqual(["blob:pdfx-print-1", "blob:pdfx-print-2", "blob:pdfx-print-3"]);
+    expect(printRoot!.innerHTML).not.toContain("base64");
     expect(printRoot!.querySelector("style")!.textContent).toContain(
       "size: 612pt 792pt",
     );
@@ -274,6 +329,8 @@ describe("PrintExport printing", () => {
     await waitFor(() =>
       expect(document.querySelector(".print-root")).toBeNull(),
     );
+    expect(revokedObjectUrls).toEqual(createdObjectUrls);
+    expect(revokedObjectUrls).toHaveLength(3);
   });
 
   it("honours a custom page range, orientation and actual-size scaling", async () => {
@@ -394,5 +451,199 @@ describe("PrintExport printing", () => {
       documentId: "doc-1",
     });
     expect(document.querySelector(".print-root")).toBeNull();
+    expect(createdObjectUrls).toHaveLength(0);
+    expect(revokedObjectUrls).toHaveLength(0);
   });
+
+  it("releases prepared print bitmaps when preparation is cancelled", async () => {
+    const user = userEvent.setup();
+    let renderCount = 0;
+    let resolvePendingRender: ((view: unknown) => void) | undefined;
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "page_info") {
+        return Promise.resolve(
+          pageInfoFor((args as { pageIndex: number }).pageIndex),
+        );
+      }
+      if (command === "render_page") {
+        renderCount += 1;
+        if (renderCount <= 2) {
+          return Promise.resolve({
+            documentId: "doc-1",
+            pageIndex: renderCount - 1,
+            scale: 150 / 72,
+            width: 1275,
+            height: 1650,
+            pngBase64: "iVBORw0KGgo=",
+          });
+        }
+        return new Promise((resolve) => {
+          resolvePendingRender = resolve;
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+    renderPrintExport(documentView({ pageCount: 100 }));
+
+    await user.click(screen.getByRole("button", { name: "打印…" }));
+    const dialog = screen.getByRole("dialog", { name: "打印" });
+    await user.click(
+      within(dialog).getByRole("button", { name: "打印…" }),
+    );
+
+    expect(
+      await within(dialog).findByText("正在准备第 3 / 100 页…"),
+    ).toBeInTheDocument();
+    expect(createdObjectUrls).toHaveLength(2);
+    expect(revokedObjectUrls).toHaveLength(0);
+
+    await user.click(within(dialog).getByRole("button", { name: "取消打印" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(new Set(revokedObjectUrls)).toEqual(new Set(createdObjectUrls));
+
+    resolvePendingRender?.({
+      documentId: "doc-1",
+      pageIndex: 2,
+      scale: 150 / 72,
+      width: 1275,
+      height: 1650,
+      pngBase64: "iVBORw0KGgo=",
+    });
+
+    await waitFor(() => expect(printCalls()).toHaveLength(3));
+    expect(createdObjectUrls).toHaveLength(2);
+    expect(revokedObjectUrls).toHaveLength(2);
+    expect(invokeMock).not.toHaveBeenCalledWith("print_document", {
+      documentId: "doc-1",
+    });
+    expect(document.querySelector(".print-root")).toBeNull();
+  });
+
+  it("releases prepared print bitmaps when the component unmounts mid-preparation", async () => {
+    const user = userEvent.setup();
+    let renderCount = 0;
+    let resolvePendingRender: ((view: unknown) => void) | undefined;
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "page_info") {
+        return Promise.resolve(
+          pageInfoFor((args as { pageIndex: number }).pageIndex),
+        );
+      }
+      if (command === "render_page") {
+        renderCount += 1;
+        if (renderCount <= 2) {
+          return Promise.resolve({
+            documentId: "doc-1",
+            pageIndex: renderCount - 1,
+            scale: 150 / 72,
+            width: 1275,
+            height: 1650,
+            pngBase64: "iVBORw0KGgo=",
+          });
+        }
+        return new Promise((resolve) => {
+          resolvePendingRender = resolve;
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+    const ref = createRef<PrintExportHandle>();
+    const { unmount } = render(
+      <PrintExport
+        ref={ref}
+        document={documentView({ pageCount: 100 })}
+        pageIndex={1}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "打印…" }));
+    const dialog = screen.getByRole("dialog", { name: "打印" });
+    await user.click(
+      within(dialog).getByRole("button", { name: "打印…" }),
+    );
+    expect(
+      await within(dialog).findByText("正在准备第 3 / 100 页…"),
+    ).toBeInTheDocument();
+    expect(createdObjectUrls).toHaveLength(2);
+
+    unmount();
+
+    expect(new Set(revokedObjectUrls)).toEqual(new Set(createdObjectUrls));
+    resolvePendingRender?.({
+      documentId: "doc-1",
+      pageIndex: 2,
+      scale: 150 / 72,
+      width: 1275,
+      height: 1650,
+      pngBase64: "iVBORw0KGgo=",
+    });
+    await waitFor(() => expect(printCalls()).toHaveLength(3));
+    expect(createdObjectUrls).toHaveLength(2);
+    expect(invokeMock).not.toHaveBeenCalledWith("print_document", {
+      documentId: "doc-1",
+    });
+  });
+
+  it("prepares and decodes a full large print range one page at a time", async () => {
+    const user = userEvent.setup();
+    const decoding = {
+      live: 0,
+      maxLive: 0,
+      total: 0,
+      rendersAtFirstDecode: -1,
+    };
+
+    class TrackedPrintImage {
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      src = "";
+
+      async decode(): Promise<void> {
+        if (decoding.rendersAtFirstDecode < 0) {
+          decoding.rendersAtFirstDecode = printCalls().length;
+        }
+        decoding.live += 1;
+        decoding.total += 1;
+        decoding.maxLive = Math.max(decoding.maxLive, decoding.live);
+        await Promise.resolve();
+        decoding.live -= 1;
+      }
+    }
+
+    vi.stubGlobal("Image", TrackedPrintImage);
+    invokeMock.mockImplementation(printBackend());
+    renderPrintExport(documentView({ pageCount: 2000 }));
+
+    await user.click(screen.getByRole("button", { name: "打印…" }));
+    const dialog = screen.getByRole("dialog", { name: "打印" });
+    await user.click(
+      within(dialog).getByRole("button", { name: "打印…" }),
+    );
+
+    await waitFor(
+      () =>
+        expect(invokeMock).toHaveBeenCalledWith("print_document", {
+          documentId: "doc-1",
+        }),
+      { timeout: 30000 },
+    );
+
+    expect(printCalls()).toHaveLength(2000);
+    // The hard cap: only one page's bitmap is decoded at a time, no matter how
+    // many pages the job contains.
+    expect(decoding.maxLive).toBe(1);
+    expect(decoding.total).toBe(2000);
+    // Decoding starts while pages are still being rendered, not after all of
+    // them have accumulated.
+    expect(decoding.rendersAtFirstDecode).toBeLessThan(2000);
+
+    const printRoot = document.querySelector(".print-root")!;
+    const images = Array.from(printRoot.querySelectorAll("img"));
+    expect(images).toHaveLength(2000);
+    for (const image of images) {
+      expect(image.getAttribute("src")).toMatch(/^blob:pdfx-print-/);
+    }
+    expect(printRoot.innerHTML).not.toContain("base64");
+    expect(createdObjectUrls).toHaveLength(2000);
+  }, 60000);
 });

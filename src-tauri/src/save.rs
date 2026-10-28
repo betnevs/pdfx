@@ -124,8 +124,8 @@ pub async fn save_document(
 /// An object-level change PDFium cannot make itself. These are applied as one
 /// `lopdf` revision appended after PDFium's incremental revision. Text and
 /// Text Box edits are PDFium page-object edits, so they do not appear here;
-/// AcroForm and font-embedding edits will.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// AcroForm creation and its embedded appearance font do.
+#[derive(Debug, Clone, PartialEq)]
 pub enum ObjectEdit {
     /// Sets an entry in the document `/Info` dictionary.
     SetInfoEntry { key: String, value: String },
@@ -137,6 +137,12 @@ pub enum ObjectEdit {
     SetRadioGroup { field_name: String, state: String },
     /// Sets a choice field's `/V` and, when the label is one of `/Opt`, `/I`.
     SetChoiceValue { field_name: String, label: String },
+    /// Writes the AcroForm fields created in this session: `/AcroForm`,
+    /// `/Fields`, `/DA`, `/DR`, widget dictionaries, appearance streams and —
+    /// when text fields exist — the embedded CJK font subset.
+    CreateFormFields {
+        fields: Vec<crate::form_create::FormFieldSpec>,
+    },
 }
 
 /// Per-document save state, kept next to the PDFium document.
@@ -191,6 +197,10 @@ pub fn save_document_with_progress(
         // the output without a second copy of form state.
         let mut object_edits = entry.save.object_edits.clone();
         object_edits.extend(crate::form::save_object_edits(&entry.edit));
+        // Created form fields are re-derived from the session on every save,
+        // so repeated saves cannot duplicate them and undo/redo is reflected
+        // in the output.
+        object_edits.extend(crate::form_create::save_object_edits(&entry.edit));
         let output_bytes = append_object_edits(output_bytes, &object_edits)?;
         // Free text alignment lives in a private string key because PDFium
         // cannot write an integer annotation entry. Translate it into `/Q`
@@ -284,7 +294,7 @@ fn resolve_target(
 /// Refuses a target that resolves to the Source Document. The Source Document
 /// is never modified, including through a symlink that points at it.
 fn ensure_target_is_not_source(source: &Path, target: &Path) -> Result<(), CommandError> {
-    if same_file(source, target) {
+    if crate::target_path::same_file(source, target) {
         Err(CommandError::new(
             CommandErrorCode::SaveTargetIsSource,
             format!(
@@ -294,36 +304,6 @@ fn ensure_target_is_not_source(source: &Path, target: &Path) -> Result<(), Comma
         ))
     } else {
         Ok(())
-    }
-}
-
-fn same_file(left: &Path, right: &Path) -> bool {
-    // Canonical paths resolve symlinks and relative components. For a target
-    // that does not exist yet, resolve its parent so `../` cannot hide it.
-    let normalize = |path: &Path| -> Option<String> {
-        let resolved = match fs::canonicalize(path) {
-            Ok(resolved) => resolved,
-            Err(_) => {
-                let parent = path
-                    .parent()
-                    .filter(|parent| !parent.as_os_str().is_empty())
-                    .unwrap_or_else(|| Path::new("."));
-                let name = path.file_name()?;
-                fs::canonicalize(parent).ok()?.join(name)
-            }
-        };
-        let text = resolved.to_string_lossy().into_owned();
-        // macOS and Windows filesystems are case-insensitive by default.
-        Some(if cfg!(any(target_os = "macos", target_os = "windows")) {
-            text.to_lowercase()
-        } else {
-            text
-        })
-    };
-
-    match (normalize(left), normalize(right)) {
-        (Some(left), Some(right)) => left == right,
-        _ => false,
     }
 }
 
@@ -619,6 +599,9 @@ fn apply_object_edit(
         }
         ObjectEdit::SetChoiceValue { field_name, label } => {
             apply_choice_value(incremental, field_name, label)
+        }
+        ObjectEdit::CreateFormFields { fields } => {
+            crate::form_create::apply_created_fields(incremental, fields)
         }
     }
 }

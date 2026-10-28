@@ -304,6 +304,7 @@ export function AnnotationPanel({
           <p>
             选择页面文字即可添加高亮、下划线、删除线或波浪线；使用页面上的形状工具绘制矩形、椭圆、自由文本或标注框，也可以放置便签、手绘或图章。
           </p>
+          <p>直线与箭头是页面内容，会直接画在页面上，不会出现在此列表。</p>
         </div>
       ) : (
         <div className="annotation-groups">

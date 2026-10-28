@@ -696,6 +696,156 @@ button {
   pointer-events: none;
 }
 
+.form-layer--placing {
+  pointer-events: auto;
+  cursor: crosshair;
+}
+
+.form-layer--placing .form-field,
+.form-layer--placing .form-field-panel {
+  pointer-events: none;
+}
+
+.form-layer-toolbar {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 6;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  max-width: calc(100% - 16px);
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--pdfx-pill-bg);
+  color: var(--pdfx-pill-text);
+  font-size: 12px;
+  line-height: 1.4;
+  user-select: none;
+  pointer-events: auto;
+}
+
+.form-layer-toolbar button {
+  padding: 2px 8px;
+  border: 1px solid var(--pdfx-pill-border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--pdfx-pill-text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.form-layer-toolbar button:hover:enabled {
+  background: var(--pdfx-pill-hover);
+}
+
+.form-layer-toolbar button[aria-pressed="true"] {
+  background: var(--pdfx-pill-active);
+}
+
+.form-layer-toolbar button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.form-edit-reason {
+  color: var(--pdfx-status-warning);
+}
+
+.form-field-create-preview {
+  position: absolute;
+  z-index: 4;
+  box-sizing: border-box;
+  border: 1px dashed var(--pdfx-blue);
+  background: color-mix(in srgb, var(--pdfx-blue) 10%, transparent);
+  pointer-events: none;
+}
+
+.form-field-panel {
+  position: absolute;
+  top: 44px;
+  right: 8px;
+  z-index: 7;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  box-sizing: border-box;
+  width: min(240px, calc(100% - 16px));
+  max-height: calc(100% - 52px);
+  overflow: auto;
+  padding: 8px 10px;
+  border: 1px solid var(--pdfx-pill-border);
+  border-radius: 6px;
+  background: var(--pdfx-pill-bg);
+  color: var(--pdfx-pill-text);
+  font-size: 12px;
+  line-height: 1.4;
+  user-select: none;
+  pointer-events: auto;
+}
+
+.form-field-panel-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.form-field-panel-heading button,
+.form-field-panel-actions button {
+  padding: 2px 8px;
+  border: 1px solid var(--pdfx-pill-border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--pdfx-pill-text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.form-field-panel-heading button:hover:enabled,
+.form-field-panel-actions button:hover:enabled {
+  background: var(--pdfx-pill-hover);
+}
+
+.form-field-panel-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.form-field-panel-row input[type="text"],
+.form-field-panel-row input[type="number"],
+.form-field-panel-row select {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 2px 4px;
+  border: 1px solid var(--pdfx-pill-border);
+  border-radius: 3px;
+  background: var(--pdfx-page-control-bg);
+  color: var(--pdfx-page-ink);
+  font: inherit;
+}
+
+.form-field-panel-row--check {
+  justify-content: flex-start;
+}
+
+.form-field-panel-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.form-field-delete {
+  color: var(--pdfx-status-danger) !important;
+}
+
+.form-field-panel-error {
+  color: var(--pdfx-status-danger);
+}
+
 .form-field {
   position: absolute;
   box-sizing: border-box;
@@ -1249,6 +1399,181 @@ button {
 }
 
 .shape-handle--rotate {
+  cursor: grab;
+  background: var(--pdfx-page);
+  border-color: var(--pdfx-blue);
+}
+
+/* Straight line and arrow overlay. Lines are page content objects, so the
+   overlay uses the same page-relative coordinate system as the other tools but
+   keeps its own stroke-only property panel. */
+.line-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  pointer-events: none;
+}
+
+.line-layer-svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.line-hit {
+  pointer-events: stroke;
+  cursor: move;
+}
+
+.line-layer--drawing .line-hit {
+  cursor: crosshair;
+}
+
+.line-draw-surface {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  cursor: crosshair;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.line-selection-outline,
+.line-create-preview {
+  pointer-events: none;
+}
+
+.line-controls {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  z-index: 8;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  max-width: calc(100% - 16px);
+  pointer-events: none;
+}
+
+.line-toolbar,
+.line-properties {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--pdfx-pill-bg);
+  color: var(--pdfx-pill-text);
+  font-size: 12px;
+  line-height: 1.4;
+  user-select: none;
+  pointer-events: auto;
+}
+
+.line-properties {
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.line-toolbar-title {
+  font-weight: 600;
+}
+
+.line-toolbar button,
+.line-actions button {
+  padding: 2px 8px;
+  border: 1px solid var(--pdfx-pill-border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--pdfx-pill-text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.line-toolbar button:hover:enabled,
+.line-actions button:hover:enabled {
+  background: var(--pdfx-pill-hover);
+}
+
+.line-toolbar button[aria-pressed="true"] {
+  background: var(--pdfx-pill-active);
+}
+
+.line-toolbar button:disabled,
+.line-actions button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.line-toolbar-control {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.line-toolbar-control input[type="color"] {
+  width: 24px;
+  height: 18px;
+  padding: 1px;
+}
+
+.line-toolbar-control input[type="number"] {
+  width: 48px;
+}
+
+.line-toolbar-control input[type="range"] {
+  width: 72px;
+}
+
+.line-meta,
+.line-note {
+  margin: 0;
+}
+
+.line-note {
+  opacity: 0.75;
+}
+
+.line-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.line-delete {
+  color: var(--pdfx-status-danger);
+}
+
+.line-notice--info {
+  color: var(--pdfx-status-success);
+}
+
+.line-notice--error {
+  color: var(--pdfx-status-danger);
+}
+
+.line-handle {
+  position: absolute;
+  z-index: 7;
+  box-sizing: border-box;
+  width: 10px;
+  height: 10px;
+  padding: 0;
+  border: 1px solid var(--pdfx-page);
+  border-radius: 50%;
+  background: var(--pdfx-blue);
+  box-shadow: 0 0 0 1px var(--pdfx-blue);
+  transform: translate(-50%, -50%);
+  cursor: crosshair;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.line-handle--rotate {
   cursor: grab;
   background: var(--pdfx-page);
   border-color: var(--pdfx-blue);

@@ -596,6 +596,10 @@ export function App() {
                       open.document.permissions.canFillForms &&
                       !open.document.readOnly
                     }
+                    canModifyContent={
+                      open.document.permissions.canModifyContent &&
+                      !open.document.readOnly
+                    }
                     formFocusFieldId={formFocusFieldId}
                     onFormFocusHandled={handleFormFocusHandled}
                     onSelectPage={viewer.goToPage}

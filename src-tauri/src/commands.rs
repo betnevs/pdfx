@@ -77,6 +77,12 @@ pub enum CommandErrorCode {
     RenderFailed,
     /// The exported page image could not be written to disk.
     FileWriteFailed,
+    /// Page-image export targeted the open Source Document, which is never
+    /// modified.
+    ExportTargetIsSource,
+    /// Page-image export targeted the current Output Document; replacing it
+    /// with image bytes would destroy the saved PDF.
+    ExportTargetIsOutput,
     /// The platform print operation could not be started.
     PrintFailed,
     WindowFailed,
@@ -100,6 +106,10 @@ pub enum CommandErrorCode {
     FormFillNotPermitted,
     /// The value does not match the widget type or one of its options.
     FormValueInvalid,
+    /// A new form field needs a non-blank, bounded name.
+    FormFieldNameInvalid,
+    /// Another field in the document already uses the requested name.
+    FormFieldNameDuplicate,
     UpdateNotConfigured,
     UpdateCheckFailed,
     UpdateManifestInvalid,

@@ -10,6 +10,10 @@ import {
   choosePdfFile,
   chooseSaveFile,
   closeDocument,
+  createFormField,
+  createFormTextField,
+  deleteFormField,
+  deleteFormTextField,
   exportPage,
   extractTextLayer,
   fillFormField,
@@ -33,6 +37,8 @@ import {
   setFullscreen,
   setWindowTitle,
   toCommandError,
+  updateFormField,
+  updateFormTextField,
 } from "./backend";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -420,12 +426,26 @@ describe("backend command seam", () => {
     }
   });
 
+  it("recognizes the page export target error codes", () => {
+    for (const code of [
+      "export_target_is_source",
+      "export_target_is_output",
+    ] as const) {
+      expect(toCommandError({ code, message: "detail" })).toEqual({
+        code,
+        message: "detail",
+      });
+    }
+  });
+
   it("recognizes the form error codes", () => {
     for (const code of [
       "form_field_not_found",
       "form_field_read_only",
       "form_fill_not_permitted",
       "form_value_invalid",
+      "form_field_name_invalid",
+      "form_field_name_duplicate",
     ] as const) {
       expect(toCommandError({ code, message: "detail" })).toEqual({
         code,
@@ -484,6 +504,129 @@ describe("backend command seam", () => {
       documentId: "doc-1",
       fieldId: "0:1",
       value: { kind: "text", text: "Ada" },
+    });
+
+    const createRequest = {
+      rect: { x: 72, y: 100, width: 180, height: 24 },
+      name: null,
+      tooltip: null,
+      required: false,
+      multiline: false,
+      fontSize: 12,
+    };
+    const createResult = {
+      fieldId: "new:1",
+      fields: [field],
+      history: result.history,
+    };
+    invokeMock.mockResolvedValue(createResult);
+    await expect(
+      createFormTextField("doc-1", 0, createRequest),
+    ).resolves.toEqual(createResult);
+    expect(invokeMock).toHaveBeenCalledWith("create_form_text_field", {
+      documentId: "doc-1",
+      pageIndex: 0,
+      request: createRequest,
+    });
+
+    const updateRequest = {
+      name: "customer_name",
+      tooltip: "请输入客户姓名",
+      required: true,
+      multiline: false,
+      fontSize: 16,
+    };
+    const structureResult = { fields: [field], history: result.history };
+    invokeMock.mockResolvedValue(structureResult);
+    await expect(
+      updateFormTextField("doc-1", "new:1", updateRequest),
+    ).resolves.toEqual(structureResult);
+    expect(invokeMock).toHaveBeenCalledWith("update_form_text_field", {
+      documentId: "doc-1",
+      fieldId: "new:1",
+      request: updateRequest,
+    });
+
+    invokeMock.mockResolvedValue(structureResult);
+    await expect(
+      deleteFormTextField("doc-1", "new:1"),
+    ).resolves.toEqual(structureResult);
+    expect(invokeMock).toHaveBeenCalledWith("delete_form_text_field", {
+      documentId: "doc-1",
+      fieldId: "new:1",
+    });
+  });
+
+  it("maps checkbox and radio field commands to the shared generic seam", async () => {
+    const history = {
+      canUndo: true,
+      canRedo: false,
+      revision: 1,
+      savedRevision: 0,
+      dirty: true,
+    };
+    const field = {
+      fieldId: "new:2",
+      name: "terms",
+      kind: "checkbox",
+      pageIndex: 0,
+      order: 0,
+      rect: { x: 72, y: 100, width: 16, height: 16 },
+      value: "Off",
+      checked: false,
+      options: [],
+      selectedIndex: null,
+      required: false,
+      readOnly: false,
+      multiline: false,
+      radioGroup: null,
+      exportValue: "Yes",
+    };
+    const createResult = { fieldId: "new:2", fields: [field], history };
+    const checkboxRequest = {
+      kind: "checkbox" as const,
+      rect: { x: 72, y: 100, width: 16, height: 16 },
+      name: null,
+      tooltip: null,
+      required: false,
+      checked: false,
+    };
+    invokeMock.mockResolvedValue(createResult);
+    await expect(
+      createFormField("doc-1", 0, checkboxRequest),
+    ).resolves.toEqual(createResult);
+    expect(invokeMock).toHaveBeenLastCalledWith("create_form_field", {
+      documentId: "doc-1",
+      pageIndex: 0,
+      request: checkboxRequest,
+    });
+
+    const radioRequest = {
+      kind: "radio" as const,
+      name: "gender",
+      tooltip: "请选择性别",
+      required: true,
+      options: ["男", "女"],
+      selectedIndex: 1,
+    };
+    const structureResult = { fields: [field], history };
+    invokeMock.mockResolvedValue(structureResult);
+    await expect(
+      updateFormField("doc-1", "new:2", radioRequest),
+    ).resolves.toEqual(structureResult);
+    expect(invokeMock).toHaveBeenLastCalledWith("update_form_field", {
+      documentId: "doc-1",
+      fieldId: "new:2",
+      request: radioRequest,
+    });
+
+    invokeMock.mockResolvedValue(structureResult);
+    await expect(deleteFormField("doc-1", "new:2")).resolves.toEqual(
+      structureResult,
+    );
+    expect(invokeMock).toHaveBeenLastCalledWith("delete_form_field", {
+      documentId: "doc-1",
+      fieldId: "new:2",
     });
   });
 
