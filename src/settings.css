@@ -1,158 +1,6 @@
-/* Settings panel and the shared theme tokens it drives.
- *
- * Ticket 28 owns the full dark-mode treatment; this file provides the tokens
- * and a readable baseline so the theme setting takes effect immediately.
+/* Settings panel. Every color comes from the tokens in theme.css, so the
+ * panel follows the system color scheme and pinned choices without overrides.
  */
-
-:root {
-  color-scheme: light;
-  --pdfx-bg: #f4f2ee;
-  --pdfx-surface: #fbfaf7;
-  --pdfx-raised: #ffffff;
-  --pdfx-workspace: #f0eee9;
-  --pdfx-dot: #d9d4ca;
-  --pdfx-text: #1f2430;
-  --pdfx-muted: #6b6f7a;
-  --pdfx-border: #ddd8cf;
-  --pdfx-border-strong: #c7c1b6;
-  --pdfx-accent-soft: #fdf1ef;
-  --pdfx-accent-text: #8a2f27;
-  --pdfx-overlay: rgba(24, 26, 32, 0.42);
-}
-
-:root[data-theme="dark"] {
-  color-scheme: dark;
-  --pdfx-bg: #14171d;
-  --pdfx-surface: #1b1f27;
-  --pdfx-raised: #222731;
-  --pdfx-workspace: #191d24;
-  --pdfx-dot: #2a303c;
-  --pdfx-text: #e7e9ef;
-  --pdfx-muted: #a2a8b6;
-  --pdfx-border: #2f3542;
-  --pdfx-border-strong: #3c4352;
-  --pdfx-accent-soft: #3a2323;
-  --pdfx-accent-text: #ff9a92;
-  --pdfx-overlay: rgba(4, 6, 10, 0.6);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme]) {
-    color-scheme: dark;
-    --pdfx-bg: #14171d;
-    --pdfx-surface: #1b1f27;
-    --pdfx-raised: #222731;
-    --pdfx-workspace: #191d24;
-    --pdfx-dot: #2a303c;
-    --pdfx-text: #e7e9ef;
-    --pdfx-muted: #a2a8b6;
-    --pdfx-border: #2f3542;
-    --pdfx-border-strong: #3c4352;
-    --pdfx-accent-soft: #3a2323;
-    --pdfx-accent-text: #ff9a92;
-    --pdfx-overlay: rgba(4, 6, 10, 0.6);
-  }
-}
-
-:root[data-theme="dark"],
-:root[data-theme="dark"] body {
-  background-color: var(--pdfx-bg);
-  color: var(--pdfx-text);
-}
-
-:root[data-theme="dark"] .app-header,
-:root[data-theme="dark"] .status-bar,
-:root[data-theme="dark"] .document-toolbar,
-:root[data-theme="dark"] .thumbnail-rail {
-  background: var(--pdfx-surface);
-  border-color: var(--pdfx-border);
-  color: var(--pdfx-muted);
-}
-
-:root[data-theme="dark"] .workspace,
-:root[data-theme="dark"] .page-stage {
-  background:
-    radial-gradient(circle at 1px 1px, var(--pdfx-dot) 1px, transparent 0) 0 0 / 22px
-      22px,
-    var(--pdfx-workspace);
-}
-
-:root[data-theme="dark"] .empty-workspace,
-:root[data-theme="dark"] .error-panel {
-  background: var(--pdfx-surface);
-  border-color: var(--pdfx-border);
-}
-
-:root[data-theme="dark"] .secondary-button,
-:root[data-theme="dark"] .document-toolbar button,
-:root[data-theme="dark"] .page-input,
-:root[data-theme="dark"] .zoom-input {
-  background: var(--pdfx-raised);
-  border-color: var(--pdfx-border);
-  color: var(--pdfx-text);
-}
-
-:root[data-theme="dark"] .thumbnail-placeholder {
-  background: var(--pdfx-raised);
-  border-color: var(--pdfx-border);
-}
-
-:root[data-theme="dark"] .app-notice {
-  background: var(--pdfx-accent-soft);
-  border-color: var(--pdfx-border);
-  color: var(--pdfx-accent-text);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme]),
-  :root:not([data-theme]) body {
-    background-color: var(--pdfx-bg);
-    color: var(--pdfx-text);
-  }
-
-  :root:not([data-theme]) .app-header,
-  :root:not([data-theme]) .status-bar,
-  :root:not([data-theme]) .document-toolbar,
-  :root:not([data-theme]) .thumbnail-rail {
-    background: var(--pdfx-surface);
-    border-color: var(--pdfx-border);
-    color: var(--pdfx-muted);
-  }
-
-  :root:not([data-theme]) .workspace,
-  :root:not([data-theme]) .page-stage {
-    background:
-      radial-gradient(circle at 1px 1px, var(--pdfx-dot) 1px, transparent 0) 0 0 /
-        22px 22px,
-      var(--pdfx-workspace);
-  }
-
-  :root:not([data-theme]) .empty-workspace,
-  :root:not([data-theme]) .error-panel {
-    background: var(--pdfx-surface);
-    border-color: var(--pdfx-border);
-  }
-
-  :root:not([data-theme]) .secondary-button,
-  :root:not([data-theme]) .document-toolbar button,
-  :root:not([data-theme]) .page-input,
-  :root:not([data-theme]) .zoom-input {
-    background: var(--pdfx-raised);
-    border-color: var(--pdfx-border);
-    color: var(--pdfx-text);
-  }
-
-  :root:not([data-theme]) .thumbnail-placeholder {
-    background: var(--pdfx-raised);
-    border-color: var(--pdfx-border);
-  }
-
-  :root:not([data-theme]) .app-notice {
-    background: var(--pdfx-accent-soft);
-    border-color: var(--pdfx-border);
-    color: var(--pdfx-accent-text);
-  }
-}
 
 .settings-backdrop {
   position: fixed;
@@ -175,7 +23,7 @@
   border-radius: 14px;
   background: var(--pdfx-surface);
   color: var(--pdfx-text);
-  box-shadow: 0 24px 60px rgba(8, 10, 16, 0.35);
+  box-shadow: var(--pdfx-settings-shadow);
 }
 
 .settings-header {
@@ -253,7 +101,7 @@
 .settings-field input {
   min-width: 200px;
   padding: 6px 9px;
-  border: 1px solid var(--pdfx-border);
+  border: 1px solid var(--pdfx-border-control);
   border-radius: 7px;
   background: var(--pdfx-raised);
   color: var(--pdfx-text);
@@ -268,7 +116,7 @@
 
 .settings-field select:focus-visible,
 .settings-field input:focus-visible {
-  outline: 2px solid #e8453c;
+  outline: 2px solid var(--pdfx-focus-ring);
   outline-offset: 1px;
 }
 
@@ -282,7 +130,7 @@
 
 .settings-checkbox input {
   margin-top: 3px;
-  accent-color: #e8453c;
+  accent-color: var(--pdfx-accent);
 }
 
 .settings-hint {
@@ -316,7 +164,7 @@
 }
 
 .settings-footer [role="alert"] {
-  color: var(--pdfx-accent-text);
+  color: var(--pdfx-danger-text);
 }
 
 @media (max-width: 520px) {
