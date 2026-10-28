@@ -4,9 +4,11 @@ import {
   useState,
   type PointerEvent as ReactPointerEvent,
 } from "react";
+import { createPortal } from "react-dom";
 
 import {
   chooseImageFile,
+  createLink,
   deleteImage,
   insertImage,
   pageImages,
@@ -14,9 +16,13 @@ import {
   transformImage,
   type CommandErrorCode,
   type ImageObjectView,
+  type LinkTarget,
+  type TextMarkupRect,
 } from "../lib/backend";
 import { notifyDocumentChanged, onDocumentChanged } from "../lib/documentEvents";
+import { linkErrorText } from "../lib/linkTarget";
 import {
+  imageCorners,
   imageRotationFromPointer,
   isImageOutsidePage,
   moveImage,
@@ -24,9 +30,12 @@ import {
   type ImageRect,
   type Point,
 } from "../lib/imageGeometry";
+import { LinkTargetDialog } from "./LinkTargetDialog";
 
 const READ_ONLY_REASON = "此文档不允许编辑内容";
+const ANNOTATION_PERMISSION_REASON = "此文档不允许添加注释";
 const OUTSIDE_PAGE_WARNING = "图片超出页面，超出部分将被裁切。";
+const NO_LINK_AREA_REASON = "图片不在页面可见区域内，无法添加链接。";
 
 /** Chinese copy for failures specific to image files and placement. */
 const IMAGE_ERROR_MESSAGES: Partial<Record<CommandErrorCode, string>> = {
@@ -79,6 +88,10 @@ export interface PageImageLayerProps {
   pageHeight: number;
   /** Permission Restrictions forbid changing document content. */
   readOnly?: boolean;
+  /** The PDF security handler allows adding annotation links. */
+  canAnnotate?: boolean;
+  /** Number of pages an internal link may address. */
+  pageCount?: number;
 }
 
 /** The image geometry a drag currently previews. */
@@ -133,12 +146,19 @@ export function PageImageLayer({
   pageWidth,
   pageHeight,
   readOnly = false,
+  canAnnotate = false,
+  pageCount = 0,
 }: PageImageLayerProps) {
   const [images, setImages] = useState<ImageObjectView[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [interaction, setInteraction] = useState<Interaction | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
+  const [linkDraft, setLinkDraft] = useState<{
+    rects: TextMarkupRect[];
+  } | null>(null);
+  const [linkBusy, setLinkBusy] = useState(false);
+  const [linkError, setLinkError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   const layerRef = useRef<HTMLDivElement>(null);
   const pageKey = useRef<string | null>(null);
@@ -275,6 +295,66 @@ export function PageImageLayer({
     }
   }
 
+  /**
+   * The axis-aligned display-space bounds of the image's rotated corners,
+   * clipped to the visible page. A link must cover what the reader can click,
+   * which is exactly the part of the image inside the page box.
+   */
+  function linkBoundsFor(image: ImageObjectView): TextMarkupRect | null {
+    const corners = imageCorners(image, image.rotation);
+    const left = Math.max(0, Math.min(...corners.map((corner) => corner.x)));
+    const top = Math.max(0, Math.min(...corners.map((corner) => corner.y)));
+    const right = Math.min(
+      pageWidth,
+      Math.max(...corners.map((corner) => corner.x)),
+    );
+    const bottom = Math.min(
+      pageHeight,
+      Math.max(...corners.map((corner) => corner.y)),
+    );
+    const width = right - left;
+    const height = bottom - top;
+    if (width <= 0.5 || height <= 0.5) {
+      return null;
+    }
+    return { x: left, y: top, width, height };
+  }
+
+  function openImageLinkDialog() {
+    if (readOnly || !canAnnotate || busy || linkBusy || !selected) {
+      return;
+    }
+    const rect = linkBoundsFor(selected);
+    if (!rect) {
+      setNotice({ kind: "error", text: NO_LINK_AREA_REASON });
+      return;
+    }
+    setLinkError(null);
+    setLinkDraft({ rects: [rect] });
+  }
+
+  async function createLinkForImage(target: LinkTarget) {
+    if (!linkDraft || linkBusy) {
+      return;
+    }
+    setLinkBusy(true);
+    setLinkError(null);
+    try {
+      await createLink(documentId, {
+        pageIndex,
+        rects: linkDraft.rects,
+        target,
+      });
+      setLinkDraft(null);
+      setNotice({ kind: "info", text: "链接已添加" });
+      notifyDocumentChanged({ documentId, pageIndex, source: "link" });
+    } catch (error) {
+      setLinkError(linkErrorText(error));
+    } finally {
+      setLinkBusy(false);
+    }
+  }
+
   async function commitTransform(image: ImageObjectView, next: ImageRect & {
     rotation: number;
   }) {
@@ -313,8 +393,7 @@ export function PageImageLayer({
   const startMove = (
     event: ReactPointerEvent<HTMLDivElement>,
     image: ImageObjectView,
-  ) => {
-    event.stopPropagation();
+  ) => {    event.stopPropagation();
     setSelectedId(image.imageId);
     if (readOnly || busy) {
       return;
@@ -439,7 +518,28 @@ export function PageImageLayer({
         >
           删除图片
         </button>
+        <button
+          type="button"
+          disabled={readOnly || !canAnnotate || busy || linkBusy || selected === null}
+          title={
+            readOnly
+              ? READ_ONLY_REASON
+              : !canAnnotate
+                ? ANNOTATION_PERMISSION_REASON
+                : selected === null
+                  ? "先选择一张图片"
+                  : "为选中的图片添加超链接"
+          }
+          onClick={openImageLinkDialog}
+        >
+          添加链接
+        </button>
         {readOnly && <span className="image-edit-reason">{READ_ONLY_REASON}</span>}
+        {!readOnly && !canAnnotate && (
+          <span className="image-edit-reason">
+            {ANNOTATION_PERMISSION_REASON}
+          </span>
+        )}
         {outsidePage && (
           <span className="image-edit-warning" role="status">
             {OUTSIDE_PAGE_WARNING}
@@ -501,6 +601,25 @@ export function PageImageLayer({
           </div>
         );
       })}
+
+      {linkDraft &&
+        createPortal(
+          <LinkTargetDialog
+            mode="create"
+            pageCount={pageCount}
+            initialTarget={null}
+            busy={linkBusy}
+            error={linkError}
+            onCancel={() => {
+              if (!linkBusy) {
+                setLinkDraft(null);
+                setLinkError(null);
+              }
+            }}
+            onSubmit={(target) => void createLinkForImage(target)}
+          />,
+          document.body,
+        )}
     </div>
   );
 }

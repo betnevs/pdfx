@@ -118,6 +118,9 @@ pub enum CommandErrorCode {
     FormFieldNameInvalid,
     /// Another field in the document already uses the requested name.
     FormFieldNameDuplicate,
+    /// Editing or deleting a foreign link whose action PDFX cannot represent
+    /// would corrupt it, so the annotation is left untouched.
+    UnsupportedLink,
     UpdateNotConfigured,
     UpdateCheckFailed,
     UpdateManifestInvalid,

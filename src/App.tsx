@@ -60,6 +60,7 @@ import {
   menuStateSignature,
 } from "./lib/menu";
 import { useAnnotations } from "./lib/useAnnotations";
+import { useLinks } from "./lib/useLinks";
 import { useDocumentSave } from "./lib/useDocumentSave";
 import { useDocumentViewer } from "./lib/useDocumentViewer";
 import { useRecoverySnapshots, useRecoveryStartup } from "./lib/useRecovery";
@@ -204,6 +205,7 @@ export function App() {
   viewerRef.current = viewer;
 
   const annotations = useAnnotations(openDocumentView?.documentId ?? null);
+  const links = useLinks(openDocumentView?.documentId ?? null);
   const [selectedAnnotation, setSelectedAnnotation] =
     useState<AnnotationView | null>(null);
   const [armedStamp, setArmedStamp] = useState<StampKind | null>(null);
@@ -467,6 +469,12 @@ export function App() {
   // for which items can act; see `src/lib/menu.ts` for the rules. `menuEnabled`
   // is also read when a menu event arrives, so an event that raced ahead of a
   // state push can never run a command that is currently unavailable.
+  // A dialog can unmount while one of its inputs still has focus. Removing the
+  // focused element does not reliably fire focusout, so the event-tracked flag
+  // can outlive the control; only an editable element that still has focus may
+  // own the shortcuts.
+  const textInputOwnsShortcuts =
+    textInputFocused && isEditableTarget(document.activeElement);
   const menuState = menuItemStates({
     hasDocument: openDocumentView !== null,
     readOnly: openDocumentView?.readOnly ?? false,
@@ -481,7 +489,7 @@ export function App() {
       recoveryPromptOpen ||
       settingsOpen ||
       pageDialog !== null,
-    textInputFocused,
+    textInputFocused: textInputOwnsShortcuts,
     pageIndex: viewer.pageIndex,
     pageCount: openDocumentView?.pageCount ?? 0,
   });
@@ -1282,6 +1290,9 @@ export function App() {
                     onFormFocusHandled={handleFormFocusHandled}
                     onSelectPage={viewer.goToPage}
                     onFormFocusField={setFormFocusFieldId}
+                    links={links.links}
+                    onLinksChanged={() => void links.reload()}
+                    pageCount={open.document.pageCount}
                   />
                 </div>
               </div>

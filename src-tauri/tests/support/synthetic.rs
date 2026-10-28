@@ -213,6 +213,135 @@ pub fn single_line_pdf() -> TempPdf {
     write_pdf("single-line", build_pdf(objects, 1))
 }
 
+/// Two 612x792 pages drawing the same Helvetica 18pt line at user-space
+/// (72, 720). Page objects are 4 (page 1) and 6 (page 2), so a saved
+/// destination for the second page must reference object 6.
+pub fn two_page_pdf() -> TempPdf {
+    let content = b"BT /F1 18 Tf 72 720 Td (Original line.) Tj ET\n".to_vec();
+    let objects = vec![
+        (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+        (2, b"<< /Type /Pages /Kids [4 0 R 6 0 R] /Count 2 >>".to_vec()),
+        (3, HELVETICA.to_vec()),
+        (
+            4,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R >>".to_vec(),
+        ),
+        (5, stream("", &content)),
+        (
+            6,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 7 0 R >>".to_vec(),
+        ),
+        (7, stream("", &content)),
+    ];
+    write_pdf("two-page", build_pdf(objects, 1))
+}
+
+/// Two 612x792 pages carrying links written by another tool.
+///
+/// Page 1 has a referenced URI link (object 8), an inline JavaScript link PDFX
+/// cannot represent, and a plain Square annotation, so tests can check that
+/// editing one annotation preserves the others. Page 2 is an empty target page.
+pub fn foreign_links_pdf() -> TempPdf {
+    let content = b"BT /F1 18 Tf 72 720 Td (Original line.) Tj ET\n".to_vec();
+    let page_two = b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 7 0 R >>".to_vec();
+    let objects = vec![
+        (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+        (2, b"<< /Type /Pages /Kids [4 0 R 6 0 R] /Count 2 >>".to_vec()),
+        (3, HELVETICA.to_vec()),
+        (
+            4,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R /Annots [8 0 R << /Type /Annot /Subtype /Link /Rect [200 690 300 710] /A << /S /JavaScript /JS (app.alert) >> >> 9 0 R] >>".to_vec(),
+        ),
+        (5, stream("", &content)),
+        (6, page_two),
+        (7, stream("", &content)),
+        (
+            8,
+            b"<< /Type /Annot /Subtype /Link /Rect [72 690 180 710] /Border [0 0 0] /A << /S /URI /URI (https://foreign.example/one) >> >>".to_vec(),
+        ),
+        (
+            9,
+            b"<< /Type /Annot /Subtype /Square /Rect [250 500 350 560] /C [1 0 0] >>".to_vec(),
+        ),
+    ];
+    write_pdf("foreign-links", build_pdf(objects, 1))
+}
+
+/// Two 612x792 pages whose links repeat one `/NM` value.
+///
+/// `/NM` only has to be unique among the annotations of its own page, so a
+/// document written by another tool may legally use the same name on two
+/// pages. The links point at different URLs so an edit that confuses them is
+/// visible in the saved actions.
+pub fn duplicate_link_names_pdf() -> TempPdf {
+    let content = b"BT /F1 18 Tf 72 720 Td (Original line.) Tj ET\n".to_vec();
+    let objects = vec![
+        (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+        (2, b"<< /Type /Pages /Kids [4 0 R 6 0 R] /Count 2 >>".to_vec()),
+        (3, HELVETICA.to_vec()),
+        (
+            4,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R /Annots [8 0 R] >>".to_vec(),
+        ),
+        (5, stream("", &content)),
+        (
+            6,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 7 0 R /Annots [9 0 R] >>".to_vec(),
+        ),
+        (7, stream("", &content)),
+        (
+            8,
+            b"<< /Type /Annot /Subtype /Link /Rect [72 690 180 710] /NM (shared-name) /A << /S /URI /URI (https://foreign.example/page-one) >> >>".to_vec(),
+        ),
+        (
+            9,
+            b"<< /Type /Annot /Subtype /Link /Rect [72 600 180 620] /NM (shared-name) /A << /S /URI /URI (https://foreign.example/page-two) >> >>".to_vec(),
+        ),
+    ];
+    write_pdf("duplicate-link-names", build_pdf(objects, 1))
+}
+
+/// Two 612x792 pages with the destination forms other writers emit.
+///
+/// Page 1 carries four foreign links: a `/GoTo` action, a direct `/Dest` array,
+/// a `/Dest` naming a document destination, and a `/Dest` naming a destination
+/// that does not exist. All four point at page 2 when they resolve.
+pub fn destination_links_pdf() -> TempPdf {
+    let content = b"BT /F1 18 Tf 72 720 Td (Original line.) Tj ET\n".to_vec();
+    let objects = vec![
+        (
+            1,
+            b"<< /Type /Catalog /Pages 2 0 R /Names << /Dests 10 0 R >> >>".to_vec(),
+        ),
+        (2, b"<< /Type /Pages /Kids [4 0 R 6 0 R] /Count 2 >>".to_vec()),
+        (3, HELVETICA.to_vec()),
+        (
+            4,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R /Annots [8 0 R << /Type /Annot /Subtype /Link /Rect [200 690 300 710] /Dest [6 0 R /Fit] >> 9 0 R 11 0 R] >>".to_vec(),
+        ),
+        (5, stream("", &content)),
+        (
+            6,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 7 0 R >>".to_vec(),
+        ),
+        (7, stream("", &content)),
+        (
+            8,
+            b"<< /Type /Annot /Subtype /Link /Rect [72 690 180 710] /A << /S /GoTo /D [6 0 R /Fit] >> >>".to_vec(),
+        ),
+        (
+            9,
+            b"<< /Type /Annot /Subtype /Link /Rect [320 690 420 710] /Dest (chapter-two) >>".to_vec(),
+        ),
+        (10, b"<< /Names [(chapter-two) [6 0 R /Fit]] >>".to_vec()),
+        (
+            11,
+            b"<< /Type /Annot /Subtype /Link /Rect [440 690 540 710] /Dest (missing-destination) >>".to_vec(),
+        ),
+    ];
+    write_pdf("destination-links", build_pdf(objects, 1))
+}
+
 /// Three 612x792 pages with distinct Helvetica text, one bookmark pointing at
 /// page 2 and one link annotation on page 1 pointing at page 3. Page
 /// operations tests use it to check that untouched pages keep their content,

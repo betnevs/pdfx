@@ -9,6 +9,7 @@ pub mod form;
 pub mod form_create;
 pub mod image_edit;
 pub mod line_edit;
+pub mod links;
 pub mod logging;
 mod menu;
 pub mod page_ops;
@@ -114,6 +115,10 @@ pub fn run() {
             annotations::transform_note_annotation,
             annotations::delete_annotation,
             annotations::erase_ink_stroke,
+            links::list_links,
+            links::create_link,
+            links::update_link_target,
+            links::delete_link,
             print_export::export_page,
             print_export::print_document,
             flatten_export::export_flattened_copy,
