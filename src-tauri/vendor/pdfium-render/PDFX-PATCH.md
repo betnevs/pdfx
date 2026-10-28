@@ -99,6 +99,7 @@ cargo test --test pdfium_adapter
 | Test | What it proves |
 |---|---|
 | `incremental_save_keeps_original_bytes_as_prefix_and_preserves_structure` | Output starts with the source bytes; bookmarks, URI link, metadata, attachment, text and a high-level square annotation survive reopen. |
+| `full_rewrite_preserves_document_structure_and_high_level_edits` | `FPDF_NO_INCREMENTAL` is a new file, not an append, and retains the same bookmarks, link, metadata, attachment, text and high-level edit. |
 | `circle_annotation_with_border_and_custom_appearance_is_visible_after_reopen` | Circle creation, border width 4.0 round-trip, `FPDFAnnot_SetAP` stream is rendered after save/reopen. |
 | `ink_annotation_strokes_and_appearance_survive_save_and_reopen` | Two strokes added to `/InkList`, count round-trips, custom appearance is rendered. |
 | `encrypted_sources_refuse_encrypted_output_and_remove_security_decrypts` | Incremental/full-rewrite saves of encrypted fixtures are refused; `FPDF_REMOVE_SECURITY` output reopens without a password with `PdfSecurityHandlerRevision::Unprotected`. |

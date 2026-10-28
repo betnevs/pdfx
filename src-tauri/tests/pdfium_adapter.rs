@@ -45,6 +45,75 @@ fn rect(bottom: f32, left: f32, top: f32, right: f32) -> PdfRect {
     )
 }
 
+/// Opens the structure fixture and makes one high-level `pdfium-render` edit on
+/// the same document the adapter will later save.
+fn open_structure_with_square_annotation(source: Vec<u8>) -> PdfDocument<'static> {
+    let engine = Engine::shared().expect("PDF engine should initialize");
+    let document = engine.open_bytes(source, None).expect("open fixture");
+    let pages = document.pages();
+    let mut page = pages.get(0).expect("page 0");
+    let annotations = page.annotations_mut();
+    let mut square = annotations
+        .create_square_annotation()
+        .expect("create square");
+    square
+        .set_bounds(rect(72.0, 72.0, 144.0, 144.0))
+        .expect("set bounds");
+    document
+}
+
+/// Asserts every structural feature of the structure fixture, plus the
+/// high-level square annotation, survived into `document`.
+fn assert_structure_fixture_intact(document: &PdfDocument<'_>) {
+    assert_eq!(document.pages().len(), 1);
+
+    let bookmarks: Vec<String> = document
+        .bookmarks()
+        .iter()
+        .filter_map(|bookmark| bookmark.title())
+        .collect();
+    assert_eq!(bookmarks, vec!["Introduction", "Details"]);
+
+    assert_eq!(
+        document
+            .metadata()
+            .get(PdfDocumentMetadataTagType::Title)
+            .expect("Info title")
+            .value(),
+        "PDFX structure fixture"
+    );
+
+    let page = document.pages().get(0).expect("page 0");
+    let link = page.links().first().expect("the URI link should survive");
+    assert_eq!(
+        link.action()
+            .expect("link action")
+            .as_uri_action()
+            .expect("URI action")
+            .uri()
+            .expect("URI value"),
+        "https://example.com/pdfx"
+    );
+
+    let attachments: Vec<String> = document
+        .attachments()
+        .iter()
+        .map(|attachment| attachment.name())
+        .collect();
+    assert_eq!(attachments, vec!["notes.txt"]);
+
+    let text = page.text().expect("text layer").all();
+    assert!(text.contains("PDFX structure fixture"), "got {text:?}");
+
+    let annotation_types: Vec<PdfPageAnnotationType> = page
+        .annotations()
+        .iter()
+        .map(|annotation| annotation.annotation_type())
+        .collect();
+    assert!(annotation_types.contains(&PdfPageAnnotationType::Square));
+    assert!(annotation_types.contains(&PdfPageAnnotationType::Link));
+}
+
 /// Renders page `page_index` at 1:1 and returns (non-white pixels, blue-fill pixels).
 fn render_pixels(document: &PdfDocument<'_>, page_index: i32) -> (usize, usize) {
     let page = document.pages().get(page_index).expect("page to render");
@@ -309,24 +378,7 @@ fn full_rewrite_annotates_only_the_target_page_and_preserves_untouched_content()
 #[test]
 fn incremental_save_keeps_original_bytes_as_prefix_and_preserves_structure() {
     let (source, _) = fixture_bytes("structure");
-
-    // A high-level `pdfium-render` edit, made through the public crate API.
-    let document = {
-        let engine = Engine::shared().expect("PDF engine should initialize");
-        let document = engine
-            .open_bytes(source.clone(), None)
-            .expect("open fixture");
-        let pages = document.pages();
-        let mut page = pages.get(0).expect("page 0");
-        let annotations = page.annotations_mut();
-        let mut square = annotations
-            .create_square_annotation()
-            .expect("create square");
-        square
-            .set_bounds(rect(72.0, 72.0, 144.0, 144.0))
-            .expect("set bounds");
-        document
-    };
+    let document = open_structure_with_square_annotation(source.clone());
 
     let adapter = PdfiumAdapter::new(document);
     let saved = adapter.save_incremental().expect("incremental save");
@@ -341,53 +393,22 @@ fn incremental_save_keeps_original_bytes_as_prefix_and_preserves_structure() {
     );
 
     let reopened = open_adapter(saved, None);
-    let document = reopened.document();
+    assert_structure_fixture_intact(reopened.document());
+}
 
-    assert_eq!(document.pages().len(), 1);
+#[test]
+fn full_rewrite_preserves_document_structure_and_high_level_edits() {
+    let (source, _) = fixture_bytes("structure");
+    let document = open_structure_with_square_annotation(source.clone());
 
-    let bookmarks: Vec<String> = document
-        .bookmarks()
-        .iter()
-        .filter_map(|bookmark| bookmark.title())
-        .collect();
-    assert_eq!(bookmarks, vec!["Introduction", "Details"]);
+    let adapter = PdfiumAdapter::new(document);
+    let saved = adapter.save_full_rewrite().expect("full rewrite");
 
-    assert_eq!(
-        document
-            .metadata()
-            .get(PdfDocumentMetadataTagType::Title)
-            .expect("Info title")
-            .value(),
-        "PDFX structure fixture"
+    assert!(
+        !saved.starts_with(&source),
+        "a full rewrite must produce a new file, not append a revision"
     );
 
-    let page = document.pages().get(0).expect("page 0");
-    let link = page.links().first().expect("the URI link should survive");
-    assert_eq!(
-        link.action()
-            .expect("link action")
-            .as_uri_action()
-            .expect("URI action")
-            .uri()
-            .expect("URI value"),
-        "https://example.com/pdfx"
-    );
-
-    let attachments: Vec<String> = document
-        .attachments()
-        .iter()
-        .map(|attachment| attachment.name())
-        .collect();
-    assert_eq!(attachments, vec!["notes.txt"]);
-
-    let text = page.text().expect("text layer").all();
-    assert!(text.contains("PDFX structure fixture"), "got {text:?}");
-
-    let annotation_types: Vec<PdfPageAnnotationType> = page
-        .annotations()
-        .iter()
-        .map(|annotation| annotation.annotation_type())
-        .collect();
-    assert!(annotation_types.contains(&PdfPageAnnotationType::Square));
-    assert!(annotation_types.contains(&PdfPageAnnotationType::Link));
+    let reopened = open_adapter(saved, None);
+    assert_structure_fixture_intact(reopened.document());
 }
