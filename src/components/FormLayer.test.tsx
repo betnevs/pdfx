@@ -395,11 +395,12 @@ describe("FormLayer", () => {
       if (command === "edit_history") {
         return emptyHistory;
       }
-      if (command === "create_form_text_field") {
+      if (command === "create_form_field") {
         expect(args).toEqual({
           documentId: "doc-1",
           pageIndex: 0,
           request: {
+            kind: "text",
             rect: { x: 72, y: 100, width: 180, height: 24 },
             name: null,
             tooltip: null,
@@ -453,6 +454,269 @@ describe("FormLayer", () => {
     expect(toggle).toHaveAttribute("aria-pressed", "false");
   });
 
+  it("places a checkbox and updates its default state from the panel", async () => {
+    const createdCheckbox = field({
+      fieldId: "new:1",
+      name: "checkbox_1",
+      kind: "checkbox",
+      order: 0,
+      rect: { x: 72, y: 100, width: 16, height: 16 },
+      created: true,
+    });
+    let stored: FormFieldView[] = [];
+    const updates: unknown[] = [];
+    invokeMock.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "form_fields") {
+        return stored;
+      }
+      if (command === "edit_history") {
+        return emptyHistory;
+      }
+      if (command === "create_form_field") {
+        expect(args).toEqual({
+          documentId: "doc-1",
+          pageIndex: 0,
+          request: {
+            kind: "checkbox",
+            rect: { x: 72, y: 100, width: 16, height: 16 },
+            name: null,
+            tooltip: null,
+            required: false,
+            checked: false,
+          },
+        });
+        stored = [createdCheckbox];
+        return { fieldId: "new:1", fields: stored, history: dirtyHistory };
+      }
+      if (command === "update_form_field") {
+        updates.push(args);
+        const payload = args as {
+          request: {
+            name: string;
+            tooltip: string | null;
+            required: boolean;
+            checked: boolean;
+          };
+        };
+        stored = [
+          {
+            ...createdCheckbox,
+            name: payload.request.name,
+            tooltip: payload.request.tooltip,
+            required: payload.request.required,
+            checked: payload.request.checked,
+          },
+        ];
+        return { fields: stored, history: dirtyHistory };
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+    const { container } = renderLayer({ canModifyContent: true });
+
+    const tool = await screen.findByRole("button", { name: "添加复选框" });
+    fireEvent.click(tool);
+    expect(tool).toHaveAttribute("aria-pressed", "true");
+
+    const layer = container.querySelector(".form-layer");
+    fireEvent.pointerDown(layer!, {
+      clientX: 72,
+      clientY: 100,
+      button: 0,
+      pointerId: 1,
+    });
+    fireEvent.pointerUp(layer!, {
+      clientX: 72,
+      clientY: 100,
+      button: 0,
+      pointerId: 1,
+    });
+
+    expect(await screen.findByLabelText("字段名称")).toHaveValue("checkbox_1");
+    expect(screen.getByLabelText("必填字段")).not.toBeChecked();
+    expect(screen.getByLabelText("默认选中")).not.toBeChecked();
+    expect(screen.queryByLabelText("多行文本")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("字号")).not.toBeInTheDocument();
+    const widget = await screen.findByLabelText("checkbox_1");
+    expect(widget.tagName).toBe("INPUT");
+    expect(widget).toHaveAttribute("type", "checkbox");
+    expect(widget).toBeEnabled();
+
+    fireEvent.click(screen.getByLabelText("默认选中"));
+    await waitFor(() => expect(updates).toHaveLength(1));
+    expect(updates[0]).toEqual({
+      documentId: "doc-1",
+      fieldId: "new:1",
+      request: {
+        kind: "checkbox",
+        name: "checkbox_1",
+        tooltip: null,
+        required: false,
+        checked: true,
+      },
+    });
+    await waitFor(() =>
+      expect(screen.getByLabelText("checkbox_1")).toBeChecked(),
+    );
+  });
+
+  it("places a radio group and edits its options and default", async () => {
+    const radioViews = (request: {
+      name: string;
+      tooltip: string | null;
+      required: boolean;
+      options: string[];
+      selectedIndex: number | null;
+    }): FormFieldView[] =>
+      request.options.map((_option, index) =>
+        field({
+          fieldId: `new:1:${index}`,
+          name: request.name,
+          kind: "radio",
+          order: index,
+          rect: { x: 72, y: 100 + index * 20, width: 16, height: 16 },
+          value:
+            request.selectedIndex === null
+              ? null
+              : (request.options[request.selectedIndex] ?? null),
+          checked: request.selectedIndex === index,
+          options: request.options,
+          selectedIndex: request.selectedIndex,
+          required: request.required,
+          radioGroup: request.name,
+          exportValue: `Choice${index + 1}`,
+          tooltip: request.tooltip,
+          created: true,
+        }),
+      );
+    let stored: FormFieldView[] = [];
+    const updates: Array<{
+      fieldId: string;
+      request: {
+        kind: string;
+        name: string;
+        tooltip: string | null;
+        required: boolean;
+        options: string[];
+        selectedIndex: number | null;
+      };
+    }> = [];
+    invokeMock.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "form_fields") {
+        return stored;
+      }
+      if (command === "edit_history") {
+        return emptyHistory;
+      }
+      if (command === "create_form_field") {
+        expect(args).toEqual({
+          documentId: "doc-1",
+          pageIndex: 0,
+          request: {
+            kind: "radio",
+            rect: { x: 72, y: 100, width: 16, height: 16 },
+            name: null,
+            tooltip: null,
+            required: false,
+            options: ["选项 1"],
+            selectedIndex: null,
+          },
+        });
+        stored = radioViews({
+          name: "radio_group_1",
+          tooltip: null,
+          required: false,
+          options: ["选项 1"],
+          selectedIndex: null,
+        });
+        return { fieldId: "new:1:0", fields: stored, history: dirtyHistory };
+      }
+      if (command === "update_form_field") {
+        const payload = args as (typeof updates)[number];
+        updates.push(payload);
+        stored = radioViews(payload.request);
+        return { fields: stored, history: dirtyHistory };
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+    const { container } = renderLayer({ canModifyContent: true });
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "添加单选按钮组" }),
+    );
+    const layer = container.querySelector(".form-layer");
+    fireEvent.pointerDown(layer!, {
+      clientX: 72,
+      clientY: 100,
+      button: 0,
+      pointerId: 1,
+    });
+    fireEvent.pointerUp(layer!, {
+      clientX: 72,
+      clientY: 100,
+      button: 0,
+      pointerId: 1,
+    });
+
+    expect(await screen.findByLabelText("字段名称")).toHaveValue(
+      "radio_group_1",
+    );
+    expect(screen.getByLabelText("选项 1")).toHaveValue("选项 1");
+    expect(screen.getByLabelText("默认选项")).toHaveValue("");
+    expect(screen.queryByLabelText("字号")).not.toBeInTheDocument();
+    expect(
+      await screen.findByLabelText("radio_group_1（选项 1）"),
+    ).toBeEnabled();
+
+    const firstOption = screen.getByLabelText("选项 1");
+    fireEvent.change(firstOption, { target: { value: "男" } });
+    fireEvent.blur(firstOption);
+    await waitFor(() => expect(updates).toHaveLength(1));
+    expect(updates[0]).toEqual({
+      documentId: "doc-1",
+      fieldId: "new:1:0",
+      request: {
+        kind: "radio",
+        name: "radio_group_1",
+        tooltip: null,
+        required: false,
+        options: ["男"],
+        selectedIndex: null,
+      },
+    });
+    expect(
+      await screen.findByLabelText("radio_group_1（男）"),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "添加选项" }));
+    await waitFor(() => expect(updates).toHaveLength(2));
+    expect(updates[1].request.options).toEqual(["男", "选项 2"]);
+    const secondOption = await screen.findByLabelText("选项 2");
+    fireEvent.change(secondOption, { target: { value: "女" } });
+    fireEvent.blur(secondOption);
+    await waitFor(() => expect(updates).toHaveLength(3));
+    expect(updates[2].request.options).toEqual(["男", "女"]);
+
+    fireEvent.change(screen.getByLabelText("默认选项"), {
+      target: { value: "1" },
+    });
+    await waitFor(() => expect(updates).toHaveLength(4));
+    expect(updates[3].request.selectedIndex).toBe(1);
+    await waitFor(() =>
+      expect(screen.getByLabelText("radio_group_1（女）")).toBeChecked(),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "删除选项 1" }));
+    await waitFor(() => expect(updates).toHaveLength(5));
+    expect(updates[4].request.options).toEqual(["女"]);
+    expect(updates[4].request.selectedIndex).toBe(0);
+    expect(screen.queryByLabelText("选项 2")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("默认选项")).toHaveValue("0");
+    expect(screen.getByRole("button", { name: "删除选项 1" })).toBeDisabled();
+    expect(
+      await screen.findByLabelText("radio_group_1（女）"),
+    ).toBeChecked();
+  });
+
   it("updates created field properties from the panel", async () => {
     const updates: unknown[] = [];
     let stored: FormFieldView[] = [createdField];
@@ -463,7 +727,7 @@ describe("FormLayer", () => {
       if (command === "edit_history") {
         return emptyHistory;
       }
-      if (command === "update_form_text_field") {
+      if (command === "update_form_field") {
         updates.push(args);
         const payload = args as {
           fieldId: string;
@@ -500,6 +764,7 @@ describe("FormLayer", () => {
       documentId: "doc-1",
       fieldId: "new:1",
       request: {
+        kind: "text",
         name: "customer_name",
         tooltip: null,
         required: false,
@@ -526,6 +791,7 @@ describe("FormLayer", () => {
       documentId: "doc-1",
       fieldId: "new:1",
       request: {
+        kind: "text",
         name: "customer_name",
         tooltip: "请输入客户姓名",
         required: true,
@@ -549,7 +815,7 @@ describe("FormLayer", () => {
       if (command === "edit_history") {
         return emptyHistory;
       }
-      if (command === "update_form_text_field") {
+      if (command === "update_form_field") {
         updateCalls += 1;
         throw {
           code: "form_field_name_duplicate",
@@ -585,7 +851,7 @@ describe("FormLayer", () => {
       if (command === "edit_history") {
         return deleted ? dirtyHistory : emptyHistory;
       }
-      if (command === "delete_form_text_field") {
+      if (command === "delete_form_field") {
         expect(args).toEqual({ documentId: "doc-1", fieldId: "new:1" });
         deleted = true;
         stored = [];
@@ -624,10 +890,14 @@ describe("FormLayer", () => {
     installFields([]);
     renderLayer({ canModifyContent: false });
 
-    const button = await screen.findByRole("button", {
-      name: "添加文本字段",
-    });
-    expect(button).toBeDisabled();
+    for (const name of ["添加文本字段", "添加复选框", "添加单选按钮组"]) {
+      const button = await screen.findByRole("button", { name });
+      expect(button).toBeDisabled();
+      expect(button).toHaveAttribute(
+        "title",
+        "此文档的权限限制不允许创建表单字段",
+      );
+    }
     expect(
       screen.getByText("此文档的权限限制不允许创建表单字段"),
     ).toBeInTheDocument();

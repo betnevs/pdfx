@@ -431,6 +431,61 @@ export interface FormStructureEditResult {
   history: EditHistoryView;
 }
 
+/** Places a text, checkbox or radio-group field on a page. */
+export type CreateFormFieldRequest =
+  | ({ kind: "text" } & CreateFormTextFieldRequest)
+  | {
+      kind: "checkbox";
+      /** Display-space rectangle, top-left origin. */
+      rect: FormFieldRect;
+      /** `null` asks the backend for a generated `checkbox_N` name. */
+      name: string | null;
+      tooltip: string | null;
+      required: boolean;
+      /** Initial `/V` and `/AS` state. */
+      checked: boolean;
+    }
+  | {
+      kind: "radio";
+      /** The first option's rectangle; later options stack below it. */
+      rect: FormFieldRect;
+      /** `null` asks the backend for a generated `radio_group_N` name. */
+      name: string | null;
+      tooltip: string | null;
+      required: boolean;
+      /** Option labels in display order. */
+      options: string[];
+      /** Index of the initially selected option, or `null` for none. */
+      selectedIndex: number | null;
+    };
+
+/** The selected widget id, the refreshed widget list and shared history. */
+export interface CreateFormFieldResult {
+  fieldId: string;
+  fields: FormFieldView[];
+  history: EditHistoryView;
+}
+
+/** The full desired state of any created field. */
+export type UpdateFormFieldRequest =
+  | ({ kind: "text" } & UpdateFormTextFieldRequest)
+  | {
+      kind: "checkbox";
+      name: string;
+      tooltip: string | null;
+      required: boolean;
+      checked: boolean;
+    }
+  | {
+      kind: "radio";
+      name: string;
+      tooltip: string | null;
+      required: boolean;
+      /** The complete option-label list in display order. */
+      options: string[];
+      selectedIndex: number | null;
+    };
+
 /** A value the user committed for one widget. */
 export type FormFieldValueInput =
   | { kind: "text"; text: string }
@@ -1104,6 +1159,52 @@ export async function createFormTextField(
     documentId,
     pageIndex,
     request,
+  });
+}
+
+/**
+ * Places a new Form Field widget of any supported kind. Only documents whose
+ * permission set allows changing content accept the command; the returned
+ * list already contains the new field so the overlay can show and fill it
+ * immediately.
+ */
+export async function createFormField(
+  documentId: string,
+  pageIndex: number,
+  request: CreateFormFieldRequest,
+): Promise<CreateFormFieldResult> {
+  return invoke<CreateFormFieldResult>("create_form_field", {
+    documentId,
+    pageIndex,
+    request,
+  });
+}
+
+/**
+ * Replaces the properties of a field created in this session, including a
+ * radio group's full option list and default. A duplicate or invalid name is
+ * rejected without changing the field or the history.
+ */
+export async function updateFormField(
+  documentId: string,
+  fieldId: string,
+  request: UpdateFormFieldRequest,
+): Promise<FormStructureEditResult> {
+  return invoke<FormStructureEditResult>("update_form_field", {
+    documentId,
+    fieldId,
+    request,
+  });
+}
+
+/** Deletes a field created in this session; the action is undoable. */
+export async function deleteFormField(
+  documentId: string,
+  fieldId: string,
+): Promise<FormStructureEditResult> {
+  return invoke<FormStructureEditResult>("delete_form_field", {
+    documentId,
+    fieldId,
   });
 }
 

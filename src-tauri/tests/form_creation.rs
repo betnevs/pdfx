@@ -14,7 +14,10 @@ use pdfx_lib::form::{
     fill_form_field, form_fields, missing_required_fields, FormFieldKind, FormFieldRect,
     FormFieldValueInput,
 };
-use pdfx_lib::form_create::{create_form_text_field, CreateFormTextFieldRequest};
+use pdfx_lib::form_create::{
+    create_form_field, create_form_text_field, delete_form_field, update_form_field,
+    CreateFormFieldRequest, CreateFormTextFieldRequest, UpdateFormFieldRequest,
+};
 use pdfx_lib::text_edit::{redo_text_edit, undo_text_edit};
 
 fn open_synthetic(pdf: &synthetic::TempPdf) -> String {
@@ -102,6 +105,491 @@ fn creates_a_text_field_that_discovery_reports_and_undo_removes() {
 }
 
 #[test]
+fn creates_checkboxes_that_discovery_reports_and_the_shared_history_toggles() {
+    let pdf = synthetic::single_line_pdf();
+    let document_id = open_synthetic(&pdf);
+    let rect = FormFieldRect {
+        x: 72.0,
+        y: 100.0,
+        width: 16.0,
+        height: 16.0,
+    };
+
+    let created = create_form_field(
+        document_id.clone(),
+        0,
+        CreateFormFieldRequest::Checkbox {
+            rect,
+            name: None,
+            tooltip: Some("同意条款".to_owned()),
+            required: true,
+            checked: false,
+        },
+    )
+    .expect("create a checkbox");
+    assert!(created.history.dirty);
+    assert_eq!(created.history.revision, created.history.saved_revision + 1);
+
+    let fields = form_fields(document_id.clone()).expect("discover fields");
+    let field = fields
+        .iter()
+        .find(|field| field.field_id == created.field_id)
+        .expect("the created checkbox is discovered");
+    assert_eq!(field.kind, FormFieldKind::Checkbox);
+    assert_eq!(field.name, "checkbox_1");
+    assert_eq!(field.rect, rect);
+    assert_eq!(field.tooltip.as_deref(), Some("同意条款"));
+    assert!(field.required);
+    assert!(!field.checked);
+    assert!(!field.read_only);
+    assert!(field.created);
+    assert_eq!(
+        missing_required_fields(document_id.clone())
+            .expect("required fields")
+            .len(),
+        1,
+        "an unchecked required checkbox blocks saving"
+    );
+
+    let toggled = fill_form_field(
+        document_id.clone(),
+        created.field_id.clone(),
+        FormFieldValueInput::Checked { checked: true },
+    )
+    .expect("toggle the created checkbox without saving");
+    let field = toggled
+        .fields
+        .iter()
+        .find(|field| field.field_id == created.field_id)
+        .expect("still discovered");
+    assert!(field.checked);
+    assert!(toggled.history.dirty);
+    assert!(missing_required_fields(document_id.clone())
+        .expect("required fields")
+        .is_empty());
+
+    undo_text_edit(document_id.clone()).expect("undo the toggle");
+    let field = form_fields(document_id.clone())
+        .expect("fields after undo")
+        .into_iter()
+        .find(|field| field.field_id == created.field_id)
+        .expect("undo restores the checkbox");
+    assert!(!field.checked);
+    assert_eq!(
+        missing_required_fields(document_id.clone())
+            .expect("required fields")
+            .len(),
+        1
+    );
+
+    redo_text_edit(document_id.clone()).expect("redo the toggle");
+    assert!(
+        form_fields(document_id.clone())
+            .expect("fields after redo")
+            .into_iter()
+            .find(|field| field.field_id == created.field_id)
+            .expect("redo restores the checkbox")
+            .checked
+    );
+    undo_text_edit(document_id.clone()).expect("undo the toggle again");
+
+    let checked_by_default = create_form_field(
+        document_id.clone(),
+        0,
+        CreateFormFieldRequest::Checkbox {
+            rect: FormFieldRect {
+                x: 100.0,
+                y: 100.0,
+                width: 16.0,
+                height: 16.0,
+            },
+            name: Some("newsletter".to_owned()),
+            tooltip: None,
+            required: true,
+            checked: true,
+        },
+    )
+    .expect("create a checkbox with a default");
+    let field = checked_by_default
+        .fields
+        .iter()
+        .find(|field| field.field_id == checked_by_default.field_id)
+        .expect("the default-checked checkbox is discovered");
+    assert!(field.checked, "the creation default is reported");
+    assert_eq!(
+        missing_required_fields(document_id.clone())
+            .expect("required fields")
+            .len(),
+        1,
+        "only the unchecked required checkbox is missing"
+    );
+
+    close_document(document_id).expect("close document");
+}
+
+#[test]
+fn creates_radio_groups_with_kid_widgets_and_a_consistent_value() {
+    let pdf = synthetic::single_line_pdf();
+    let document_id = open_synthetic(&pdf);
+    let rect = FormFieldRect {
+        x: 72.0,
+        y: 100.0,
+        width: 16.0,
+        height: 16.0,
+    };
+
+    let created = create_form_field(
+        document_id.clone(),
+        0,
+        CreateFormFieldRequest::Radio {
+            rect,
+            name: Some("contact".to_owned()),
+            tooltip: Some("联系方式".to_owned()),
+            required: true,
+            options: vec!["Email".to_owned(), "Phone".to_owned(), "Email".to_owned()],
+            selected_index: None,
+        },
+    )
+    .expect("create a radio group");
+    assert!(created.history.dirty);
+    assert_eq!(
+        created.field_id, "new:1:0",
+        "the first option widget is selected after placement"
+    );
+
+    let fields = form_fields(document_id.clone()).expect("discover fields");
+    let group: Vec<_> = fields
+        .iter()
+        .filter(|field| field.name == "contact")
+        .collect();
+    assert_eq!(group.len(), 3, "one widget per option");
+    eprintln!("reopened group: {group:#?}");
+    assert!(group.iter().all(|field| field.kind == FormFieldKind::Radio
+        && field.created
+        && field.required
+        && field.tooltip.as_deref() == Some("联系方式")));
+    assert!(group
+        .iter()
+        .all(|field| field.radio_group.as_deref() == Some("contact")));
+    assert_eq!(
+        group
+            .iter()
+            .map(|field| field.field_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["new:1:0", "new:1:1", "new:1:2"]
+    );
+    assert_eq!(
+        group
+            .iter()
+            .map(|field| field.export_value.clone().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["Email", "Phone", "Email_2"],
+        "duplicate labels still get distinct PDF on-states"
+    );
+    assert_eq!(
+        group[0].options,
+        vec!["Email", "Phone", "Email"],
+        "the panel sees every option label"
+    );
+    assert!(group
+        .iter()
+        .all(|field| !field.checked && field.value.is_none() && field.selected_index.is_none()));
+    assert_eq!(group[1].rect.y, rect.y + rect.height + 4.0);
+    assert_eq!(group[2].rect.y, rect.y + 2.0 * (rect.height + 4.0));
+    assert_eq!(
+        group.iter().map(|field| field.order).collect::<Vec<_>>(),
+        vec![0, 1, 2]
+    );
+    assert_eq!(
+        missing_required_fields(document_id.clone())
+            .expect("required fields")
+            .len(),
+        1,
+        "an unanswered required radio group blocks saving once"
+    );
+
+    let filled = fill_form_field(
+        document_id.clone(),
+        "new:1:1".to_owned(),
+        FormFieldValueInput::Checked { checked: true },
+    )
+    .expect("select the second option");
+    let group: Vec<_> = filled
+        .fields
+        .iter()
+        .filter(|field| field.name == "contact")
+        .collect();
+    assert_eq!(group.len(), 3);
+    assert_eq!(
+        group.iter().map(|field| field.checked).collect::<Vec<_>>(),
+        vec![false, true, false]
+    );
+    assert!(group
+        .iter()
+        .all(|field| field.value.as_deref() == Some("Phone") && field.selected_index == Some(1)));
+    assert!(missing_required_fields(document_id.clone())
+        .expect("required fields")
+        .is_empty());
+
+    let error = fill_form_field(
+        document_id.clone(),
+        "new:1:1".to_owned(),
+        FormFieldValueInput::Checked { checked: false },
+    )
+    .expect_err("a radio selection cannot be cleared in place");
+    assert_eq!(error.code, CommandErrorCode::FormValueInvalid);
+    assert!(error.message.contains("不能取消选择"), "{}", error.message);
+
+    undo_text_edit(document_id.clone()).expect("undo the selection");
+    let group: Vec<_> = form_fields(document_id.clone())
+        .expect("fields after undo")
+        .into_iter()
+        .filter(|field| field.name == "contact")
+        .collect();
+    assert!(group
+        .iter()
+        .all(|field| !field.checked && field.value.is_none()));
+    assert_eq!(
+        missing_required_fields(document_id.clone())
+            .expect("required fields after undo")
+            .len(),
+        1
+    );
+
+    redo_text_edit(document_id.clone()).expect("redo the selection");
+    let group: Vec<_> = form_fields(document_id.clone())
+        .expect("fields after redo")
+        .into_iter()
+        .filter(|field| field.name == "contact")
+        .collect();
+    assert_eq!(
+        group.iter().map(|field| field.checked).collect::<Vec<_>>(),
+        vec![false, true, false]
+    );
+
+    let deleted = delete_form_field(document_id.clone(), "new:1:2".to_owned())
+        .expect("delete any widget of the group");
+    assert!(deleted.fields.iter().all(|field| field.name != "contact"));
+    undo_text_edit(document_id.clone()).expect("undo the group deletion");
+    assert_eq!(
+        form_fields(document_id.clone())
+            .expect("fields after undo")
+            .into_iter()
+            .filter(|field| field.name == "contact")
+            .count(),
+        3,
+        "undo restores the whole group"
+    );
+
+    close_document(document_id).expect("close document");
+}
+
+#[test]
+fn updates_radio_options_and_default_together_and_history_restores_them() {
+    let pdf = synthetic::single_line_pdf();
+    let document_id = open_synthetic(&pdf);
+    let created = create_form_field(
+        document_id.clone(),
+        0,
+        CreateFormFieldRequest::Radio {
+            rect: FormFieldRect {
+                x: 72.0,
+                y: 100.0,
+                width: 16.0,
+                height: 16.0,
+            },
+            name: Some("size".to_owned()),
+            tooltip: None,
+            required: false,
+            options: vec!["S".to_owned(), "M".to_owned()],
+            selected_index: None,
+        },
+    )
+    .expect("create a radio group");
+
+    let group = |document_id: &str| -> Vec<pdfx_lib::form::FormFieldView> {
+        form_fields(document_id.to_owned())
+            .expect("discover fields")
+            .into_iter()
+            .filter(|field| field.name == "size")
+            .collect()
+    };
+
+    let updated = update_form_field(
+        document_id.clone(),
+        created.field_id.clone(),
+        UpdateFormFieldRequest::Radio {
+            name: "size".to_owned(),
+            tooltip: Some("尺码".to_owned()),
+            required: true,
+            options: vec!["S".to_owned(), "M".to_owned(), "L".to_owned()],
+            selected_index: Some(2),
+        },
+    )
+    .expect("add an option and choose the default");
+    assert!(updated.history.dirty);
+    let fields: Vec<_> = updated
+        .fields
+        .iter()
+        .filter(|field| field.name == "size")
+        .collect();
+    assert_eq!(fields.len(), 3);
+    assert_eq!(
+        fields
+            .iter()
+            .map(|field| field.options.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            vec!["S".to_owned(), "M".to_owned(), "L".to_owned()],
+            vec!["S".to_owned(), "M".to_owned(), "L".to_owned()],
+            vec!["S".to_owned(), "M".to_owned(), "L".to_owned()],
+        ]
+    );
+    assert_eq!(
+        fields.iter().map(|field| field.checked).collect::<Vec<_>>(),
+        vec![false, false, true]
+    );
+    assert!(fields
+        .iter()
+        .all(|field| field.value.as_deref() == Some("L")
+            && field.selected_index == Some(2)
+            && field.required
+            && field.tooltip.as_deref() == Some("尺码")));
+    assert!(missing_required_fields(document_id.clone())
+        .expect("required fields")
+        .is_empty());
+
+    let updated = update_form_field(
+        document_id.clone(),
+        "new:1:1".to_owned(),
+        UpdateFormFieldRequest::Radio {
+            name: "size".to_owned(),
+            tooltip: None,
+            required: true,
+            options: vec!["Small".to_owned(), "Medium".to_owned()],
+            selected_index: Some(0),
+        },
+    )
+    .expect("edit labels, remove an option and choose another default");
+    let fields: Vec<_> = updated
+        .fields
+        .iter()
+        .filter(|field| field.name == "size")
+        .collect();
+    assert_eq!(fields.len(), 2, "removing an option removes its widget");
+    assert_eq!(
+        fields
+            .iter()
+            .map(|field| field.export_value.clone().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["Small", "Medium"]
+    );
+    assert_eq!(
+        fields.iter().map(|field| field.checked).collect::<Vec<_>>(),
+        vec![true, false]
+    );
+    assert!(fields
+        .iter()
+        .all(|field| field.value.as_deref() == Some("Small")));
+    assert_eq!(fields[0].rect.y, 100.0);
+    assert_eq!(fields[1].rect.y, 120.0);
+
+    let before_error = group(&document_id);
+    create_form_field(
+        document_id.clone(),
+        0,
+        CreateFormFieldRequest::Text {
+            rect: FormFieldRect {
+                x: 72.0,
+                y: 200.0,
+                width: 180.0,
+                height: 24.0,
+            },
+            name: Some("taken".to_owned()),
+            tooltip: None,
+            required: false,
+            multiline: false,
+            font_size: None,
+        },
+    )
+    .expect("create a field that owns the name");
+    let duplicate = update_form_field(
+        document_id.clone(),
+        "new:1".to_owned(),
+        UpdateFormFieldRequest::Radio {
+            name: "taken".to_owned(),
+            tooltip: None,
+            required: true,
+            options: vec!["Small".to_owned(), "Medium".to_owned()],
+            selected_index: Some(0),
+        },
+    )
+    .expect_err("an existing field name is rejected");
+    assert_eq!(duplicate.code, CommandErrorCode::FormFieldNameDuplicate);
+    let invalid = update_form_field(
+        document_id.clone(),
+        "new:1".to_owned(),
+        UpdateFormFieldRequest::Radio {
+            name: "   ".to_owned(),
+            tooltip: None,
+            required: true,
+            options: vec!["Small".to_owned(), "Medium".to_owned()],
+            selected_index: Some(0),
+        },
+    )
+    .expect_err("a blank name is rejected");
+    assert_eq!(invalid.code, CommandErrorCode::FormFieldNameInvalid);
+    let out_of_range = update_form_field(
+        document_id.clone(),
+        "new:1".to_owned(),
+        UpdateFormFieldRequest::Radio {
+            name: "size".to_owned(),
+            tooltip: None,
+            required: true,
+            options: vec!["Only".to_owned()],
+            selected_index: Some(2),
+        },
+    )
+    .expect_err("a default outside the option list is rejected");
+    assert_eq!(out_of_range.code, CommandErrorCode::InvalidArgument);
+    assert_eq!(
+        group(&document_id),
+        before_error,
+        "rejected updates change nothing"
+    );
+
+    undo_text_edit(document_id.clone()).expect("undo the last option edit");
+    // The name owner was created after the option edits, so the first undo
+    // removes it and the next one reverts the option edit.
+    assert!(form_fields(document_id.clone())
+        .expect("fields after undo")
+        .iter()
+        .all(|field| field.name != "taken"));
+    undo_text_edit(document_id.clone()).expect("undo the option edit");
+    let fields = group(&document_id);
+    assert_eq!(fields.len(), 3);
+    assert!(fields
+        .iter()
+        .all(|field| field.value.as_deref() == Some("L")));
+
+    undo_text_edit(document_id.clone()).expect("undo the option addition");
+    let fields = group(&document_id);
+    assert_eq!(fields.len(), 2);
+    assert!(fields
+        .iter()
+        .all(|field| field.value.is_none() && !field.required));
+    assert_eq!(
+        fields
+            .iter()
+            .map(|field| field.export_value.clone().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["S", "M"]
+    );
+
+    close_document(document_id).expect("close document");
+}
+
+#[test]
 fn rejects_invalid_bounds_and_duplicate_names_without_creating_a_field() {
     let pdf = synthetic::single_line_pdf();
     let document_id = open_synthetic(&pdf);
@@ -165,6 +653,323 @@ fn rejects_invalid_bounds_and_duplicate_names_without_creating_a_field() {
         created_revision(&document_id),
         "rejected creations leave the history untouched"
     );
+
+    close_document(document_id).expect("close document");
+}
+
+#[test]
+fn updates_checkbox_properties_through_the_history_and_rejects_wrong_values() {
+    let pdf = synthetic::single_line_pdf();
+    let document_id = open_synthetic(&pdf);
+    let created = create_form_field(
+        document_id.clone(),
+        0,
+        CreateFormFieldRequest::Checkbox {
+            rect: FormFieldRect {
+                x: 72.0,
+                y: 100.0,
+                width: 16.0,
+                height: 16.0,
+            },
+            name: None,
+            tooltip: None,
+            required: false,
+            checked: false,
+        },
+    )
+    .expect("create a checkbox");
+    assert_eq!(created.field_id, "new:1");
+
+    let updated = update_form_field(
+        document_id.clone(),
+        created.field_id.clone(),
+        UpdateFormFieldRequest::Checkbox {
+            name: "agree_terms".to_owned(),
+            tooltip: Some("同意条款".to_owned()),
+            required: true,
+            checked: true,
+        },
+    )
+    .expect("update the checkbox properties");
+    let field = updated
+        .fields
+        .iter()
+        .find(|field| field.field_id == created.field_id)
+        .expect("updated checkbox is discovered");
+    assert_eq!(field.name, "agree_terms");
+    assert_eq!(field.tooltip.as_deref(), Some("同意条款"));
+    assert!(field.required && field.checked);
+    assert!(missing_required_fields(document_id.clone())
+        .expect("required fields")
+        .is_empty());
+
+    let updated = update_form_field(
+        document_id.clone(),
+        created.field_id.clone(),
+        UpdateFormFieldRequest::Checkbox {
+            name: "agree_terms".to_owned(),
+            tooltip: Some("同意条款".to_owned()),
+            required: true,
+            checked: false,
+        },
+    )
+    .expect("uncheck the checkbox property");
+    assert_eq!(
+        missing_required_fields(document_id.clone())
+            .expect("required fields")
+            .len(),
+        1
+    );
+
+    let wrong_value = fill_form_field(
+        document_id.clone(),
+        created.field_id.clone(),
+        FormFieldValueInput::Text {
+            text: "not a bool".to_owned(),
+        },
+    )
+    .expect_err("a checkbox does not accept text");
+    assert_eq!(wrong_value.code, CommandErrorCode::FormValueInvalid);
+    assert!(
+        wrong_value.message.contains("选中状态"),
+        "{}",
+        wrong_value.message
+    );
+
+    undo_text_edit(document_id.clone()).expect("undo the uncheck");
+    let field = form_fields(document_id.clone())
+        .expect("fields after undo")
+        .into_iter()
+        .find(|field| field.field_id == created.field_id)
+        .expect("checkbox restored");
+    assert!(field.checked && field.required);
+    assert_eq!(field.name, "agree_terms");
+    assert_eq!(field.tooltip.as_deref(), Some("同意条款"));
+    assert!(missing_required_fields(document_id.clone())
+        .expect("required fields")
+        .is_empty());
+
+    redo_text_edit(document_id.clone()).expect("redo the uncheck");
+    let field = form_fields(document_id.clone())
+        .expect("fields after redo")
+        .into_iter()
+        .find(|field| field.field_id == created.field_id)
+        .expect("checkbox restored");
+    assert!(!field.checked);
+
+    // The updated state is what the save pipeline writes.
+    let dir = support::temp::TempDir::new("create-checkbox-properties");
+    let output = dir.path().join("output.pdf");
+    save_as(&document_id, &output);
+    let parsed = lopdf::Document::load(&output).expect("parse output");
+    let saved = field_named(&parsed, "agree_terms");
+    assert_eq!(name_text(saved.get(b"V").unwrap()), "Off");
+    assert_eq!(name_text(saved.get(b"AS").unwrap()), "Off");
+    assert!(saved.get(b"Ff").unwrap().as_i64().unwrap() & 2 == 2);
+    assert_eq!(decode_pdf_text(saved.get(b"TU").unwrap()), "同意条款");
+
+    close_document(document_id).expect("close document");
+}
+
+#[test]
+fn rejects_invalid_checkbox_and_radio_requests_without_creating_fields() {
+    let pdf = synthetic::single_line_pdf();
+    let document_id = open_synthetic(&pdf);
+    let checkbox_rect = FormFieldRect {
+        x: 72.0,
+        y: 100.0,
+        width: 16.0,
+        height: 16.0,
+    };
+    create_form_field(
+        document_id.clone(),
+        0,
+        CreateFormFieldRequest::Checkbox {
+            rect: checkbox_rect,
+            name: Some("first".to_owned()),
+            tooltip: None,
+            required: false,
+            checked: false,
+        },
+    )
+    .expect("create the name owner");
+    let revision_after_create = created_revision(&document_id);
+    let fields_before = form_fields(document_id.clone()).expect("fields after create");
+
+    let duplicate = create_form_field(
+        document_id.clone(),
+        0,
+        CreateFormFieldRequest::Checkbox {
+            rect: FormFieldRect {
+                x: 100.0,
+                y: 100.0,
+                ..checkbox_rect
+            },
+            name: Some("first".to_owned()),
+            tooltip: None,
+            required: false,
+            checked: false,
+        },
+    )
+    .expect_err("a duplicate checkbox name is rejected");
+    assert_eq!(duplicate.code, CommandErrorCode::FormFieldNameDuplicate);
+    assert!(
+        duplicate.message.contains("“first”") && duplicate.message.contains("已存在"),
+        "{}",
+        duplicate.message
+    );
+
+    let duplicate_radio = create_form_field(
+        document_id.clone(),
+        0,
+        CreateFormFieldRequest::Radio {
+            rect: checkbox_rect,
+            name: Some("first".to_owned()),
+            tooltip: None,
+            required: false,
+            options: vec!["A".to_owned()],
+            selected_index: None,
+        },
+    )
+    .expect_err("a radio group cannot reuse an existing name");
+    assert_eq!(
+        duplicate_radio.code,
+        CommandErrorCode::FormFieldNameDuplicate
+    );
+
+    let blank = create_form_field(
+        document_id.clone(),
+        0,
+        CreateFormFieldRequest::Radio {
+            rect: checkbox_rect,
+            name: Some("   ".to_owned()),
+            tooltip: None,
+            required: false,
+            options: vec!["A".to_owned()],
+            selected_index: None,
+        },
+    )
+    .expect_err("a blank name is rejected");
+    assert_eq!(blank.code, CommandErrorCode::FormFieldNameInvalid);
+    assert!(blank.message.contains("不能为空"), "{}", blank.message);
+
+    let outside = create_form_field(
+        document_id.clone(),
+        0,
+        CreateFormFieldRequest::Checkbox {
+            rect: FormFieldRect {
+                x: 72.0,
+                y: 780.0,
+                width: 16.0,
+                height: 16.0,
+            },
+            name: Some("outside".to_owned()),
+            tooltip: None,
+            required: false,
+            checked: false,
+        },
+    )
+    .expect_err("a checkbox must fit on its page");
+    assert_eq!(outside.code, CommandErrorCode::InvalidArgument);
+    assert!(outside.message.contains("页面"), "{}", outside.message);
+
+    let too_small = create_form_field(
+        document_id.clone(),
+        0,
+        CreateFormFieldRequest::Checkbox {
+            rect: FormFieldRect {
+                x: 72.0,
+                y: 100.0,
+                width: 2.0,
+                height: 2.0,
+            },
+            name: Some("tiny".to_owned()),
+            tooltip: None,
+            required: false,
+            checked: false,
+        },
+    )
+    .expect_err("a checkbox below the minimum size is rejected");
+    assert_eq!(too_small.code, CommandErrorCode::InvalidArgument);
+    assert!(too_small.message.contains("至少"), "{}", too_small.message);
+
+    let too_tall = create_form_field(
+        document_id.clone(),
+        0,
+        CreateFormFieldRequest::Radio {
+            rect: FormFieldRect {
+                x: 72.0,
+                y: 700.0,
+                width: 16.0,
+                height: 16.0,
+            },
+            name: Some("tall".to_owned()),
+            tooltip: None,
+            required: false,
+            options: (0..10).map(|index| format!("选项{index}")).collect(),
+            selected_index: None,
+        },
+    )
+    .expect_err("options that run off the page are rejected");
+    assert_eq!(too_tall.code, CommandErrorCode::InvalidArgument);
+    assert!(too_tall.message.contains("页面"), "{}", too_tall.message);
+
+    let bad_default = create_form_field(
+        document_id.clone(),
+        0,
+        CreateFormFieldRequest::Radio {
+            rect: checkbox_rect,
+            name: Some("bad_default".to_owned()),
+            tooltip: None,
+            required: false,
+            options: Vec::new(),
+            selected_index: Some(1),
+        },
+    )
+    .expect_err("a default outside the normalized option list is rejected");
+    assert_eq!(bad_default.code, CommandErrorCode::InvalidArgument);
+
+    let missing_update = update_form_field(
+        document_id.clone(),
+        "new:999".to_owned(),
+        UpdateFormFieldRequest::Checkbox {
+            name: "ghost".to_owned(),
+            tooltip: None,
+            required: false,
+            checked: false,
+        },
+    )
+    .expect_err("only session-created fields can be updated");
+    assert_eq!(missing_update.code, CommandErrorCode::FormFieldNotFound);
+    let missing_delete = delete_form_field(document_id.clone(), "new:999".to_owned())
+        .expect_err("only session-created fields can be deleted");
+    assert_eq!(missing_delete.code, CommandErrorCode::FormFieldNotFound);
+
+    assert_eq!(
+        form_fields(document_id.clone()).expect("fields after rejections"),
+        fields_before,
+        "rejected requests create, change and delete nothing"
+    );
+    assert_eq!(
+        created_revision(&document_id),
+        revision_after_create,
+        "rejected requests add no history entries"
+    );
+
+    let created = create_form_field(
+        document_id.clone(),
+        0,
+        CreateFormFieldRequest::Radio {
+            rect: checkbox_rect,
+            name: Some("contact".to_owned()),
+            tooltip: None,
+            required: false,
+            options: vec!["A".to_owned(), "B".to_owned()],
+            selected_index: Some(0),
+        },
+    )
+    .expect("a valid radio group still works after the rejections");
+    assert_eq!(created.fields.len(), fields_before.len() + 2);
 
     close_document(document_id).expect("close document");
 }
@@ -446,6 +1251,38 @@ fn decode_pdf_text(object: &lopdf::Object) -> String {
     } else {
         String::from_utf8_lossy(bytes).into_owned()
     }
+}
+
+fn name_text(object: &lopdf::Object) -> String {
+    String::from_utf8_lossy(object.as_name().expect("name object")).into_owned()
+}
+
+/// Button state objects may be names (as PDFX writes them) or strings (as
+/// PDFium's fill path serializes them); both spellings mean the same state.
+fn state_text(object: &lopdf::Object) -> String {
+    match object {
+        lopdf::Object::Name(bytes) => String::from_utf8_lossy(bytes).into_owned(),
+        other => {
+            let text = decode_pdf_text(other);
+            text.strip_prefix('/').unwrap_or(&text).to_owned()
+        }
+    }
+}
+
+fn page_annots(document: &lopdf::Document, page_number: u32) -> Vec<lopdf::ObjectId> {
+    let page_id = document.get_pages().get(&page_number).copied().unwrap();
+    let page = document
+        .get_object(page_id)
+        .expect("page object")
+        .as_dict()
+        .expect("page dictionary");
+    page.get(b"Annots")
+        .expect("/Annots")
+        .as_array()
+        .expect("annotation array")
+        .iter()
+        .map(|annotation| annotation.as_reference().expect("annotation reference"))
+        .collect()
 }
 
 fn field_named<'a>(document: &'a lopdf::Document, name: &str) -> &'a lopdf::Dictionary {
@@ -772,6 +1609,410 @@ fn saves_a_created_field_with_ap_da_dr_and_a_cjk_appearance() {
 }
 
 #[test]
+fn saves_checkbox_and_radio_widget_structures_that_other_readers_agree_on() {
+    let pdf = synthetic::single_line_pdf();
+    let source = fs::read(pdf.path_string()).expect("read synthetic source");
+    let dir = support::temp::TempDir::new("create-check-radio-save");
+    let output = dir.path().join("output.pdf");
+    let document_id = open_synthetic(&pdf);
+
+    create_form_field(
+        document_id.clone(),
+        0,
+        CreateFormFieldRequest::Checkbox {
+            rect: FormFieldRect {
+                x: 72.0,
+                y: 100.0,
+                width: 16.0,
+                height: 16.0,
+            },
+            name: Some("agree".to_owned()),
+            tooltip: Some("同意条款".to_owned()),
+            required: true,
+            checked: true,
+        },
+    )
+    .expect("create a checkbox");
+    create_form_field(
+        document_id.clone(),
+        0,
+        CreateFormFieldRequest::Radio {
+            rect: FormFieldRect {
+                x: 72.0,
+                y: 140.0,
+                width: 16.0,
+                height: 16.0,
+            },
+            name: Some("contact".to_owned()),
+            tooltip: Some("联系方式".to_owned()),
+            required: true,
+            options: vec!["Email".to_owned(), "Phone".to_owned()],
+            selected_index: Some(1),
+        },
+    )
+    .expect("create a radio group");
+
+    save_as(&document_id, &output);
+    assert_eq!(
+        fs::read(pdf.path_string()).expect("source after save"),
+        source,
+        "the Source Document is never modified"
+    );
+    let output_bytes = fs::read(&output).expect("read output");
+    assert!(output_bytes.starts_with(&source));
+    assert!(
+        !output_bytes.windows(4).any(|window| window == b"new:"),
+        "session ids never reach the saved file"
+    );
+
+    let reopened = open_document(output.to_string_lossy().into_owned(), None)
+        .expect("reopen the saved output")
+        .document_id;
+    let fields = form_fields(reopened.clone()).expect("fields after reopen");
+    assert_eq!(fields.len(), 3);
+    let checkbox = fields
+        .iter()
+        .find(|field| field.name == "agree")
+        .expect("the checkbox is rediscovered");
+    assert_eq!(checkbox.kind, FormFieldKind::Checkbox);
+    assert!(checkbox.checked && checkbox.required && !checkbox.created);
+    let group: Vec<_> = fields
+        .iter()
+        .filter(|field| field.name == "contact")
+        .collect();
+    assert_eq!(group.len(), 2);
+    assert!(group.iter().all(|field| field.kind == FormFieldKind::Radio
+        && field.required
+        && !field.created
+        && field.radio_group.as_deref() == Some("contact")
+        && field.value.as_deref() == Some("Phone")));
+    assert_eq!(
+        group
+            .iter()
+            .map(|field| field.export_value.as_deref())
+            .collect::<Vec<_>>(),
+        vec![Some("Email"), Some("Phone")]
+    );
+    assert_eq!(
+        group.iter().map(|field| field.checked).collect::<Vec<_>>(),
+        vec![false, true]
+    );
+    assert!(missing_required_fields(reopened.clone())
+        .expect("required fields")
+        .is_empty());
+
+    let pixels = render_pixels(&reopened, 0, 2.0);
+    let (selected_ink, _) = ink_in_region(&pixels, 2.0, (72.0, 160.0, 88.0, 176.0));
+    let (unselected_ink, _) = ink_in_region(&pixels, 2.0, (72.0, 140.0, 88.0, 156.0));
+    assert!(
+        selected_ink > unselected_ink,
+        "the selected radio option paints its dot: {selected_ink} vs {unselected_ink}"
+    );
+    let (checkbox_ink, _) = ink_in_region(&pixels, 2.0, (72.0, 100.0, 88.0, 116.0));
+    assert!(checkbox_ink > 10, "the checked checkbox paints a mark");
+    close_document(reopened).expect("close reopened");
+
+    let parsed = lopdf::Document::load(&output).expect("lopdf parses the output");
+    let catalog = lopdf_catalog(&parsed);
+    let acro_form = lopdf_dict(&parsed, catalog.get(b"AcroForm").expect("/AcroForm"));
+    assert!(
+        acro_form.get(b"NeedAppearances").is_err(),
+        "generated widgets carry static appearances"
+    );
+    assert!(
+        acro_form.get(b"DR").is_err() && acro_form.get(b"DA").is_err(),
+        "checkbox and radio widgets need no font resources"
+    );
+    let field_refs: Vec<lopdf::ObjectId> = acro_form
+        .get(b"Fields")
+        .expect("/Fields")
+        .as_array()
+        .expect("field array")
+        .iter()
+        .map(|field| field.as_reference().expect("field reference"))
+        .collect();
+    assert_eq!(field_refs.len(), 2, "the radio group is one parent field");
+    assert_eq!(
+        decode_pdf_text(
+            lopdf_dict(
+                &parsed,
+                &acro_form.get(b"Fields").unwrap().as_array().unwrap()[0]
+            )
+            .get(b"T")
+            .unwrap()
+        ),
+        "agree"
+    );
+    let checkbox_dict = parsed
+        .get_object(field_refs[0])
+        .expect("checkbox object")
+        .as_dict()
+        .expect("checkbox dictionary");
+    assert_eq!(name_text(checkbox_dict.get(b"FT").unwrap()), "Btn");
+    let flags = checkbox_dict.get(b"Ff").unwrap().as_i64().unwrap();
+    assert_eq!(flags & 2, 2, "the required bit is set");
+    assert_eq!(flags & (1 << 15), 0, "a checkbox is not a radio group");
+    assert_eq!(flags & (1 << 12), 0);
+    let state = name_text(checkbox_dict.get(b"V").unwrap());
+    assert_eq!(state, "Yes");
+    assert_eq!(name_text(checkbox_dict.get(b"AS").unwrap()), state);
+    assert_eq!(
+        decode_pdf_text(checkbox_dict.get(b"TU").unwrap()),
+        "同意条款"
+    );
+    assert_eq!(checkbox_dict.get(b"F").unwrap().as_i64().unwrap(), 4);
+    assert!(checkbox_dict.get(b"P").unwrap().as_reference().is_ok());
+    assert_rect_close(
+        &numbers(checkbox_dict.get(b"Rect").unwrap()),
+        [72.0, 676.0, 88.0, 692.0],
+    );
+    let ap = lopdf_dict(&parsed, checkbox_dict.get(b"AP").unwrap());
+    let normal = lopdf_dict(&parsed, ap.get(b"N").unwrap());
+    let off_content = stream_content(&parsed, normal.get(b"Off").expect("Off appearance"));
+    let on_content = stream_content(&parsed, normal.get(b"Yes").expect("Yes appearance"));
+    assert!(!off_content.is_empty() && !on_content.is_empty());
+    assert_ne!(off_content, on_content, "the two states paint differently");
+
+    let parent_dict = parsed
+        .get_object(field_refs[1])
+        .expect("radio parent object")
+        .as_dict()
+        .expect("radio parent dictionary");
+    assert_eq!(name_text(parent_dict.get(b"FT").unwrap()), "Btn");
+    let flags = parent_dict.get(b"Ff").unwrap().as_i64().unwrap();
+    assert_ne!(flags & (1 << 15), 0, "the radio bit is set");
+    assert_eq!(flags & 2, 2, "the required bit is set");
+    assert!(
+        parent_dict.get(b"Rect").is_err(),
+        "the parent field has no widget of its own"
+    );
+    assert_eq!(name_text(parent_dict.get(b"V").unwrap()), "Phone");
+    assert_eq!(decode_pdf_text(parent_dict.get(b"T").unwrap()), "contact");
+    assert_eq!(decode_pdf_text(parent_dict.get(b"TU").unwrap()), "联系方式");
+    let kids = parent_dict
+        .get(b"Kids")
+        .expect("/Kids")
+        .as_array()
+        .expect("kid array");
+    assert_eq!(kids.len(), 2);
+    let mut export_values = Vec::new();
+    for (index, kid_object) in kids.iter().enumerate() {
+        let kid = lopdf_dict(&parsed, kid_object);
+        assert_eq!(
+            kid.get(b"Parent")
+                .expect("/Parent")
+                .as_reference()
+                .expect("parent reference"),
+            field_refs[1],
+            "each widget points at the parent field"
+        );
+        assert!(kid.get(b"T").is_err(), "kids do not repeat the field name");
+        assert_eq!(kid.get(b"F").unwrap().as_i64().unwrap(), 4);
+        assert_rect_close(
+            &numbers(kid.get(b"Rect").unwrap()),
+            [
+                72.0,
+                792.0 - (156.0 + index as f32 * 20.0),
+                88.0,
+                792.0 - (140.0 + index as f32 * 20.0),
+            ],
+        );
+        let export = if index == 0 { "Email" } else { "Phone" };
+        export_values.push(export.to_owned());
+        assert_eq!(
+            name_text(kid.get(b"AS").unwrap()),
+            if index == 1 { "Phone" } else { "Off" },
+            "kid /AS agrees with the parent /V"
+        );
+        let ap = lopdf_dict(&parsed, kid.get(b"AP").unwrap());
+        let normal = lopdf_dict(&parsed, ap.get(b"N").unwrap());
+        assert!(normal.get(b"Off").is_ok());
+        assert!(
+            normal.get(export.as_bytes()).is_ok(),
+            "option {index} has an on-state named {export}"
+        );
+        assert_ne!(
+            stream_content(&parsed, normal.get(b"Off").unwrap()),
+            stream_content(&parsed, normal.get(export.as_bytes()).unwrap()),
+            "the selected state paints its dot"
+        );
+    }
+    export_values.sort();
+    assert_eq!(export_values, vec!["Email", "Phone"]);
+
+    let pages = parsed.get_pages();
+    let page_id = pages.get(&1).copied().expect("first page");
+    let page = parsed
+        .get_object(page_id)
+        .expect("page object")
+        .as_dict()
+        .expect("page dictionary");
+    let annots: Vec<lopdf::ObjectId> = page
+        .get(b"Annots")
+        .expect("/Annots")
+        .as_array()
+        .expect("annotation array")
+        .iter()
+        .map(|annotation| annotation.as_reference().expect("annotation reference"))
+        .collect();
+    assert_eq!(annots.len(), 3, "checkbox plus two radio widgets");
+    assert!(annots.contains(&field_refs[0]));
+    assert!(annots.contains(&kids[0].as_reference().unwrap()));
+    assert!(annots.contains(&kids[1].as_reference().unwrap()));
+
+    // A second save re-applies the same writer without duplicating structure.
+    save_changes(&document_id);
+    let parsed = lopdf::Document::load(&output).expect("parse the repeat save");
+    let catalog = lopdf_catalog(&parsed);
+    let acro_form = lopdf_dict(&parsed, catalog.get(b"AcroForm").expect("/AcroForm"));
+    assert_eq!(
+        acro_form.get(b"Fields").unwrap().as_array().unwrap().len(),
+        2
+    );
+    let page = parsed
+        .get_object(parsed.get_pages().get(&1).copied().unwrap())
+        .unwrap()
+        .as_dict()
+        .unwrap();
+    assert_eq!(page.get(b"Annots").unwrap().as_array().unwrap().len(), 3);
+    let parent = field_named(&parsed, "contact");
+    assert_eq!(parent.get(b"Kids").unwrap().as_array().unwrap().len(), 2);
+
+    close_document(document_id).expect("close document");
+}
+
+#[test]
+fn saved_widgets_fill_through_the_shared_path_and_keep_values_consistent() {
+    let pdf = synthetic::single_line_pdf();
+    let dir = support::temp::TempDir::new("create-check-radio-refill");
+    let first_output = dir.path().join("first.pdf");
+    let second_output = dir.path().join("second.pdf");
+    let document_id = open_synthetic(&pdf);
+
+    create_form_field(
+        document_id.clone(),
+        0,
+        CreateFormFieldRequest::Checkbox {
+            rect: FormFieldRect {
+                x: 72.0,
+                y: 100.0,
+                width: 16.0,
+                height: 16.0,
+            },
+            name: Some("agree".to_owned()),
+            tooltip: None,
+            required: true,
+            checked: false,
+        },
+    )
+    .expect("create a required checkbox");
+    create_form_field(
+        document_id.clone(),
+        0,
+        CreateFormFieldRequest::Radio {
+            rect: FormFieldRect {
+                x: 72.0,
+                y: 140.0,
+                width: 16.0,
+                height: 16.0,
+            },
+            name: Some("pick".to_owned()),
+            tooltip: None,
+            required: true,
+            options: vec!["A".to_owned(), "B".to_owned()],
+            selected_index: None,
+        },
+    )
+    .expect("create a required radio group");
+    save_as(&document_id, &first_output);
+
+    let reopened = open_document(first_output.to_string_lossy().into_owned(), None)
+        .expect("reopen the first save")
+        .document_id;
+    let fields = form_fields(reopened.clone()).expect("reopened fields");
+    assert_eq!(fields.len(), 3);
+    assert_eq!(
+        missing_required_fields(reopened.clone())
+            .expect("required fields")
+            .len(),
+        2,
+        "the saved unchecked checkbox and unanswered radio both block saving"
+    );
+    let checkbox_id = fields
+        .iter()
+        .find(|field| field.name == "agree")
+        .expect("checkbox")
+        .field_id
+        .clone();
+    let radio_b_id = fields
+        .iter()
+        .find(|field| field.name == "pick" && field.export_value.as_deref() == Some("B"))
+        .expect("second radio option")
+        .field_id
+        .clone();
+
+    fill_form_field(
+        reopened.clone(),
+        checkbox_id,
+        FormFieldValueInput::Checked { checked: true },
+    )
+    .expect("check the saved checkbox");
+    fill_form_field(
+        reopened.clone(),
+        radio_b_id,
+        FormFieldValueInput::Checked { checked: true },
+    )
+    .expect("select the saved radio option");
+    assert!(missing_required_fields(reopened.clone())
+        .expect("required fields after filling")
+        .is_empty());
+    save_as(&reopened, &second_output);
+    close_document(reopened).expect("close reopened");
+
+    let parsed = lopdf::Document::load(&second_output).expect("parse the second save");
+    let checkbox = field_named(&parsed, "agree");
+    assert_eq!(state_text(checkbox.get(b"V").unwrap()), "Yes");
+    assert_eq!(state_text(checkbox.get(b"AS").unwrap()), "Yes");
+    let parent = field_named(&parsed, "pick");
+    assert_eq!(state_text(parent.get(b"V").unwrap()), "B");
+    let kids = parent.get(b"Kids").unwrap().as_array().unwrap();
+    assert_eq!(
+        state_text(lopdf_dict(&parsed, &kids[0]).get(b"AS").unwrap()),
+        "Off"
+    );
+    assert_eq!(
+        state_text(lopdf_dict(&parsed, &kids[1]).get(b"AS").unwrap()),
+        "B"
+    );
+
+    let reopened = open_document(second_output.to_string_lossy().into_owned(), None)
+        .expect("reopen the second save")
+        .document_id;
+    let fields = form_fields(reopened.clone()).expect("fields after refill");
+    assert!(
+        fields
+            .iter()
+            .find(|field| field.name == "agree")
+            .expect("checkbox")
+            .checked
+    );
+    assert_eq!(
+        fields
+            .iter()
+            .filter(|field| field.name == "pick")
+            .map(|field| field.checked)
+            .collect::<Vec<_>>(),
+        vec![false, true]
+    );
+    assert!(missing_required_fields(reopened.clone())
+        .expect("required fields after refill save")
+        .is_empty());
+    close_document(reopened).expect("close reopened");
+
+    close_document(document_id).expect("close document");
+}
+
+#[test]
 fn repeated_saves_never_duplicate_created_fields() {
     let pdf = synthetic::single_line_pdf();
     let source = fs::read(pdf.path_string()).expect("read source");
@@ -1005,6 +2246,186 @@ fn rotated_pages_get_upright_compensated_appearances() {
 }
 
 #[test]
+fn checkbox_and_radio_appearances_compensate_page_rotation() {
+    let pdf = synthetic::rotated_crop_pdf();
+    let dir = support::temp::TempDir::new("create-check-radio-rotated");
+    let output = dir.path().join("output.pdf");
+    let document_id = open_synthetic(&pdf);
+
+    for page_index in 0..3u32 {
+        create_form_field(
+            document_id.clone(),
+            page_index,
+            CreateFormFieldRequest::Checkbox {
+                rect: FormFieldRect {
+                    x: 40.0,
+                    y: 200.0,
+                    width: 180.0,
+                    height: 30.0,
+                },
+                name: Some(format!("rotated_agree_{page_index}")),
+                tooltip: None,
+                required: false,
+                checked: true,
+            },
+        )
+        .expect("create a checkbox on a rotated page");
+        create_form_field(
+            document_id.clone(),
+            page_index,
+            CreateFormFieldRequest::Radio {
+                rect: FormFieldRect {
+                    x: 40.0,
+                    y: 250.0,
+                    width: 180.0,
+                    height: 30.0,
+                },
+                name: Some(format!("rotated_pick_{page_index}")),
+                tooltip: None,
+                required: false,
+                options: vec!["A".to_owned()],
+                selected_index: Some(0),
+            },
+        )
+        .expect("create a radio group on a rotated page");
+    }
+    save_as(&document_id, &output);
+
+    // The same display rect as the ticket-31 rotation test: its user-space
+    // rectangles and appearance matrices are already known-good literals.
+    let expected_rects = [
+        [250.0, 120.0, 280.0, 300.0], // /Rotate 90
+        [230.0, 280.0, 410.0, 310.0], // /Rotate 180
+        [220.0, 460.0, 250.0, 640.0], // /Rotate 270
+    ];
+    let expected_matrices = [
+        "0 1 -1 0 280 120 cm",
+        "-1 0 0 -1 410 310 cm",
+        "0 -1 1 0 220 640 cm",
+    ];
+    let rotations = [90u16, 180, 270];
+    let parsed = lopdf::Document::load(&output).expect("parse output");
+    for page_index in 0..3usize {
+        let checkbox = field_named(&parsed, &format!("rotated_agree_{page_index}"));
+        assert_rect_close(
+            &numbers(checkbox.get(b"Rect").expect("/Rect")),
+            expected_rects[page_index],
+        );
+        let ap = lopdf_dict(&parsed, checkbox.get(b"AP").expect("/AP"));
+        let normal = lopdf_dict(&parsed, ap.get(b"N").expect("/AP /N"));
+        let off = normal.get(b"Off").expect("Off state");
+        let on = normal.get(b"Yes").expect("Yes state");
+        for (state, object) in [("Off", off), ("Yes", on)] {
+            let stream = parsed
+                .get_object(object.as_reference().expect("stream reference"))
+                .expect("appearance stream")
+                .as_stream()
+                .expect("stream");
+            assert_rect_close(
+                &numbers(stream.dict.get(b"BBox").expect("/BBox")),
+                expected_rects[page_index],
+            );
+            let content =
+                String::from_utf8_lossy(&stream.get_plain_content().expect("plain appearance"))
+                    .into_owned();
+            assert!(
+                content.contains(expected_matrices[page_index]),
+                "checkbox {state} appearance on page {page_index}: {content}"
+            );
+        }
+
+        let parent = field_named(&parsed, &format!("rotated_pick_{page_index}"));
+        assert_eq!(
+            name_text(parent.get(b"V").expect("/V")),
+            "A",
+            "page {page_index} parent value"
+        );
+        let kids = parent
+            .get(b"Kids")
+            .expect("/Kids")
+            .as_array()
+            .expect("kids");
+        let kid = lopdf_dict(&parsed, &kids[0]);
+        assert_eq!(name_text(kid.get(b"AS").expect("/AS")), "A");
+        let kid_rect = numbers(kid.get(b"Rect").expect("/Rect"));
+        assert_eq!(kid_rect.len(), 4);
+        let [x0, y0, x1, y1] = [kid_rect[0], kid_rect[1], kid_rect[2], kid_rect[3]];
+        let expected_matrix = match rotations[page_index] {
+            90 => format!("0 1 -1 0 {x1} {y0} cm"),
+            180 => format!("-1 0 0 -1 {x1} {y1} cm"),
+            _ => format!("0 -1 1 0 {x0} {y1} cm"),
+        };
+        let ap = lopdf_dict(&parsed, kid.get(b"AP").expect("/AP"));
+        let normal = lopdf_dict(&parsed, ap.get(b"N").expect("/AP /N"));
+        let selected = parsed
+            .get_object(
+                normal
+                    .get(b"A")
+                    .expect("selected appearance")
+                    .as_reference()
+                    .expect("reference"),
+            )
+            .expect("stream")
+            .as_stream()
+            .expect("stream");
+        assert_rect_close(
+            &numbers(selected.dict.get(b"BBox").expect("/BBox")),
+            [x0, y0, x1, y1],
+        );
+        let content =
+            String::from_utf8_lossy(&selected.get_plain_content().expect("plain appearance"))
+                .into_owned();
+        assert!(
+            content.contains(&expected_matrix),
+            "radio appearance on page {page_index}: {content}"
+        );
+    }
+
+    // PDFium maps every widget back to the display rectangle it was drawn in.
+    let reopened = open_document(output.to_string_lossy().into_owned(), None)
+        .expect("reopen")
+        .document_id;
+    let fields = form_fields(reopened.clone()).expect("reopened fields");
+    for page_index in 0..3u32 {
+        let checkbox = fields
+            .iter()
+            .find(|field| field.name == format!("rotated_agree_{page_index}"))
+            .expect("checkbox rediscovered");
+        assert!(checkbox.checked);
+        assert!((checkbox.rect.x - 40.0).abs() < 0.01);
+        assert!((checkbox.rect.y - 200.0).abs() < 0.01);
+        assert!((checkbox.rect.width - 180.0).abs() < 0.01);
+        assert!((checkbox.rect.height - 30.0).abs() < 0.01);
+        let radio = fields
+            .iter()
+            .find(|field| field.name == format!("rotated_pick_{page_index}"))
+            .expect("radio rediscovered");
+        assert!(radio.checked);
+        assert_eq!(radio.value.as_deref(), Some("A"));
+        assert!((radio.rect.x - 40.0).abs() < 0.01);
+        assert!((radio.rect.y - 250.0).abs() < 0.01);
+        assert!((radio.rect.width - 180.0).abs() < 0.01);
+        assert!((radio.rect.height - 30.0).abs() < 0.01);
+    }
+
+    for page_index in 0..3u32 {
+        let pixels = render_pixels(&reopened, page_index, 2.0);
+        let (checkbox_ink, _) = ink_in_region(&pixels, 2.0, (42.0, 202.0, 218.0, 228.0));
+        assert!(
+            checkbox_ink > 10,
+            "page {page_index} paints the checkbox mark: {checkbox_ink}"
+        );
+        let (radio_ink, _) = ink_in_region(&pixels, 2.0, (42.0, 252.0, 218.0, 278.0));
+        assert!(
+            radio_ink > 10,
+            "page {page_index} paints the selected radio: {radio_ink}"
+        );
+    }
+    close_document(reopened).expect("close reopened");
+    close_document(document_id).expect("close document");
+}
+
+#[test]
 fn merges_created_fields_into_an_existing_acroform() {
     let dir = support::temp::TempDir::new("create-text-merge");
     let source = dir.path().join("source.pdf");
@@ -1101,6 +2522,193 @@ fn merges_created_fields_into_an_existing_acroform() {
 }
 
 #[test]
+fn merges_checkbox_and_radio_into_an_existing_acroform_and_preserves_it() {
+    let dir = support::temp::TempDir::new("create-check-radio-merge");
+    let source = dir.path().join("source.pdf");
+    fs::copy(fixture_path("form-acroform"), &source).expect("copy fixture");
+    let source_bytes = fs::read(&source).expect("read source");
+    let source_modified = fs::metadata(&source)
+        .expect("source metadata")
+        .modified()
+        .expect("source mtime");
+    let output = dir.path().join("output.pdf");
+
+    let source_parsed = lopdf::Document::load(&source).expect("parse fixture");
+    let catalog = lopdf_catalog(&source_parsed);
+    let source_acro_form = lopdf_dict(&source_parsed, catalog.get(b"AcroForm").expect("/AcroForm"));
+    let source_field_count = source_acro_form
+        .get(b"Fields")
+        .expect("/Fields")
+        .as_array()
+        .expect("field array")
+        .len();
+    let annots_before = page_annots(&source_parsed, 1);
+
+    let document_id = open_document(source.to_string_lossy().into_owned(), None)
+        .expect("open the form fixture")
+        .document_id;
+    let before = form_fields(document_id.clone()).expect("existing fields");
+    assert!(before.len() >= 10, "the fixture is a populated form");
+
+    create_form_field(
+        document_id.clone(),
+        0,
+        CreateFormFieldRequest::Checkbox {
+            rect: FormFieldRect {
+                x: 72.0,
+                y: 500.0,
+                width: 16.0,
+                height: 16.0,
+            },
+            name: Some("new_agree".to_owned()),
+            tooltip: None,
+            required: false,
+            checked: true,
+        },
+    )
+    .expect("create a checkbox in the existing form");
+    create_form_field(
+        document_id.clone(),
+        0,
+        CreateFormFieldRequest::Radio {
+            rect: FormFieldRect {
+                x: 300.0,
+                y: 500.0,
+                width: 16.0,
+                height: 16.0,
+            },
+            name: Some("new_contact".to_owned()),
+            tooltip: None,
+            required: false,
+            options: vec!["Email".to_owned(), "Phone".to_owned()],
+            selected_index: None,
+        },
+    )
+    .expect("create a radio group in the existing form");
+    save_as(&document_id, &output);
+
+    assert_eq!(
+        fs::read(&source).expect("source after save"),
+        source_bytes,
+        "the Source Document is never modified"
+    );
+    assert_eq!(
+        fs::metadata(&source)
+            .expect("source metadata after save")
+            .modified()
+            .expect("source mtime after save"),
+        source_modified,
+        "saving never touches the Source Document's mtime"
+    );
+    let output_bytes = fs::read(&output).expect("read output");
+    assert!(!output_bytes.windows(4).any(|window| window == b"new:"));
+
+    let reopened = open_document(output.to_string_lossy().into_owned(), None)
+        .expect("reopen merged output")
+        .document_id;
+    let fields = form_fields(reopened.clone()).expect("reopened fields");
+    assert_eq!(fields.len(), before.len() + 3);
+    assert_eq!(
+        fields
+            .iter()
+            .find(|field| field.name == "full_name")
+            .and_then(|field| field.value.as_deref()),
+        Some("Ada Lovelace"),
+        "existing values survive the merge"
+    );
+    assert_eq!(
+        fields
+            .iter()
+            .find(|field| field.name == "country")
+            .and_then(|field| field.value.as_deref()),
+        Some("Japan")
+    );
+    assert!(
+        fields
+            .iter()
+            .find(|field| field.name == "new_agree")
+            .expect("the created checkbox is discovered")
+            .checked
+    );
+    let group: Vec<_> = fields
+        .iter()
+        .filter(|field| field.name == "new_contact")
+        .collect();
+    assert_eq!(group.len(), 2);
+    assert!(group
+        .iter()
+        .all(|field| !field.checked && field.value.is_none()));
+    close_document(reopened).expect("close reopened");
+
+    let parsed = lopdf::Document::load(&output).expect("parse merged output");
+    let catalog = lopdf_catalog(&parsed);
+    let acro_form = lopdf_dict(&parsed, catalog.get(b"AcroForm").expect("/AcroForm"));
+    assert_eq!(
+        acro_form
+            .get(b"NeedAppearances")
+            .expect("/NeedAppearances is preserved")
+            .as_bool()
+            .expect("boolean"),
+        true,
+        "the source's NeedAppearances value is left exactly as it was"
+    );
+    assert_eq!(
+        decode_pdf_text(acro_form.get(b"DA").expect("/DA")),
+        "/Helv 0 Tf 0 g",
+        "the source default appearance is preserved"
+    );
+    let dr = lopdf_dict(&parsed, acro_form.get(b"DR").expect("/DR"));
+    let fonts = lopdf_dict(&parsed, dr.get(b"Font").expect("/DR /Font"));
+    assert!(
+        fonts.get(b"Helv").is_ok(),
+        "the source font stays available"
+    );
+    assert!(
+        fonts.get(b"PdfxNoto").is_err(),
+        "no font is embedded when only checkbox and radio fields are created"
+    );
+    assert_eq!(
+        acro_form.get(b"Fields").unwrap().as_array().unwrap().len(),
+        source_field_count + 2,
+        "one new /Fields entry for the checkbox and one for the radio parent"
+    );
+    assert_eq!(
+        decode_pdf_text(field_named(&parsed, "full_name").get(b"V").unwrap()),
+        "Ada Lovelace"
+    );
+    assert_eq!(
+        decode_pdf_text(field_named(&parsed, "country").get(b"V").unwrap()),
+        "Japan"
+    );
+    let checkbox = field_named(&parsed, "new_agree");
+    assert_eq!(name_text(checkbox.get(b"FT").unwrap()), "Btn");
+    assert_eq!(name_text(checkbox.get(b"V").unwrap()), "Yes");
+    assert_eq!(name_text(checkbox.get(b"AS").unwrap()), "Yes");
+    let parent = field_named(&parsed, "new_contact");
+    assert_eq!(name_text(parent.get(b"V").unwrap()), "Off");
+    let kids = parent.get(b"Kids").unwrap().as_array().unwrap();
+    assert_eq!(kids.len(), 2);
+    for kid in kids {
+        let kid = lopdf_dict(&parsed, kid);
+        assert_eq!(name_text(kid.get(b"AS").unwrap()), "Off");
+    }
+
+    let annots_after = page_annots(&parsed, 1);
+    assert_eq!(
+        annots_after.len(),
+        annots_before.len() + 3,
+        "existing annotations are kept and the new widgets are appended"
+    );
+    assert_eq!(
+        &annots_after[..annots_before.len()],
+        &annots_before[..],
+        "the existing annotation order is preserved"
+    );
+
+    close_document(document_id).expect("close document");
+}
+
+#[test]
 fn permission_restricted_documents_refuse_creation_with_a_chinese_reason() {
     use pdfx_lib::text_edit::edit_history;
 
@@ -1124,6 +2732,42 @@ fn permission_restricted_documents_refuse_creation_with_a_chinese_reason() {
         "the refusal explains the permission restriction in Chinese: {}",
         error.message
     );
+    for request in [
+        CreateFormFieldRequest::Checkbox {
+            rect: FormFieldRect {
+                x: 72.0,
+                y: 100.0,
+                width: 16.0,
+                height: 16.0,
+            },
+            name: None,
+            tooltip: None,
+            required: false,
+            checked: false,
+        },
+        CreateFormFieldRequest::Radio {
+            rect: FormFieldRect {
+                x: 72.0,
+                y: 140.0,
+                width: 16.0,
+                height: 16.0,
+            },
+            name: None,
+            tooltip: None,
+            required: false,
+            options: vec!["A".to_owned()],
+            selected_index: None,
+        },
+    ] {
+        let error = create_form_field(opened.document_id.clone(), 0, request)
+            .expect_err("permission restrictions reject every field kind");
+        assert_eq!(error.code, CommandErrorCode::PermissionDenied);
+        assert!(
+            error.message.contains("权限"),
+            "Chinese permission refusal: {}",
+            error.message
+        );
+    }
     assert!(form_fields(opened.document_id.clone())
         .expect("fields")
         .is_empty());
