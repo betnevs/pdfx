@@ -1213,3 +1213,140 @@ fn repeated_saves_append_one_revision_and_never_grow_fonts_or_appearances() {
     assert!(font_names.iter().any(|name| name == "Helv"));
     assert_eq!(default_font_names(&second), font_names);
 }
+
+/// Writes `source` as an AES-256 (`/V 5`, revision 6) encrypted document.
+fn write_encrypted_source(source: &Path, target: &Path, user_password: &str) {
+    let mut document = lopdf::Document::load(source).expect("load fixture for encryption");
+    let file_encryption_key = [0x5a_u8; 32];
+    let crypt_filters: std::collections::BTreeMap<
+        Vec<u8>,
+        std::sync::Arc<dyn lopdf::encryption::crypt_filters::CryptFilter>,
+    > = std::collections::BTreeMap::from([(
+        b"StdCF".to_vec(),
+        std::sync::Arc::new(lopdf::encryption::crypt_filters::Aes256CryptFilter)
+            as std::sync::Arc<dyn lopdf::encryption::crypt_filters::CryptFilter>,
+    )]);
+    let version = lopdf::EncryptionVersion::V5 {
+        encrypt_metadata: true,
+        crypt_filters,
+        file_encryption_key: &file_encryption_key,
+        stream_filter: b"StdCF".to_vec(),
+        string_filter: b"StdCF".to_vec(),
+        owner_password: "test-owner-password",
+        user_password,
+        permissions: lopdf::Permissions::all(),
+    };
+    let state = lopdf::EncryptionState::try_from(version).expect("build the AES-256 state");
+    document.encrypt(&state).expect("encrypt the fixture");
+    document.save(target).expect("write the encrypted fixture");
+}
+
+/// The Appearance Contract holds for encrypted Source Documents: the pipeline
+/// works on decrypted bytes, and the re-encrypted output carries the fresh
+/// appearances and values.
+#[test]
+fn an_encrypted_source_gets_fresh_appearances_and_stays_encrypted() {
+    let dir = support::temp::TempDir::new("fill-appearance-encrypted");
+    let plain = dir.path().join("plain.pdf");
+    fs::copy(fixture_path("form-fill-appearance"), &plain).expect("copy fixture");
+    let source = dir.path().join("encrypted.pdf");
+    write_encrypted_source(&plain, &source, "source-secret");
+    let source_bytes = fs::read(&source).expect("source bytes");
+
+    let document_id = open_document(
+        source.to_string_lossy().into_owned(),
+        Some("source-secret".to_owned()),
+    )
+    .expect("open encrypted source")
+    .document_id;
+    let fields = form_fields(document_id.clone()).expect("fields");
+    // A Kids-terminal field and a merged multiline field; neither can go
+    // through Pdfium's writer for an encrypted source, so both exercise the
+    // overlay-plus-appearance path.
+    fill(
+        &document_id,
+        field_named(&fields, "membership_id").field_id.clone(),
+        FormFieldValueInput::Text {
+            text: "会员-42".to_owned(),
+        },
+    );
+    fill(
+        &document_id,
+        field_named(&fields, "comments").field_id.clone(),
+        FormFieldValueInput::Text {
+            text: "加密文档已审核".to_owned(),
+        },
+    );
+
+    let output = dir.path().join("protected-output.pdf");
+    let result = save_document_with_progress(
+        &document_id,
+        SaveDocumentRequest {
+            save_as_path: Some(output.to_string_lossy().into_owned()),
+            confirm_unencrypted_output: false,
+            confirm_signature_invalidation: false,
+            password: Some("output-secret".to_owned()),
+        },
+        &mut |_| {},
+    )
+    .expect("save the protected output");
+    assert!(result.encrypted);
+    close_document(document_id).expect("close source");
+
+    assert_eq!(
+        fs::read(&source).expect("source after save"),
+        source_bytes,
+        "the encrypted source stays untouched"
+    );
+    assert!(
+        lopdf::Document::load_with_password(&output, "source-secret").is_err(),
+        "the source password must not open the re-protected output"
+    );
+    // Structure first: lopdf reads the security handler without the password.
+    let structure = lopdf::Document::load(&output).expect("lopdf parses the encrypted output");
+    assert!(structure.is_encrypted(), "the output keeps protection");
+    let parsed =
+        lopdf::Document::load_with_password(&output, "output-secret").expect("decrypt output");
+    assert!(
+        acroform(&parsed).get(b"NeedAppearances").is_err(),
+        "no /NeedAppearances may appear in the output"
+    );
+
+    for (name, expected) in [("membership_id", "会员-42"), ("comments", "加密文档已审核")]
+    {
+        let field = find_field(&parsed, name);
+        assert_eq!(text_of(field.get(b"V").expect("/V")), expected, "{name}");
+        let widgets = widget_ids(&parsed, &field, name);
+        assert!(!widgets.is_empty(), "{name} has a widget");
+        for widget_id in widgets {
+            let content = appearance_content(&parsed, widget(&parsed, widget_id));
+            assert!(
+                !content.contains("STALE"),
+                "{name} must not keep its source appearance: {content:?}"
+            );
+            assert!(
+                content.contains("/PdfxNoto"),
+                "{name} must use the shared embedded subset: {content:?}"
+            );
+        }
+    }
+
+    let missing = open_document(output.to_string_lossy().into_owned(), None)
+        .expect_err("the output is protected");
+    assert_eq!(missing.code, CommandErrorCode::PasswordRequired);
+    let reopened = open_document(
+        output.to_string_lossy().into_owned(),
+        Some("output-secret".to_owned()),
+    )
+    .expect("reopen the output");
+    let fields = form_fields(reopened.document_id.clone()).expect("reopened fields");
+    assert_eq!(
+        field_named(&fields, "membership_id").value.as_deref(),
+        Some("会员-42")
+    );
+    assert_eq!(
+        field_named(&fields, "comments").value.as_deref(),
+        Some("加密文档已审核")
+    );
+    close_document(reopened.document_id).expect("close reopened");
+}
