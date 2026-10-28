@@ -1,0 +1,25 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "fileAssociations": [
+      {
+        "ext": ["pdf"],
+        "name": "PDF document",
+        "description": "PDF document",
+        "mimeType": "application/pdf",
+        "role": "Editor",
+        "rank": "Default"
+      }
+    ],
+    "macOS": {
+      "frameworks": ["vendor/pdfium/lib/libpdfium.dylib"],
+      "minimumSystemVersion": "12.0",
+      "hardenedRuntime": false
+    },
+    "resources": {
+      "../docs/install-macos.md": "INSTALL-macos.md",
+      "vendor/pdfium/LICENSE": "pdfium-licenses/LICENSE",
+      "vendor/pdfium/licenses/": "pdfium-licenses/"
+    }
+  }
+}
