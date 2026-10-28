@@ -6,8 +6,8 @@ use std::sync::{Mutex, OnceLock};
 
 use base64::Engine as _;
 use pdfium_render::prelude::{
-    PdfBitmap, PdfBitmapFormat, PdfDocument, PdfPage, PdfRenderConfig, PdfiumError,
-    PdfiumInternalError,
+    PdfBitmap, PdfBitmapFormat, PdfDocument, PdfPage, PdfRenderConfig, PdfSecurityHandlerRevision,
+    PdfiumError, PdfiumInternalError,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, WebviewUrl, WebviewWindowBuilder};
@@ -80,6 +80,24 @@ impl CommandError {
     }
 }
 
+/// Editing capabilities granted by the PDF security handler.
+///
+/// Unencrypted documents grant every capability. Encrypted documents report
+/// the capabilities granted by the Permission Restrictions unless they were
+/// opened with the Owner Password, which grants all of them. Individual edit
+/// tools consult these flags so a restriction on annotations, for example,
+/// does not wrongly disable text editing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentPermissions {
+    pub can_modify_content: bool,
+    pub can_annotate: bool,
+    pub can_assemble: bool,
+    pub can_fill_forms: bool,
+    pub can_print: bool,
+    pub can_copy_content: bool,
+}
+
 /// A document as seen by the frontend. It never contains PDFium handles.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -90,6 +108,15 @@ pub struct DocumentView {
     pub page_count: u32,
     pub page_width: f32,
     pub page_height: f32,
+    /// True when the Source Document is encrypted (User or Owner Password).
+    /// Save As must warn that the output is written unencrypted (ADR-0007).
+    pub encrypted: bool,
+    /// True when the Permission Restrictions deny every editing capability
+    /// (content modification, annotation, form filling and page assembly).
+    /// Save Changes is disabled for such documents; individual tools use
+    /// `permissions` for finer gating.
+    pub read_only: bool,
+    pub permissions: DocumentPermissions,
 }
 
 /// A rendered page encoded as PNG. The payload is base64 so it crosses the IPC
@@ -216,6 +243,8 @@ pub fn open_document(path: String, password: Option<String>) -> Result<DocumentV
         (page.width().value, page.height().value)
     };
 
+    let (encrypted, read_only, permissions) = document_permissions(&document);
+
     let view = {
         let mut registry = registry().lock().expect("document registry poisoned");
         registry.next_id += 1;
@@ -227,6 +256,9 @@ pub fn open_document(path: String, password: Option<String>) -> Result<DocumentV
             page_count: page_count as u32,
             page_width,
             page_height,
+            encrypted,
+            read_only,
+            permissions,
         };
         registry.documents.insert(
             document_id,
@@ -239,6 +271,46 @@ pub fn open_document(path: String, password: Option<String>) -> Result<DocumentV
     };
 
     Ok(view)
+}
+
+/// Reads the effective permissions the PDF security handler grants.
+///
+/// Returns `(encrypted, read_only, permissions)`. PDFium reports every
+/// capability for unencrypted documents and for documents opened with the
+/// Owner Password; Permission Restrictions only narrow the flags when the
+/// document was opened with the User Password.
+fn document_permissions(document: &PdfDocument<'_>) -> (bool, bool, DocumentPermissions) {
+    let permissions = document.permissions();
+
+    // `Unprotected` is the only unencrypted revision. PDFium reports an error
+    // for revisions this binding does not name (for example AES-256 revision 6),
+    // and those documents are encrypted, so fail towards warning about it.
+    let encrypted = !matches!(
+        permissions.security_handler_revision(),
+        Ok(PdfSecurityHandlerRevision::Unprotected)
+    );
+
+    // A missing permission read is treated as denied: the editor must never
+    // allow an edit the security handler may forbid.
+    let granted = |result: Result<bool, PdfiumError>| result.unwrap_or(false);
+    let flags = DocumentPermissions {
+        can_modify_content: granted(permissions.can_modify_document_content()),
+        can_annotate: granted(permissions.can_add_or_modify_text_annotations()),
+        can_assemble: granted(permissions.can_assemble_document()),
+        can_fill_forms: granted(permissions.can_fill_existing_interactive_form_fields()),
+        can_print: granted(permissions.can_print_high_quality())
+            || granted(permissions.can_print_only_low_quality()),
+        can_copy_content: granted(permissions.can_extract_text_and_graphics()),
+    };
+
+    // Read-only means no editing surface at all; a document that only forbids
+    // annotations stays editable and gates that tool through `permissions`.
+    let read_only = !(flags.can_modify_content
+        || flags.can_annotate
+        || flags.can_assemble
+        || flags.can_fill_forms);
+
+    (encrypted, read_only, flags)
 }
 
 /// The `close_document` command. Closing an unknown document is a no-op so a

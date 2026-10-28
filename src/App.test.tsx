@@ -8,6 +8,10 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
+import {
+  READ_ONLY_REASON,
+  UNENCRYPTED_OUTPUT_WARNING,
+} from "./lib/document-policy";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
@@ -19,6 +23,15 @@ const invokeMock = vi.mocked(invoke);
 const openDialogMock = vi.mocked(openDialog);
 const listenMock = vi.mocked(listen);
 
+const allGrantedPermissions = {
+  canModifyContent: true,
+  canAnnotate: true,
+  canAssemble: true,
+  canFillForms: true,
+  canPrint: true,
+  canCopyContent: true,
+};
+
 const documentView = {
   documentId: "doc-1",
   name: "report.pdf",
@@ -26,6 +39,9 @@ const documentView = {
   pageCount: 3,
   pageWidth: 612,
   pageHeight: 792,
+  encrypted: false,
+  readOnly: false,
+  permissions: allGrantedPermissions,
 };
 
 const pageImage = {
@@ -332,6 +348,136 @@ describe("PDFX workspace", () => {
     await user.click(screen.getByRole("button", { name: "重试" }));
 
     await waitFor(() => expect(commandCalls("open_document")).toHaveLength(2));
+  });
+
+  it("asks for a password, rejects a wrong one without rendering, then opens with the right one", async () => {
+    installDocumentBackend({
+      open_document: (args) => {
+        const { password } = args as { password: string | null };
+        if (password === null) {
+          throw { code: "password_required", message: "this document requires a password" };
+        }
+        if (password !== "pdfx-user") {
+          throw {
+            code: "invalid_password",
+            message: "the supplied password did not open the document",
+          };
+        }
+        return {
+          ...documentView,
+          name: "secret.pdf",
+          path: "/tmp/secret.pdf",
+          encrypted: true,
+        };
+      },
+    });
+    openDialogMock.mockResolvedValueOnce("/tmp/secret.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+
+    expect(await screen.findByRole("dialog", { name: "输入密码" })).toBeInTheDocument();
+    expect(screen.queryByRole("img")).not.toBeInTheDocument();
+    expect(renderPageCalls()).toEqual([]);
+    expect(commandCalls("open_document")).toEqual([
+      ["open_document", { path: "/tmp/secret.pdf", password: null }],
+    ]);
+
+    await user.type(screen.getByLabelText("密码"), "wrong");
+    await user.click(screen.getByRole("button", { name: "打开" }));
+
+    expect(await screen.findByText("密码不正确，请重试。")).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "输入密码" })).toBeInTheDocument();
+    expect(screen.queryByRole("img")).not.toBeInTheDocument();
+    expect(renderPageCalls()).toEqual([]);
+
+    await user.clear(screen.getByLabelText("密码"));
+    await user.type(screen.getByLabelText("密码"), "pdfx-user");
+    await user.click(screen.getByRole("button", { name: "打开" }));
+
+    expect(await screen.findByText("secret.pdf")).toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(renderPageCalls()).toEqual([
+        { documentId: "doc-1", pageIndex: 0, scale: 1 },
+      ]);
+    });
+    expect(commandCalls("open_document").at(-1)).toEqual([
+      "open_document",
+      { path: "/tmp/secret.pdf", password: "pdfx-user" },
+    ]);
+  });
+
+  it("returns to the empty workspace when the password prompt is cancelled", async () => {
+    installDocumentBackend({
+      open_document: () => {
+        throw { code: "password_required", message: "this document requires a password" };
+      },
+    });
+    openDialogMock.mockResolvedValueOnce("/tmp/secret.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByRole("dialog", { name: "输入密码" });
+
+    await user.click(screen.getByRole("button", { name: "取消" }));
+
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 2, name: "空工作区" })).toBeInTheDocument();
+    expect(renderPageCalls()).toEqual([]);
+  });
+
+  it("shows the read-only reason and disables editing and save entries for restricted documents", async () => {
+    installDocumentBackend({
+      open_document: () => ({
+        ...documentView,
+        encrypted: true,
+        readOnly: true,
+        permissions: {
+          ...allGrantedPermissions,
+          canModifyContent: false,
+          canAnnotate: false,
+          canAssemble: false,
+          canFillForms: false,
+          canPrint: true,
+          canCopyContent: false,
+        },
+      }),
+    });
+    openDialogMock.mockResolvedValueOnce("/tmp/restricted.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+
+    expect(await screen.findByText(READ_ONLY_REASON)).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "第 1 页" })).toBeInTheDocument();
+
+    const editing = screen.getByRole("button", { name: "编辑工具（即将提供）" });
+    expect(editing).toBeDisabled();
+    expect(editing).toHaveAttribute("aria-describedby", "read-only-reason");
+
+    expect(screen.getByRole("button", { name: "保存更改" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "另存为…" })).toBeDisabled();
+    expect(screen.getByText(UNENCRYPTED_OUTPUT_WARNING)).toBeInTheDocument();
+  });
+
+  it("does not report an editable encrypted document as read-only but warns about unencrypted output", async () => {
+    installDocumentBackend({
+      open_document: () => ({ ...documentView, encrypted: true }),
+    });
+    openDialogMock.mockResolvedValueOnce("/tmp/encrypted.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+
+    expect(await screen.findByRole("img", { name: "第 1 页" })).toBeInTheDocument();
+    expect(screen.queryByText(READ_ONLY_REASON)).not.toBeInTheDocument();
+    expect(screen.getByText(UNENCRYPTED_OUTPUT_WARNING)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "保存更改" })).toBeDisabled();
   });
 
   it("navigates pages with the toolbar, the page input and Home/End", async () => {
