@@ -394,6 +394,7 @@ export function PageSurface({
   selectedAnnotation,
   surfaceRef,
   canFillForms = false,
+  canModifyContent = false,
   formFocusFieldId = null,
   onFormFocusHandled,
   onSelectPage,
@@ -410,6 +411,8 @@ export function PageSurface({
   surfaceRef: RefObject<HTMLDivElement | null>;
   /** Permission Restrictions allow filling existing form fields. */
   canFillForms?: boolean;
+  /** Permission Restrictions allow creating and changing form fields. */
+  canModifyContent?: boolean;
   /** Widget to focus after the caller navigated to its page. */
   formFocusFieldId?: string | null;
   onFormFocusHandled?: () => void;
@@ -494,6 +497,7 @@ export function PageSurface({
             pageHeight={info.height}
             scale={scale}
             canFillForms={canFillForms}
+            canModifyContent={canModifyContent}
             focusFieldId={formFocusFieldId}
             onFocusHandled={onFormFocusHandled}
             onSelectPage={onSelectPage}

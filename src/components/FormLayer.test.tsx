@@ -31,6 +31,9 @@ function field(overrides: Partial<FormFieldView> = {}): FormFieldView {
     multiline: false,
     radioGroup: null,
     exportValue: null,
+    tooltip: null,
+    fontSize: null,
+    created: false,
     ...overrides,
   };
 }
@@ -110,6 +113,26 @@ const emptyHistory = {
   dirty: false,
 };
 
+const dirtyHistory = {
+  canUndo: true,
+  canRedo: false,
+  revision: 1,
+  savedRevision: 0,
+  dirty: true,
+};
+
+const createdField = field({
+  fieldId: "new:1",
+  name: "text_field_1",
+  order: 0,
+  rect: { x: 72, y: 100, width: 180, height: 24 },
+  tooltip: null,
+  fontSize: 12,
+  created: true,
+});
+
+const originalGetBoundingClientRect = Element.prototype.getBoundingClientRect;
+
 function installFields(list: FormFieldView[] = fields) {
   invokeMock.mockImplementation(async (command: string) => {
     if (command === "form_fields") {
@@ -137,10 +160,25 @@ function renderLayer(overrides: Partial<Parameters<typeof FormLayer>[0]> = {}) {
 
 beforeEach(() => {
   installFields();
+  // The overlay maps client coordinates through its rendered page box. jsdom
+  // has no layout, so every element reports the page-sized box.
+  Element.prototype.getBoundingClientRect = () =>
+    ({
+      x: 0,
+      y: 0,
+      left: 0,
+      top: 0,
+      right: 612,
+      bottom: 792,
+      width: 612,
+      height: 792,
+      toJSON: () => ({}),
+    }) as DOMRect;
 });
 
 afterEach(() => {
   invokeMock.mockReset();
+  Element.prototype.getBoundingClientRect = originalGetBoundingClientRect;
 });
 
 describe("FormLayer", () => {
@@ -346,5 +384,252 @@ describe("FormLayer", () => {
     await waitFor(() =>
       expect(screen.getByLabelText("full_name")).toHaveValue("Restored"),
     );
+  });
+
+  it("places a text field by dragging and opens its property panel", async () => {
+    let stored: FormFieldView[] = [];
+    invokeMock.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "form_fields") {
+        return stored;
+      }
+      if (command === "edit_history") {
+        return emptyHistory;
+      }
+      if (command === "create_form_text_field") {
+        expect(args).toEqual({
+          documentId: "doc-1",
+          pageIndex: 0,
+          request: {
+            rect: { x: 72, y: 100, width: 180, height: 24 },
+            name: null,
+            tooltip: null,
+            required: false,
+            multiline: false,
+            fontSize: 12,
+          },
+        });
+        stored = [createdField];
+        return { fieldId: "new:1", fields: stored, history: dirtyHistory };
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+    const { container } = renderLayer({ canModifyContent: true });
+
+    const toggle = await screen.findByRole("button", {
+      name: "添加文本字段",
+    });
+    expect(toggle).toBeEnabled();
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-pressed", "true");
+
+    const layer = container.querySelector(".form-layer");
+    expect(layer).not.toBeNull();
+    fireEvent.pointerDown(layer!, {
+      clientX: 72,
+      clientY: 100,
+      button: 0,
+      pointerId: 1,
+    });
+    fireEvent.pointerMove(layer!, {
+      clientX: 252,
+      clientY: 124,
+      pointerId: 1,
+    });
+    fireEvent.pointerUp(layer!, {
+      clientX: 252,
+      clientY: 124,
+      pointerId: 1,
+    });
+
+    expect(await screen.findByLabelText("字段名称")).toHaveValue(
+      "text_field_1",
+    );
+    expect(screen.getByLabelText("字段提示")).toHaveValue("");
+    expect(screen.getByLabelText("必填字段")).not.toBeChecked();
+    expect(screen.getByLabelText("多行文本")).not.toBeChecked();
+    expect(screen.getByLabelText("字号")).toHaveValue(12);
+    // The widget is fillable through the existing fill path right away.
+    expect(await screen.findByLabelText("text_field_1")).toBeEnabled();
+    expect(toggle).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("updates created field properties from the panel", async () => {
+    const updates: unknown[] = [];
+    let stored: FormFieldView[] = [createdField];
+    invokeMock.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "form_fields") {
+        return stored;
+      }
+      if (command === "edit_history") {
+        return emptyHistory;
+      }
+      if (command === "update_form_text_field") {
+        updates.push(args);
+        const payload = args as {
+          fieldId: string;
+          request: {
+            name: string;
+            tooltip: string | null;
+            required: boolean;
+            multiline: boolean;
+            fontSize: number;
+          };
+        };
+        const current = stored.find(
+          (field) => field.fieldId === payload.fieldId,
+        );
+        stored = [
+          {
+            ...(current ?? createdField),
+            ...payload.request,
+            tooltip: payload.request.tooltip,
+          },
+        ];
+        return { fields: stored, history: dirtyHistory };
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+    renderLayer({ canModifyContent: true });
+
+    fireEvent.click(await screen.findByRole("button", { name: "字段属性" }));
+    const name = await screen.findByLabelText("字段名称");
+    fireEvent.change(name, { target: { value: "customer_name" } });
+    fireEvent.blur(name);
+    await waitFor(() => expect(updates).toHaveLength(1));
+    expect(updates[0]).toEqual({
+      documentId: "doc-1",
+      fieldId: "new:1",
+      request: {
+        name: "customer_name",
+        tooltip: null,
+        required: false,
+        multiline: false,
+        fontSize: 12,
+      },
+    });
+
+    const tooltip = screen.getByLabelText("字段提示");
+    fireEvent.change(tooltip, { target: { value: "请输入客户姓名" } });
+    fireEvent.blur(tooltip);
+    await waitFor(() => expect(updates).toHaveLength(2));
+
+    fireEvent.click(screen.getByLabelText("必填字段"));
+    await waitFor(() => expect(updates).toHaveLength(3));
+    fireEvent.click(screen.getByLabelText("多行文本"));
+    await waitFor(() => expect(updates).toHaveLength(4));
+
+    const fontSize = screen.getByLabelText("字号");
+    fireEvent.change(fontSize, { target: { value: "16" } });
+    fireEvent.blur(fontSize);
+    await waitFor(() => expect(updates).toHaveLength(5));
+    expect(updates[4]).toEqual({
+      documentId: "doc-1",
+      fieldId: "new:1",
+      request: {
+        name: "customer_name",
+        tooltip: "请输入客户姓名",
+        required: true,
+        multiline: true,
+        fontSize: 16,
+      },
+    });
+
+    // The refreshed widget carries the new name and kind without a reload.
+    const widget = await screen.findByLabelText("customer_name");
+    expect(widget.tagName).toBe("TEXTAREA");
+    expect(widget).toBeEnabled();
+  });
+
+  it("keeps the field unchanged when the backend rejects a duplicate name", async () => {
+    let updateCalls = 0;
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "form_fields") {
+        return [createdField];
+      }
+      if (command === "edit_history") {
+        return emptyHistory;
+      }
+      if (command === "update_form_text_field") {
+        updateCalls += 1;
+        throw {
+          code: "form_field_name_duplicate",
+          message: "表单字段名称“full_name”已存在，请换一个名称。",
+        };
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+    renderLayer({ canModifyContent: true });
+
+    fireEvent.click(await screen.findByRole("button", { name: "字段属性" }));
+    const name = await screen.findByLabelText("字段名称");
+    fireEvent.change(name, { target: { value: "full_name" } });
+    fireEvent.blur(name);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "表单字段名称“full_name”已存在，请换一个名称。",
+    );
+    expect(updateCalls).toBe(1);
+    // The draft is kept so the user can correct it, and no second field was
+    // created under the duplicate name.
+    expect(name).toHaveValue("full_name");
+    expect(screen.getByLabelText("text_field_1")).toBeInTheDocument();
+  });
+
+  it("deletes a created field and restores it with undo", async () => {
+    let stored: FormFieldView[] = [createdField];
+    let deleted = false;
+    invokeMock.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "form_fields") {
+        return stored;
+      }
+      if (command === "edit_history") {
+        return deleted ? dirtyHistory : emptyHistory;
+      }
+      if (command === "delete_form_text_field") {
+        expect(args).toEqual({ documentId: "doc-1", fieldId: "new:1" });
+        deleted = true;
+        stored = [];
+        return { fields: [], history: dirtyHistory };
+      }
+      if (command === "undo_text_edit") {
+        expect(args).toEqual({ documentId: "doc-1" });
+        deleted = false;
+        stored = [createdField];
+        return {
+          pageIndex: 0,
+          history: {
+            ...dirtyHistory,
+            canUndo: false,
+            canRedo: true,
+            revision: 2,
+          },
+        };
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+    renderLayer({ canModifyContent: true });
+
+    fireEvent.click(await screen.findByRole("button", { name: "字段属性" }));
+    fireEvent.click(await screen.findByRole("button", { name: "删除字段" }));
+
+    await waitFor(() =>
+      expect(screen.queryByLabelText("text_field_1")).not.toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "撤销" }));
+
+    expect(await screen.findByLabelText("text_field_1")).toBeInTheDocument();
+  });
+
+  it("disables creation with a Chinese reason when content changes are forbidden", async () => {
+    installFields([]);
+    renderLayer({ canModifyContent: false });
+
+    const button = await screen.findByRole("button", {
+      name: "添加文本字段",
+    });
+    expect(button).toBeDisabled();
+    expect(
+      screen.getByText("此文档的权限限制不允许创建表单字段"),
+    ).toBeInTheDocument();
   });
 });
