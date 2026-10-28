@@ -35,11 +35,15 @@
 //! every edited object, so each output still contains exactly one PDFium
 //! revision appended to the unmodified source bytes.
 
+use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
+use base64::Engine as _;
+use lopdf::encryption::crypt_filters::Aes256CryptFilter;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 
@@ -93,6 +97,11 @@ pub struct SaveDocumentRequest {
     /// Set only after the user accepted that an encrypted Source Document is
     /// written as an unencrypted Output Document (ADR-0007).
     pub confirm_unencrypted_output: bool,
+    /// User Password the Output Document must require to open. `None` keeps
+    /// the ADR-0007 default and writes an unencrypted output; the value is
+    /// used only for this save and is never stored or logged.
+    #[serde(default)]
+    pub password: Option<String>,
 }
 
 /// The outcome of a completed save.
@@ -103,6 +112,11 @@ pub struct SaveResultView {
     pub output_path: String,
     pub kind: SaveKind,
     pub bytes_written: u64,
+    /// True when the written Output Document requires `request.password` to
+    /// open. The frontend uses it to keep Save Changes from silently dropping
+    /// the protection it just applied.
+    #[serde(default)]
+    pub encrypted: bool,
     /// The previous Output Document, preserved before it was replaced.
     pub backup_path: Option<String>,
     /// Clean state after the write. Undo/redo history is untouched.
@@ -159,6 +173,10 @@ pub enum ObjectEdit {
 pub struct SaveState {
     /// Output Document chosen by Save As; Save Changes overwrites it.
     pub(crate) output_path: Option<PathBuf>,
+    /// True when the Output Document at `output_path` was written with a User
+    /// Password. A later Save Changes must not silently replace it with an
+    /// unencrypted file. The password itself is never remembered.
+    pub(crate) output_encrypted: bool,
     /// Object-level edits re-applied to every revision. They are only ever
     /// cleared by an edit command that moves the change into the live PDFium
     /// document, never by saving.
@@ -191,18 +209,46 @@ pub fn save_document_with_progress(
         let (kind, target) = resolve_target(&entry.save, &request)?;
         ensure_target_is_not_source(&entry.source_path, &target)?;
 
+        let password = request.password.as_deref();
+        if password == Some("") {
+            return Err(CommandError::new(
+                CommandErrorCode::InvalidArgument,
+                "the opening password must not be empty",
+            ));
+        }
+
         // ADR-0007: an encrypted Source Document is always written as an
         // unencrypted Output Document, and only after explicit confirmation.
-        if encrypted && !request.confirm_unencrypted_output {
-            return Err(CommandError::new(
-                CommandErrorCode::UnencryptedOutputConfirmationRequired,
-                "the Source Document is encrypted; the Output Document is written unencrypted",
-            ));
+        // A User Password makes the rule moot: the output keeps protection.
+        // The same confirmation covers an already-encrypted Output Document,
+        // so Save Changes never drops its protection silently.
+        if password.is_none()
+            && (encrypted || entry.save.output_encrypted)
+            && !request.confirm_unencrypted_output
+        {
+            return Err(if encrypted {
+                CommandError::new(
+                    CommandErrorCode::UnencryptedOutputConfirmationRequired,
+                    "the Source Document is encrypted; the Output Document is written unencrypted",
+                )
+            } else {
+                CommandError::new(
+                    CommandErrorCode::EncryptedOutputConfirmationRequired,
+                    "the current Output Document is encrypted; the next save would write it unencrypted",
+                )
+            });
         }
 
         emit(document_id, SaveStage::Preparing, 0, progress);
         emit(document_id, SaveStage::Serializing, 1, progress);
         let output_bytes = serialize_live_document(entry)?;
+        // PDFium and lopdf have finished writing their revisions; the security
+        // handler can only be applied by rewriting the complete file.
+        let output_bytes = match password {
+            Some(password) => encrypt_output_bytes(output_bytes, password)?,
+            None => output_bytes,
+        };
+        let output_encrypted = password.is_some();
 
         emit(document_id, SaveStage::Finalizing, 2, progress);
         emit(document_id, SaveStage::Writing, 3, progress);
@@ -213,13 +259,14 @@ pub fn save_document_with_progress(
         logging::event(
             "document.save",
             &format!(
-                "documentId={document_id} kind={} path={} bytes={} outcome=ok{}",
+                "documentId={document_id} kind={} path={} bytes={} encrypted={} outcome=ok{}",
                 match kind {
                     SaveKind::SaveAs => "save_as",
                     SaveKind::SaveChanges => "save_changes",
                 },
                 target.display(),
                 written.bytes_written,
+                output_encrypted,
                 written
                     .backup_path
                     .as_ref()
@@ -232,6 +279,7 @@ pub fn save_document_with_progress(
         // baseline and remember the target. A failure above leaves both dirty
         // state and the previous target untouched.
         entry.save.output_path = Some(target.clone());
+        entry.save.output_encrypted = output_encrypted;
         entry.edit.mark_document_saved();
 
         // The unsaved edits are now on disk, so the Recovery File is stale.
@@ -246,6 +294,7 @@ pub fn save_document_with_progress(
             output_path: target.to_string_lossy().into_owned(),
             kind,
             bytes_written: written.bytes_written,
+            encrypted: output_encrypted,
             backup_path: written
                 .backup_path
                 .map(|path| path.to_string_lossy().into_owned()),
@@ -361,6 +410,119 @@ pub(crate) fn serialize_pdfium_state(
 ) -> Result<Vec<u8>, CommandError> {
     let (encrypted, _, _) = crate::commands::document_permissions(&entry.document);
     serialize_output(entry, encrypted)
+}
+
+/// Turns the pipeline's unencrypted bytes into a PDF that requires
+/// `password` (the User Password) to open.
+///
+/// This is a complete lopdf rewrite, not an incremental append. Encryption
+/// replaces every string and stream in the file with ciphertext, including
+/// objects written by earlier revisions; an appended revision cannot
+/// retroactively encrypt objects that are already on disk. The rewrite also
+/// flattens the PDFium and lopdf revisions into one cross-reference section,
+/// so the output has one revision and usually drops unreferenced objects.
+///
+/// Uses the AES-256 security handler (`/V 5`, revision 6) from PDF 2.0. A
+/// random owner password is generated so no known password grants owner
+/// permissions; the file key and owner password never leave this function.
+fn encrypt_output_bytes(mut bytes: Vec<u8>, password: &str) -> Result<Vec<u8>, CommandError> {
+    if password.is_empty() {
+        return Err(CommandError::new(
+            CommandErrorCode::InvalidArgument,
+            "the opening password must not be empty",
+        ));
+    }
+
+    let mut document = lopdf::Document::load_mem(&bytes)
+        .map_err(|error| lopdf_error("could not parse the output for encryption", error))?;
+    let file_encryption_key: [u8; 32] = random_bytes()?;
+    let owner_password = base64::engine::general_purpose::STANDARD.encode(random_bytes::<32>()?);
+    let state = lopdf::EncryptionState::try_from(lopdf::EncryptionVersion::V5 {
+        encrypt_metadata: true,
+        crypt_filters: BTreeMap::from([(
+            b"StdCF".to_vec(),
+            Arc::new(Aes256CryptFilter) as Arc<dyn lopdf::encryption::crypt_filters::CryptFilter>,
+        )]),
+        file_encryption_key: &file_encryption_key,
+        stream_filter: b"StdCF".to_vec(),
+        string_filter: b"StdCF".to_vec(),
+        owner_password: &owner_password,
+        user_password: password,
+        permissions: lopdf::Permissions::all(),
+    })
+    .map_err(|error| lopdf_error("could not build the output security handler", error))?;
+    document
+        .encrypt(&state)
+        .map_err(|error| lopdf_error("could not encrypt the output", error))?;
+
+    // Reuse the buffer: the unencrypted bytes must not linger in a second
+    // allocation longer than the rewrite needs.
+    bytes.clear();
+    document
+        .save_to(&mut bytes)
+        .map_err(|error| lopdf_error("could not serialize the encrypted output", error))?;
+    Ok(bytes)
+}
+
+/// Fills `N` bytes from the operating system's cryptographically secure
+/// random source. No dependency is added for this: encryption needs 64 bytes
+/// per save and every supported platform exposes its own generator.
+fn random_bytes<const N: usize>() -> Result<[u8; N], CommandError> {
+    #[cfg(unix)]
+    {
+        use std::io::Read as _;
+        let mut bytes = [0_u8; N];
+        std::fs::File::open("/dev/urandom")
+            .and_then(|mut source| source.read_exact(&mut bytes))
+            .map_err(|error| {
+                CommandError::new(
+                    CommandErrorCode::Internal,
+                    format!("could not read OS entropy: {error}"),
+                )
+            })?;
+        Ok(bytes)
+    }
+    #[cfg(windows)]
+    {
+        use std::ffi::c_void;
+        #[link(name = "bcrypt")]
+        extern "system" {
+            fn BCryptGenRandom(
+                algorithm: *mut c_void,
+                buffer: *mut u8,
+                buffer_length: u32,
+                flags: u32,
+            ) -> i32;
+        }
+        /// Missing from every Windows header PDFX already links; documented
+        /// by Microsoft as "use the system-preferred RNG".
+        const BCRYPT_USE_SYSTEM_PREFERRED_RNG: u32 = 0x0000_0002;
+        let mut bytes = [0_u8; N];
+        // SAFETY: a null algorithm handle with this flag is the documented
+        // call; `bytes` is valid for writes of exactly `N` bytes.
+        let status = unsafe {
+            BCryptGenRandom(
+                std::ptr::null_mut(),
+                bytes.as_mut_ptr(),
+                N as u32,
+                BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+            )
+        };
+        if status < 0 {
+            return Err(CommandError::new(
+                CommandErrorCode::Internal,
+                "could not read OS entropy",
+            ));
+        }
+        Ok(bytes)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        Err(CommandError::new(
+            CommandErrorCode::Internal,
+            "no OS entropy source is available on this platform",
+        ))
+    }
 }
 
 /// Applies every lopdf-side change to the PDFium output in one incremental

@@ -277,6 +277,42 @@ function closeConfirmDialog(): HTMLElement {
   return screen.getByRole("dialog", { name: "关闭前保存更改？" });
 }
 
+type TestUser = ReturnType<typeof userEvent.setup>;
+
+/**
+ * Answers the save-options dialog every Save As (and every save that changes
+ * protection) now shows. Without a password the primary action is either the
+ * plain save or the explicit unencrypted confirmation.
+ */
+async function acceptSaveOptions(
+  user: TestUser,
+  options: { password?: string; unencrypted?: boolean } = {},
+): Promise<void> {
+  const dialog = await screen.findByRole("dialog", { name: "保存选项" });
+  if (options.password) {
+    await user.click(
+      within(dialog).getByRole("checkbox", { name: "设置打开密码" }),
+    );
+    await user.type(
+      within(dialog).getByLabelText("打开密码"),
+      options.password,
+    );
+    await user.type(
+      within(dialog).getByLabelText("确认密码"),
+      options.password,
+    );
+    await user.click(
+      within(dialog).getByRole("button", { name: "加密保存" }),
+    );
+    return;
+  }
+  await user.click(
+    within(dialog).getByRole("button", {
+      name: options.unencrypted ? "继续保存（不加密）" : "保存",
+    }),
+  );
+}
+
 let setTitle: ReturnType<typeof vi.fn>;
 let onCloseRequested: ReturnType<typeof vi.fn>;
 let destroyWindowMock: ReturnType<typeof vi.fn>;
@@ -2259,6 +2295,7 @@ describe("PDFX workspace", () => {
     expect(await screen.findByText("未保存")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "另存为…" }));
+    await acceptSaveOptions(user);
     await screen.findByText(/已保存到/);
     await waitFor(() =>
       expect(screen.queryByText("未保存")).not.toBeInTheDocument(),
@@ -2374,6 +2411,7 @@ describe("PDFX workspace", () => {
     await user.click(
       within(closeConfirmDialog()).getByRole("button", { name: "保存" }),
     );
+    await acceptSaveOptions(user);
 
     await waitFor(() => {
       expect(commandCalls("save_document")).toEqual([
@@ -2423,6 +2461,7 @@ describe("PDFX workspace", () => {
 
     // First save establishes the Output Document, exactly as the toolbar does.
     await user.click(screen.getByRole("button", { name: "另存为…" }));
+    await acceptSaveOptions(user);
     await screen.findByText(/已保存到/);
 
     history = { ...dirtyHistory, revision: 3, savedRevision: 2 };
@@ -2469,6 +2508,7 @@ describe("PDFX workspace", () => {
     await user.click(
       within(closeConfirmDialog()).getByRole("button", { name: "保存" }),
     );
+    await acceptSaveOptions(user);
 
     expect(
       await screen.findByText("保存失败，窗口未关闭。请取消后重试保存。"),
@@ -2585,8 +2625,11 @@ describe("PDFX workspace", () => {
     );
 
     const confirmation = await screen.findByRole("dialog", {
-      name: "输出将不加密",
+      name: "保存选项",
     });
+    expect(
+      within(confirmation).getByText("输出将不加密"),
+    ).toBeInTheDocument();
     // The close question waits behind the confirmation and cannot be answered.
     expect(
       within(closeConfirmDialog()).getByRole("button", { name: "取消" }),
@@ -2685,6 +2728,7 @@ describe("PDFX workspace", () => {
     await screen.findByText("report.pdf");
 
     await user.click(screen.getByRole("button", { name: "另存为…" }));
+    await acceptSaveOptions(user);
     await waitFor(() =>
       expect(commandCalls("save_document")).toHaveLength(1),
     );
@@ -2717,6 +2761,7 @@ describe("PDFX workspace", () => {
     expect(setTitle).toHaveBeenLastCalledWith("report.pdf — PDFX");
 
     await user.click(screen.getByRole("button", { name: "另存为…" }));
+    await acceptSaveOptions(user);
 
     await waitFor(() => {
       expect(commandCalls("save_document")).toEqual([
@@ -2739,6 +2784,315 @@ describe("PDFX workspace", () => {
       }),
     );
     expect(await screen.findByText(/已保存到/)).toHaveTextContent("copy.pdf");
+  });
+
+  it("offers an opening password when saving as and validates it in Chinese", async () => {
+    installDocumentBackend({
+      save_document: () => savedResult({ encrypted: true }),
+    });
+    openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+    saveDialogMock.mockResolvedValueOnce("/tmp/copy.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("report.pdf");
+    await user.click(screen.getByRole("button", { name: "另存为…" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "保存选项" });
+    expect(commandCalls("save_document")).toHaveLength(0);
+    // The dialog is modal: the native save items cannot start a second save.
+    expect(lastMenuState().get("file.save")).toBe(false);
+    expect(lastMenuState().get("file.save_as")).toBe(false);
+
+    await user.click(
+      within(dialog).getByRole("checkbox", { name: "设置打开密码" }),
+    );
+    await user.click(
+      within(dialog).getByRole("button", { name: "加密保存" }),
+    );
+    expect(within(dialog).getByRole("alert")).toHaveTextContent(
+      "请输入打开密码",
+    );
+    expect(commandCalls("save_document")).toHaveLength(0);
+
+    await user.type(
+      within(dialog).getByLabelText("打开密码"),
+      "secret-1",
+    );
+    await user.type(
+      within(dialog).getByLabelText("确认密码"),
+      "secret-2",
+    );
+    await user.click(
+      within(dialog).getByRole("button", { name: "加密保存" }),
+    );
+    expect(within(dialog).getByRole("alert")).toHaveTextContent(
+      "两次输入的密码不一致",
+    );
+    expect(commandCalls("save_document")).toHaveLength(0);
+
+    await user.clear(within(dialog).getByLabelText("确认密码"));
+    await user.type(
+      within(dialog).getByLabelText("确认密码"),
+      "secret-1",
+    );
+    await user.click(
+      within(dialog).getByRole("button", { name: "加密保存" }),
+    );
+
+    await waitFor(() => {
+      expect(commandCalls("save_document")).toEqual([
+        [
+          "save_document",
+          {
+            documentId: "doc-1",
+            request: {
+              saveAsPath: "/tmp/copy.pdf",
+              confirmUnencryptedOutput: false,
+              password: "secret-1",
+            },
+          },
+        ],
+      ]);
+    });
+    // The password fields are gone once the request starts; nothing retains
+    // the secret in the workspace.
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "保存选项" }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(await screen.findByText(/已保存到/)).toBeInTheDocument();
+  });
+
+  it("saves without a password when the opening-password option is unchecked", async () => {
+    installDocumentBackend({
+      save_document: () => savedResult({ encrypted: false }),
+    });
+    openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+    saveDialogMock.mockResolvedValueOnce("/tmp/copy.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("report.pdf");
+    await user.click(screen.getByRole("button", { name: "另存为…" }));
+
+    await acceptSaveOptions(user);
+
+    await waitFor(() => expect(commandCalls("save_document")).toHaveLength(1));
+    const request = (
+      commandCalls("save_document")[0][1] as {
+        request: Record<string, unknown>;
+      }
+    ).request;
+    expect(request).not.toHaveProperty("password");
+    expect(request).toMatchObject({
+      saveAsPath: "/tmp/copy.pdf",
+      confirmUnencryptedOutput: false,
+    });
+  });
+
+  it("keeps an encrypted source protected with a new password instead of confirming", async () => {
+    installDocumentBackend({
+      open_document: () => ({
+        ...documentView,
+        name: "secret.pdf",
+        encrypted: true,
+      }),
+      save_document: () => savedResult({ encrypted: true }),
+    });
+    openDialogMock.mockResolvedValueOnce("/tmp/secret.pdf");
+    saveDialogMock.mockResolvedValueOnce("/tmp/secret-copy.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("secret.pdf");
+    await user.click(screen.getByRole("button", { name: "另存为…" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "保存选项" });
+    expect(within(dialog).getByText("输出将不加密")).toBeInTheDocument();
+
+    await user.click(
+      within(dialog).getByRole("checkbox", { name: "设置打开密码" }),
+    );
+    expect(
+      within(dialog).queryByText("输出将不加密"),
+    ).not.toBeInTheDocument();
+    await user.type(
+      within(dialog).getByLabelText("打开密码"),
+      "new-secret",
+    );
+    await user.type(
+      within(dialog).getByLabelText("确认密码"),
+      "new-secret",
+    );
+    await user.click(
+      within(dialog).getByRole("button", { name: "加密保存" }),
+    );
+
+    await waitFor(() => {
+      expect(commandCalls("save_document")).toEqual([
+        [
+          "save_document",
+          {
+            documentId: "doc-1",
+            request: {
+              saveAsPath: "/tmp/secret-copy.pdf",
+              confirmUnencryptedOutput: false,
+              password: "new-secret",
+            },
+          },
+        ],
+      ]);
+    });
+  });
+
+  it("asks again before Save Changes drops a protection it just wrote", async () => {
+    installDocumentBackend({
+      save_document: (args) => {
+        const request = (
+          args as {
+            request: {
+              saveAsPath: string | null;
+              password?: string;
+            };
+          }
+        ).request;
+        return savedResult({
+          kind: request.saveAsPath ? "save_as" : "save_changes",
+          outputPath: request.saveAsPath ?? "/tmp/copy.pdf",
+          encrypted: Boolean(request.password),
+        });
+      },
+    });
+    openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+    saveDialogMock
+      .mockResolvedValueOnce("/tmp/copy.pdf")
+      .mockResolvedValueOnce("/tmp/copy.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("report.pdf");
+
+    // The first save sets a password; the hook remembers the output is
+    // protected even though the Source Document is not encrypted.
+    await user.click(screen.getByRole("button", { name: "另存为…" }));
+    await acceptSaveOptions(user, { password: "first-secret" });
+    await screen.findByText(/已保存到/);
+
+    await user.click(screen.getByRole("button", { name: "保存更改" }));
+    let dialog = await screen.findByRole("dialog", { name: "保存选项" });
+    expect(within(dialog).getByText("输出将不加密")).toBeInTheDocument();
+    expect(commandCalls("save_document")).toHaveLength(1);
+
+    // Cancelling leaves the protected Output Document untouched.
+    await user.click(within(dialog).getByRole("button", { name: "取消" }));
+    expect(commandCalls("save_document")).toHaveLength(1);
+
+    // Keeping protection with a new password is one decision.
+    await user.click(screen.getByRole("button", { name: "保存更改" }));
+    dialog = await screen.findByRole("dialog", { name: "保存选项" });
+    await user.click(
+      within(dialog).getByRole("checkbox", { name: "设置打开密码" }),
+    );
+    await user.type(within(dialog).getByLabelText("打开密码"), "second-secret");
+    await user.type(
+      within(dialog).getByLabelText("确认密码"),
+      "second-secret",
+    );
+    await user.click(
+      within(dialog).getByRole("button", { name: "加密保存" }),
+    );
+    await waitFor(() =>
+      expect(commandCalls("save_document")).toHaveLength(2),
+    );
+    expect(commandCalls("save_document")[1]).toEqual([
+      "save_document",
+      {
+        documentId: "doc-1",
+        request: {
+          saveAsPath: null,
+          confirmUnencryptedOutput: false,
+          password: "second-secret",
+        },
+      },
+    ]);
+
+    // Explicitly accepting an unencrypted Save Changes is the other path.
+    await user.click(screen.getByRole("button", { name: "保存更改" }));
+    dialog = await screen.findByRole("dialog", { name: "保存选项" });
+    await user.click(
+      within(dialog).getByRole("button", { name: "继续保存（不加密）" }),
+    );
+    await waitFor(() =>
+      expect(commandCalls("save_document")).toHaveLength(3),
+    );
+    expect(commandCalls("save_document")[2]).toEqual([
+      "save_document",
+      {
+        documentId: "doc-1",
+        request: {
+          saveAsPath: null,
+          confirmUnencryptedOutput: true,
+        },
+      },
+    ]);
+  });
+
+  it("re-prompts for the password when a protected save fails", async () => {
+    let attempts = 0;
+    const passwords: Array<string | undefined> = [];
+    installDocumentBackend({
+      save_document: async (args) => {
+        attempts += 1;
+        const request = (
+          args as { request: { password?: string } }
+        ).request;
+        passwords.push(request.password);
+        if (attempts === 1) {
+          throw { code: "save_failed", message: "disk full while writing" };
+        }
+        return savedResult({ encrypted: true });
+      },
+    });
+    openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+    saveDialogMock.mockResolvedValueOnce("/tmp/copy.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("report.pdf");
+    await user.click(screen.getByRole("button", { name: "另存为…" }));
+    await acceptSaveOptions(user, { password: "first-attempt" });
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("保存失败");
+    // The failed request does not retain the password: retrying asks again.
+    await user.click(screen.getByRole("button", { name: "重试保存" }));
+    const dialog = await screen.findByRole("dialog", { name: "保存选项" });
+    // The password option is re-selected, but the fields are empty: the
+    // secret itself was never retained.
+    expect(within(dialog).getByLabelText("打开密码")).toHaveValue("");
+    expect(within(dialog).getByLabelText("确认密码")).toHaveValue("");
+
+    await user.type(
+      within(dialog).getByLabelText("打开密码"),
+      "second-attempt",
+    );
+    await user.type(
+      within(dialog).getByLabelText("确认密码"),
+      "second-attempt",
+    );
+    await user.click(
+      within(dialog).getByRole("button", { name: "加密保存" }),
+    );
+
+    await waitFor(() => expect(attempts).toBe(2));
+    expect(passwords).toEqual(["first-attempt", "second-attempt"]);
+    expect(await screen.findByText(/已保存到/)).toBeInTheDocument();
   });
 
   it("does not save when the Save As dialog is cancelled", async () => {
@@ -2775,6 +3129,7 @@ describe("PDFX workspace", () => {
     await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
     await screen.findByText("report.pdf");
     await user.click(screen.getByRole("button", { name: "另存为…" }));
+    await acceptSaveOptions(user);
     await screen.findByText(/已保存到/);
 
     await user.click(screen.getByRole("button", { name: "保存更改" }));
@@ -2804,6 +3159,9 @@ describe("PDFX workspace", () => {
       ]);
     });
     expect(saveDialogMock).toHaveBeenCalledTimes(1);
+    expect(
+      screen.queryByRole("dialog", { name: "保存选项" }),
+    ).not.toBeInTheDocument();
   });
 
   it("routes the first Save Changes through Save As because no output exists yet", async () => {
@@ -2816,6 +3174,7 @@ describe("PDFX workspace", () => {
     await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
     await screen.findByText("report.pdf");
     await user.click(screen.getByRole("button", { name: "保存更改" }));
+    await acceptSaveOptions(user);
 
     expect(saveDialogMock).toHaveBeenCalledTimes(1);
     await waitFor(() => {
@@ -2849,12 +3208,13 @@ describe("PDFX workspace", () => {
     await screen.findByText("secret.pdf");
     await user.click(screen.getByRole("button", { name: "另存为…" }));
 
-    const dialog = await screen.findByRole("dialog", { name: "输出将不加密" });
+    const dialog = await screen.findByRole("dialog", { name: "保存选项" });
+    expect(within(dialog).getByText("输出将不加密")).toBeInTheDocument();
     expect(commandCalls("save_document")).toHaveLength(0);
 
     await user.click(within(dialog).getByRole("button", { name: "取消" }));
     expect(
-      screen.queryByRole("dialog", { name: "输出将不加密" }),
+      screen.queryByRole("dialog", { name: "保存选项" }),
     ).not.toBeInTheDocument();
     expect(commandCalls("save_document")).toHaveLength(0);
 
@@ -2919,9 +3279,7 @@ describe("PDFX workspace", () => {
 
     expect(screen.getByRole("button", { name: "保存更改" })).toBeDisabled();
     await user.click(screen.getByRole("button", { name: "另存为…" }));
-    await user.click(
-      await screen.findByRole("button", { name: "继续保存（不加密）" }),
-    );
+    await acceptSaveOptions(user, { unencrypted: true });
 
     await waitFor(() => {
       expect(commandCalls("save_document")).toEqual([
@@ -2958,6 +3316,7 @@ describe("PDFX workspace", () => {
     await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
     await screen.findByText("report.pdf");
     await user.click(screen.getByRole("button", { name: "另存为…" }));
+    await acceptSaveOptions(user);
 
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent("保存失败");
@@ -2992,11 +3351,13 @@ describe("PDFX workspace", () => {
     await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
     await screen.findByText("report.pdf");
     await user.click(screen.getByRole("button", { name: "另存为…" }));
+    await acceptSaveOptions(user);
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "不能把源文件本身作为输出",
     );
     await user.click(screen.getByRole("button", { name: "重新选择…" }));
+    await acceptSaveOptions(user);
 
     await waitFor(() => expect(attempts).toBe(2));
     expect(saveDialogMock).toHaveBeenCalledTimes(2);
@@ -3029,6 +3390,7 @@ describe("PDFX workspace", () => {
     await screen.findByText("report.pdf");
     await waitFor(() => expect(saveProgressHandler).toBeDefined());
     await user.click(screen.getByRole("button", { name: "另存为…" }));
+    await acceptSaveOptions(user);
     await waitFor(() => expect(commandCalls("save_document")).toHaveLength(1));
 
     act(() => {
@@ -3076,6 +3438,7 @@ describe("PDFX workspace", () => {
     await waitFor(() => expect(menuHandler).toBeDefined());
 
     act(() => menuHandler?.({ payload: "file.save_as" }));
+    await acceptSaveOptions(user);
     await screen.findByText(/已保存到/);
     expect(saveDialogMock).toHaveBeenCalledTimes(1);
 

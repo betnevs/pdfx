@@ -41,6 +41,7 @@ export type CommandErrorCode =
   | "save_target_is_source"
   | "no_output_document"
   | "unencrypted_output_confirmation_required"
+  | "encrypted_output_confirmation_required"
   | "read_only_document"
   | "attachment_too_large"
   | "attachment_not_found"
@@ -98,6 +99,12 @@ export interface DocumentView {
    * while it still exists and is not the Source Document.
    */
   outputPath?: string | null;
+  /**
+   * The Output Document at `outputPath` was written with an opening password.
+   * Save Changes must ask before replacing it with an unencrypted file; the
+   * password itself is never persisted or returned by the backend.
+   */
+  outputEncrypted?: boolean;
   /** Opened from a Recovery File; `path` is the original Source Document. */
   recovered?: boolean;
 }
@@ -1026,6 +1033,12 @@ export interface SaveDocumentRequest {
   saveAsPath: string | null;
   /** True only after the user accepted the unencrypted-output warning. */
   confirmUnencryptedOutput: boolean;
+  /**
+   * Opening password the Output Document must require. Absent means the
+   * unencrypted ADR-0007 default. It is held only for the in-flight request:
+   * callers must not persist it in settings, logs or save-error state.
+   */
+  password?: string;
 }
 
 /** The outcome of one completed save. */
@@ -1034,6 +1047,8 @@ export interface SaveResultView {
   outputPath: string;
   kind: SaveKind;
   bytesWritten: number;
+  /** True when the written Output Document requires an opening password. */
+  encrypted: boolean;
   /** The previous Output Document, preserved before it was replaced. */
   backupPath: string | null;
   /** Clean state after the write; undo/redo history is untouched. */

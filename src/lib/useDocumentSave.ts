@@ -18,17 +18,28 @@ import {
 } from "./backend";
 import { onDocumentChanged } from "./documentEvents";
 
-/** A save that failed and can be retried without retyping anything. */
+/** A save that failed and can be retried. */
 export interface SaveFailure {
   error: CommandError;
   kind: SaveKind;
+  /** The original request with any opening password removed. */
   request: SaveDocumentRequest;
+  /**
+   * The failed request carried an opening password. Retrying must ask for it
+   * again instead of keeping the secret in memory.
+   */
+  usedPassword: boolean;
 }
 
-/** A save waiting for the user to accept unencrypted output (ADR-0007). */
+/** A save waiting for the user's opening-password or unencrypted choice. */
 export interface SaveConfirmation {
   kind: SaveKind;
+  /** The request without an opening password; the dialog supplies it. */
   request: SaveDocumentRequest;
+  /** Saving without a password would remove the current output's protection. */
+  outputEncrypted: boolean;
+  /** Re-open with the opening-password fields already shown (retry). */
+  preferPassword: boolean;
 }
 
 /**
@@ -92,8 +103,8 @@ export interface DocumentSave {
    * and the native menu availability change without another backend read.
    */
   acceptHistory: (history: EditHistoryView) => void;
-  /** Continues a pending save after accepting the unencrypted-output warning. */
-  confirmUnencrypted: () => void;
+  /** Continues a pending save with the chosen opening password (null = none). */
+  confirmSaveOptions: (password: string | null) => void;
   cancelConfirmation: () => void;
   retry: () => void;
   dismissError: () => void;
@@ -133,6 +144,9 @@ export function useDocumentSave(
   // The backend remembers the Output Document; this mirrors whether a Save As
   // has happened in this window so Save Changes can fall back to Save As.
   const hasOutputRef = useRef(false);
+  // Whether the last written Output Document requires an opening password.
+  // Save Changes must not replace it with an unencrypted file without asking.
+  const outputEncryptedRef = useRef(false);
   // Resolves the promise returned by `startSave` once the user answers an
   // unencrypted-output confirmation. Only one confirmation can be pending.
   const confirmationResolverRef = useRef<
@@ -157,6 +171,9 @@ export function useDocumentSave(
     // A restored Document may already have an Output Document from before the
     // crash; Save Changes overwrites it instead of forcing another Save As.
     hasOutputRef.current = Boolean(documentRef.current?.outputPath);
+    // A restored protected output must not be silently replaced either; the
+    // backend detects it from the file because the password is never stored.
+    outputEncryptedRef.current = Boolean(documentRef.current?.outputEncrypted);
     busyRef.current = false;
 
     if (!documentId) {
@@ -252,13 +269,26 @@ export function useDocumentSave(
           request,
         );
         hasOutputRef.current = true;
+        outputEncryptedRef.current = result.encrypted;
         setHistory(result.history);
         setLastSavedPath(result.outputPath);
         setRequiredFields(null);
         optionsRef.current.onSaved?.(result.outputPath);
         return "saved";
       } catch (saveError) {
-        setError({ error: toCommandError(saveError), kind, request });
+        // The password is never part of retryable state: copy only the
+        // non-secret fields so a failed save cannot leak it into the UI or a
+        // later request. Retrying re-opens the dialog when one was used.
+        const safeRequest: SaveDocumentRequest = {
+          saveAsPath: request.saveAsPath,
+          confirmUnencryptedOutput: request.confirmUnencryptedOutput,
+        };
+        setError({
+          error: toCommandError(saveError),
+          kind,
+          request: safeRequest,
+          usedPassword: request.password !== undefined,
+        });
         return "failed";
       } finally {
         busyRef.current = false;
@@ -303,20 +333,29 @@ export function useDocumentSave(
     (
       kind: SaveKind,
       request: SaveDocumentRequest,
+      preferPassword = false,
     ): Promise<SaveForCloseResult> => {
       const current = documentRef.current;
       if (!current) {
         return Promise.resolve("cancelled");
       }
-      // ADR-0007: never write an unencrypted Output Document without an
-      // explicit confirmation for this save.
-      if (current.encrypted && !request.confirmUnencryptedOutput) {
-        // A newer attempt supersedes an older, unanswered confirmation.
+      // Save As always offers the opening-password option. Save Changes shows
+      // the dialog only when the write needs a protection decision: an
+      // encrypted Source Document (ADR-0007) or a protected Output Document
+      // whose password would otherwise be silently dropped.
+      const needsDecision = current.encrypted || outputEncryptedRef.current;
+      if (kind === "save_as" || needsDecision) {
+        // A newer attempt supersedes an older, unanswered dialog.
         const previous = confirmationResolverRef.current;
         previous?.("cancelled");
         return new Promise((resolve) => {
           confirmationResolverRef.current = resolve;
-          setConfirmation({ kind, request });
+          setConfirmation({
+            kind,
+            request,
+            outputEncrypted: outputEncryptedRef.current,
+            preferPassword,
+          });
         });
       }
       return runSave(kind, request);
@@ -429,19 +468,31 @@ export function useDocumentSave(
     });
   }, []);
 
-  const confirmUnencrypted = useCallback(() => {
-    if (!confirmation) {
-      return;
-    }
-    const pending = confirmation;
-    const resolve = confirmationResolverRef.current;
-    confirmationResolverRef.current = null;
-    setConfirmation(null);
-    void runSave(pending.kind, {
-      ...pending.request,
-      confirmUnencryptedOutput: true,
-    }).then((outcome) => resolve?.(outcome));
-  }, [confirmation, runSave]);
+  const confirmSaveOptions = useCallback(
+    (password: string | null) => {
+      if (!confirmation) {
+        return;
+      }
+      const pending = confirmation;
+      const resolve = confirmationResolverRef.current;
+      confirmationResolverRef.current = null;
+      setConfirmation(null);
+      const request: SaveDocumentRequest = {
+        saveAsPath: pending.request.saveAsPath,
+        confirmUnencryptedOutput: pending.request.confirmUnencryptedOutput,
+      };
+      if (password !== null && password.length > 0) {
+        // The secret travels only in this in-flight request; the dialog has
+        // already cleared its fields and no retryable state keeps it.
+        request.password = password;
+      } else if (documentRef.current?.encrypted || pending.outputEncrypted) {
+        // Clicking the explicit unencrypted action is the ADR-0007 acceptance.
+        request.confirmUnencryptedOutput = true;
+      }
+      void runSave(pending.kind, request).then((outcome) => resolve?.(outcome));
+    },
+    [confirmation, runSave],
+  );
 
   const cancelConfirmation = useCallback(() => {
     const resolve = confirmationResolverRef.current;
@@ -464,8 +515,14 @@ export function useDocumentSave(
       saveAs();
       return;
     }
+    if (failure.usedPassword) {
+      // The password was intentionally not retained: ask for it again with
+      // the password option already selected, but with empty fields.
+      void startSave(failure.kind, failure.request, true);
+      return;
+    }
     void runSave(failure.kind, failure.request);
-  }, [error, runSave, saveAs]);
+  }, [error, runSave, saveAs, startSave]);
 
   const dismissError = useCallback(() => {
     setError(null);
@@ -495,7 +552,7 @@ export function useDocumentSave(
     saveForClose,
     waitForIdle,
     acceptHistory,
-    confirmUnencrypted,
+    confirmSaveOptions,
     cancelConfirmation,
     retry,
     dismissError,

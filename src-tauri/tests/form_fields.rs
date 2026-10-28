@@ -621,6 +621,7 @@ fn saves_filled_values_that_independent_readers_can_reopen() {
         SaveDocumentRequest {
             save_as_path: Some(output.to_string_lossy().into_owned()),
             confirm_unencrypted_output: false,
+            password: None,
         },
         &mut |update| progress.push(update),
     )
