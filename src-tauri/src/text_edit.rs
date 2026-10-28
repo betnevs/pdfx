@@ -2214,7 +2214,12 @@ fn redo_field(
     entry: &mut OpenDocument,
     action: FieldEditAction,
 ) -> Result<EditStepView, CommandError> {
-    crate::form::apply_field_snapshot(&entry.document, &action.field_id, &action.after)?;
+    crate::form::apply_field_snapshot(
+        &entry.document,
+        &action.field_id,
+        &action.after,
+        &entry.pages,
+    )?;
     let page_index = action.page_index;
     entry.edit.current_state = action.after_state;
     entry.edit.undo_stack.push(EditAction::Field(action));
@@ -2271,7 +2276,12 @@ fn undo_field(
     entry: &mut OpenDocument,
     action: FieldEditAction,
 ) -> Result<EditStepView, CommandError> {
-    crate::form::apply_field_snapshot(&entry.document, &action.field_id, &action.before)?;
+    crate::form::apply_field_snapshot(
+        &entry.document,
+        &action.field_id,
+        &action.before,
+        &entry.pages,
+    )?;
     let page_index = action.page_index;
     entry.edit.current_state = action.before_state;
     entry.edit.redo_stack.push(EditAction::Field(action));

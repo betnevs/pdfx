@@ -137,6 +137,15 @@ pub enum ObjectEdit {
     SetRadioGroup { field_name: String, state: String },
     /// Sets a choice field's `/V` and, when the label is one of `/Opt`, `/I`.
     SetChoiceValue { field_name: String, label: String },
+    /// Sets a copied text field's `/V` in the appended revision.
+    ///
+    /// Text values on copied pages are session values: the copy's widget may
+    /// still resolve to the source page's field in Pdfium, so writing through
+    /// Pdfium could change the original. The save pipeline renames the copy's
+    /// widget first, then this edit writes the value into the copy's object.
+    SetTextValue { field_name: String, text: String },
+    /// Sets a copied checkbox's `/V` and every widget's `/AS`.
+    SetCheckboxValue { field_name: String, checked: bool },
     /// Writes the AcroForm fields created in this session: `/AcroForm`,
     /// `/Fields`, `/DA`, `/DR`, widget dictionaries, appearance streams and —
     /// when text fields exist — the embedded CJK font subset.
@@ -318,7 +327,7 @@ pub(crate) fn serialize_live_document(
     // are re-derived on every save, so undo/redo is reflected in the output
     // without a second copy of form state.
     let mut object_edits = entry.save.object_edits.clone();
-    object_edits.extend(crate::form::save_object_edits(&entry.edit));
+    object_edits.extend(crate::form::save_object_edits(&entry.edit, &entry.pages));
     // Created form fields are re-derived from the session on every save, so
     // repeated saves cannot duplicate them and undo/redo is reflected in the
     // output. Their appearances follow the page's current rotation.
@@ -331,6 +340,20 @@ pub(crate) fn serialize_live_document(
     // entries and the page arrangement — is written in one appended revision
     // after PDFium's incremental one, keeping a single writer per revision.
     finalize_lopdf_revision(output_bytes, &object_edits, &entry.pages)
+}
+
+/// Serializes just PDFium's view of the document, before the appended lopdf
+/// revision.
+///
+/// `copy_page` imports a page from these bytes. Unlike the save output, they
+/// keep physical page indices and the live form field names Pdfium assigned at
+/// load time, which the importer needs to resolve widgets; values that live
+/// only in the session overlay are captured separately by the copy command.
+pub(crate) fn serialize_pdfium_state(
+    entry: &crate::commands::OpenDocument,
+) -> Result<Vec<u8>, CommandError> {
+    let (encrypted, _, _) = crate::commands::document_permissions(&entry.document);
+    serialize_output(entry, encrypted)
 }
 
 /// Applies every lopdf-side change to the PDFium output in one incremental
@@ -349,11 +372,16 @@ fn finalize_lopdf_revision(
     let (page_edits, referenced_edits) = free_text_dictionary_edits(&previous);
     let page_tree = page_tree_edit(&previous, pages)?;
     let form_fields_prune = form_fields_prune(&previous, pages)?;
+    let has_copy_pages = pages
+        .copies
+        .keys()
+        .any(|physical| pages.order.contains(physical));
     if edits.is_empty()
         && page_edits.is_empty()
         && referenced_edits.is_empty()
         && page_tree.is_none()
         && form_fields_prune.is_none()
+        && !has_copy_pages
     {
         return Ok(base);
     }
@@ -395,6 +423,12 @@ fn finalize_lopdf_revision(
     if let Some(prune) = &form_fields_prune {
         apply_form_fields_prune(&mut incremental, prune)?;
     }
+    // Copied pages need their cloned widgets and fields registered under names
+    // that are unique in the output AcroForm before the value edits below run.
+    apply_copy_fields_fixup(&mut incremental, pages)?;
+    // Pdfium's importer keeps link annotations but drops their destination;
+    // restore it from the source page before the revision is written.
+    apply_copy_links_fixup(&mut incremental, pages)?;
     for edit in edits {
         apply_object_edit(&mut incremental, edit)?;
     }
@@ -635,6 +669,657 @@ fn apply_form_fields_prune(
         }
     }
     Ok(())
+}
+
+/// Registers the form fields cloned onto copied pages under names unique in
+/// the output AcroForm.
+///
+/// `FPDF_ImportPages` clones page annotations but not form fields: a merged
+/// widget keeps the source field name, and a widget whose value lives on a
+/// `/Parent` field keeps a reference to the *source* parent. Appending the
+/// output as-is would leave duplicate field names and, for radio groups, two
+/// pages editing one field. This pass:
+///
+/// * renames every merged widget on a visible copy page to
+///   `copied_field_name(raw_name, physical_page)` and appends it to `/Fields`;
+/// * groups widgets whose parent is shared with the source page, clones their
+///   parent under such a name, points the copied widgets at the clone and
+///   appends the clone to `/Fields`;
+/// * leaves the source page, the original fields and every non-copy page
+///   untouched.
+///
+/// Names derive from the raw Pdfium name, exactly like form discovery's copy
+/// namespacing, so the session overlay edits written by the object edits that
+/// follow this pass resolve to these objects.
+fn apply_copy_fields_fixup(
+    incremental: &mut lopdf::IncrementalDocument,
+    pages: &crate::page_ops::PageModel,
+) -> Result<(), CommandError> {
+    use std::collections::BTreeMap;
+
+    let mut copy_pages: Vec<u32> = pages
+        .copies
+        .keys()
+        .copied()
+        .filter(|physical| pages.order.contains(physical))
+        .collect();
+    if copy_pages.is_empty() {
+        return Ok(());
+    }
+    copy_pages.sort_unstable();
+
+    let mut next_id = incremental.new_document.max_id.saturating_add(1);
+    let allocate = |next: &mut u32| -> Result<lopdf::ObjectId, CommandError> {
+        let id = (*next, 0);
+        *next = next
+            .checked_add(1)
+            .ok_or_else(|| lopdf_error("could not allocate a form object id", "object id space"))?;
+        Ok(id)
+    };
+
+    let mut objects: BTreeMap<lopdf::ObjectId, lopdf::Dictionary> = BTreeMap::new();
+    let mut page_annots: Vec<(lopdf::ObjectId, Vec<lopdf::Object>)> = Vec::new();
+    let mut new_fields: Vec<lopdf::ObjectId> = Vec::new();
+
+    {
+        let previous = incremental.get_prev_documents();
+        let new_document = &incremental.new_document;
+        let physical_pages: Vec<lopdf::ObjectId> = previous.get_pages().values().copied().collect();
+
+        for physical in &copy_pages {
+            let Some(page_id) = physical_pages.get(*physical as usize).copied() else {
+                continue;
+            };
+            let Some(annots) = current_annots(incremental, page_id) else {
+                continue;
+            };
+            let mut rewritten = annots.clone();
+            let mut changed = false;
+            let mut parents: BTreeMap<lopdf::ObjectId, Vec<lopdf::ObjectId>> = BTreeMap::new();
+
+            for (index, entry) in annots.iter().enumerate() {
+                let (dictionary, object_id) = match entry {
+                    lopdf::Object::Reference(id) => {
+                        let Some(dictionary) = new_document
+                            .get_dictionary(*id)
+                            .ok()
+                            .or_else(|| previous.get_dictionary(*id).ok())
+                        else {
+                            continue;
+                        };
+                        (dictionary, Some(*id))
+                    }
+                    lopdf::Object::Dictionary(dictionary) => (dictionary, None),
+                    _ => continue,
+                };
+                if dictionary
+                    .get(b"Subtype")
+                    .and_then(lopdf::Object::as_name)
+                    .ok()
+                    != Some(b"Widget".as_slice())
+                {
+                    continue;
+                }
+                let parent_id = dictionary
+                    .get(b"Parent")
+                    .ok()
+                    .and_then(|parent| parent.as_reference().ok());
+                if parent_id.is_none() && !dictionary.has(b"FT") {
+                    continue;
+                }
+
+                // `/Fields` and `/Kids` need object references, so an inline
+                // annotation dictionary becomes an object of its own.
+                let object_id = match object_id {
+                    Some(id) => id,
+                    None => {
+                        let id = allocate(&mut next_id)?;
+                        rewritten[index] = lopdf::Object::Reference(id);
+                        changed = true;
+                        objects.insert(id, dictionary.clone());
+                        id
+                    }
+                };
+
+                match parent_id {
+                    Some(parent_id) => {
+                        parents.entry(parent_id).or_default().push(object_id);
+                    }
+                    None => {
+                        let Some(base) = dictionary
+                            .get(b"T")
+                            .and_then(lopdf::Object::as_str)
+                            .ok()
+                            .map(decode_pdf_text)
+                        else {
+                            continue;
+                        };
+                        let name = crate::page_ops::copied_field_name(&base, *physical);
+                        let mut updated = objects
+                            .remove(&object_id)
+                            .unwrap_or_else(|| dictionary.clone());
+                        updated.set(b"T".to_vec(), text_string_object(&name));
+                        objects.insert(object_id, updated);
+                        new_fields.push(object_id);
+                    }
+                }
+            }
+
+            if changed {
+                page_annots.push((page_id, rewritten));
+            }
+
+            for (parent_id, widget_ids) in parents {
+                let Some(parent) = new_document
+                    .get_dictionary(parent_id)
+                    .ok()
+                    .or_else(|| previous.get_dictionary(parent_id).ok())
+                else {
+                    continue;
+                };
+                let base = parent
+                    .get(b"T")
+                    .and_then(lopdf::Object::as_str)
+                    .ok()
+                    .map(decode_pdf_text)
+                    .or_else(|| {
+                        widget_ids.iter().find_map(|id| {
+                            dictionary_any(incremental, *id)
+                                .and_then(|widget| widget.get(b"T").ok())
+                                .and_then(|name| name.as_str().ok())
+                                .map(decode_pdf_text)
+                        })
+                    })
+                    .unwrap_or_default();
+                let name = crate::page_ops::copied_field_name(&base, *physical);
+                let new_parent_id = allocate(&mut next_id)?;
+                let mut parent_copy = parent.clone();
+                parent_copy.set(b"T".to_vec(), text_string_object(&name));
+                parent_copy.set(
+                    b"Kids".to_vec(),
+                    lopdf::Object::Array(
+                        widget_ids
+                            .iter()
+                            .map(|id| lopdf::Object::Reference(*id))
+                            .collect(),
+                    ),
+                );
+                let is_root = !parent_copy.has(b"Parent");
+                objects.insert(new_parent_id, parent_copy);
+                for widget_id in &widget_ids {
+                    let mut widget = objects.remove(widget_id).unwrap_or_else(|| {
+                        dictionary_any(incremental, *widget_id)
+                            .cloned()
+                            .unwrap_or_default()
+                    });
+                    widget.set(b"Parent".to_vec(), lopdf::Object::Reference(new_parent_id));
+                    objects.insert(*widget_id, widget);
+                }
+                if is_root {
+                    new_fields.push(new_parent_id);
+                }
+            }
+        }
+    }
+
+    new_fields.sort_unstable_by_key(|id| id.0);
+    new_fields.dedup();
+    if new_fields.is_empty() && objects.is_empty() && page_annots.is_empty() {
+        return Ok(());
+    }
+
+    for (id, dictionary) in objects {
+        if incremental.get_prev_documents().has_object(id) {
+            incremental
+                .opt_clone_object_to_new_document(id)
+                .map_err(|error| lopdf_error("could not clone a copied form object", error))?;
+        }
+        incremental.new_document.set_object(id, dictionary);
+    }
+    for (page_id, annots) in page_annots {
+        incremental
+            .opt_clone_object_to_new_document(page_id)
+            .map_err(|error| lopdf_error("could not clone a copied page's annotations", error))?;
+        let page = incremental
+            .new_document
+            .get_dictionary_mut(page_id)
+            .map_err(|error| lopdf_error("could not edit a copied page's annotations", error))?;
+        page.set(b"Annots".to_vec(), lopdf::Object::Array(annots));
+    }
+    if !new_fields.is_empty() {
+        append_acro_form_fields(incremental, &new_fields)?;
+    }
+    if next_id > incremental.new_document.max_id {
+        incremental.new_document.max_id = next_id - 1;
+    }
+    Ok(())
+}
+
+/// Restores the destinations PDFium's page importer drops from copied links.
+///
+/// `FPDF_ImportPages` clones a page's link annotations but not the `/D`
+/// destination of their `/GoTo` action (nor a direct `/Dest`), leaving a
+/// visible link that does nothing. A copy has the same links as its source, so
+/// the missing entries are taken from the source page. The chain of copies is
+/// followed back to the original page because every intermediate copy already
+/// lost its destination at import time.
+///
+/// Links are matched by rectangle first and by order second, so a link deleted
+/// from the copy is not resurrected with another link's destination.
+fn apply_copy_links_fixup(
+    incremental: &mut lopdf::IncrementalDocument,
+    pages: &crate::page_ops::PageModel,
+) -> Result<(), CommandError> {
+    use std::collections::BTreeMap;
+
+    let mut copy_pages: Vec<(u32, u32)> = pages
+        .copies
+        .keys()
+        .copied()
+        .filter(|physical| pages.order.contains(physical))
+        .map(|physical| (physical, original_source_page(pages, physical)))
+        .collect();
+    copy_pages.sort_unstable();
+    if copy_pages.is_empty() {
+        return Ok(());
+    }
+
+    let mut next_id = incremental.new_document.max_id.saturating_add(1);
+    let mut objects: BTreeMap<lopdf::ObjectId, lopdf::Dictionary> = BTreeMap::new();
+    let mut page_annots: Vec<(lopdf::ObjectId, Vec<lopdf::Object>)> = Vec::new();
+
+    {
+        let previous = incremental.get_prev_documents();
+        let new_document = &incremental.new_document;
+        let physical_pages: Vec<lopdf::ObjectId> = previous.get_pages().values().copied().collect();
+
+        for (copy_physical, source_physical) in copy_pages {
+            let Some(copy_page_id) = physical_pages.get(copy_physical as usize).copied() else {
+                continue;
+            };
+            let Some(source_page_id) = physical_pages.get(source_physical as usize).copied() else {
+                continue;
+            };
+            let Some(annots) = current_annots(incremental, copy_page_id) else {
+                continue;
+            };
+            let source_links = page_link_annotations(previous, source_page_id);
+            if source_links.is_empty() {
+                continue;
+            }
+
+            let mut rewritten = annots.clone();
+            let mut changed = false;
+            let mut link_index = 0usize;
+            for (index, entry) in annots.iter().enumerate() {
+                let (dictionary, object_id) = match entry {
+                    lopdf::Object::Reference(id) => {
+                        let Some(dictionary) = new_document
+                            .get_dictionary(*id)
+                            .ok()
+                            .or_else(|| previous.get_dictionary(*id).ok())
+                        else {
+                            continue;
+                        };
+                        (dictionary, Some(*id))
+                    }
+                    lopdf::Object::Dictionary(dictionary) => (dictionary, None),
+                    _ => continue,
+                };
+                if dictionary
+                    .get(b"Subtype")
+                    .and_then(lopdf::Object::as_name)
+                    .ok()
+                    != Some(b"Link".as_slice())
+                {
+                    continue;
+                }
+
+                let source_link = source_links
+                    .iter()
+                    .find(|candidate| same_rect(candidate, dictionary))
+                    .or_else(|| source_links.get(link_index));
+                link_index += 1;
+                let Some(source_link) = source_link else {
+                    continue;
+                };
+
+                let source_action = source_link.get(b"A").ok();
+                let source_action_has_destination = source_action
+                    .and_then(|action| resolve_previous_object(previous, action))
+                    .and_then(|action| action.as_dict().ok())
+                    .map(|action| action.has(b"D"))
+                    .unwrap_or(false);
+                let copy_action_has_destination = dictionary
+                    .get(b"A")
+                    .ok()
+                    .and_then(|action| resolve_object_any(incremental, action))
+                    .and_then(|action| action.as_dict().ok())
+                    .map(|action| action.has(b"D"))
+                    .unwrap_or(false);
+                let needs_action = source_action_has_destination && !copy_action_has_destination;
+                let source_destination = source_link.get(b"Dest").ok();
+                let needs_destination = source_destination.is_some() && !dictionary.has(b"Dest");
+                if !needs_action && !needs_destination {
+                    continue;
+                }
+
+                // `/Annots` entries may be inline; objectify so the updated
+                // dictionary has a stable id to write into the revision.
+                let object_id = match object_id {
+                    Some(id) => id,
+                    None => {
+                        let id = (next_id, 0);
+                        next_id = next_id.checked_add(1).ok_or_else(|| {
+                            lopdf_error("could not allocate a link object id", "object id space")
+                        })?;
+                        rewritten[index] = lopdf::Object::Reference(id);
+                        changed = true;
+                        objects.insert(id, dictionary.clone());
+                        id
+                    }
+                };
+                let mut updated = objects
+                    .remove(&object_id)
+                    .unwrap_or_else(|| dictionary.clone());
+                if needs_action {
+                    if let Some(action) = source_action {
+                        updated.set(b"A".to_vec(), action.clone());
+                    }
+                }
+                if needs_destination {
+                    if let Some(destination) = source_destination {
+                        updated.set(b"Dest".to_vec(), destination.clone());
+                    }
+                }
+                objects.insert(object_id, updated);
+            }
+
+            if changed {
+                page_annots.push((copy_page_id, rewritten));
+            }
+        }
+    }
+
+    for (id, dictionary) in objects {
+        if incremental.get_prev_documents().has_object(id) {
+            incremental
+                .opt_clone_object_to_new_document(id)
+                .map_err(|error| lopdf_error("could not clone a copied link", error))?;
+        }
+        incremental.new_document.set_object(id, dictionary);
+    }
+    for (page_id, annots) in page_annots {
+        incremental
+            .opt_clone_object_to_new_document(page_id)
+            .map_err(|error| lopdf_error("could not clone a copied page's links", error))?;
+        let page = incremental
+            .new_document
+            .get_dictionary_mut(page_id)
+            .map_err(|error| lopdf_error("could not edit a copied page's links", error))?;
+        page.set(b"Annots".to_vec(), lopdf::Object::Array(annots));
+    }
+    if next_id > incremental.new_document.max_id {
+        incremental.new_document.max_id = next_id - 1;
+    }
+    Ok(())
+}
+
+/// Follows the copy chain to the page a link annotation's destination lives
+/// on. A copied page's own annotations may already lack the destination.
+fn original_source_page(pages: &crate::page_ops::PageModel, physical: u32) -> u32 {
+    let mut current = physical;
+    let mut seen = std::collections::HashSet::new();
+    while seen.insert(current) {
+        match pages.copies.get(&current) {
+            Some(copy) => current = copy.source,
+            None => return current,
+        }
+    }
+    physical
+}
+
+/// The Link annotations of a page in the previous revision.
+fn page_link_annotations(
+    document: &lopdf::Document,
+    page_id: lopdf::ObjectId,
+) -> Vec<&lopdf::Dictionary> {
+    let Ok(page) = document.get_dictionary(page_id) else {
+        return Vec::new();
+    };
+    let Ok(annots) = page.get(b"Annots") else {
+        return Vec::new();
+    };
+    let array = match annots {
+        lopdf::Object::Reference(id) => document
+            .get_object(*id)
+            .ok()
+            .and_then(|annots| annots.as_array().ok()),
+        other => other.as_array().ok(),
+    };
+    let Some(array) = array else {
+        return Vec::new();
+    };
+    array
+        .iter()
+        .filter_map(|entry| match entry {
+            lopdf::Object::Reference(id) => document.get_dictionary(*id).ok(),
+            lopdf::Object::Dictionary(dictionary) => Some(dictionary),
+            _ => None,
+        })
+        .filter(|annotation| {
+            annotation
+                .get(b"Subtype")
+                .and_then(lopdf::Object::as_name)
+                .ok()
+                == Some(b"Link".as_slice())
+        })
+        .collect()
+}
+
+/// Resolves an object in the previous revision only.
+fn resolve_previous_object<'a>(
+    document: &'a lopdf::Document,
+    object: &'a lopdf::Object,
+) -> Option<&'a lopdf::Object> {
+    match object {
+        lopdf::Object::Reference(id) => document.get_object(*id).ok(),
+        other => Some(other),
+    }
+}
+
+/// Whether two annotation dictionaries have the same `/Rect`.
+fn same_rect(left: &lopdf::Dictionary, right: &lopdf::Dictionary) -> bool {
+    let number = |object: &lopdf::Object| match object {
+        lopdf::Object::Integer(value) => Some(*value as f64),
+        lopdf::Object::Real(value) => Some(*value as f64),
+        _ => None,
+    };
+    let rect = |dictionary: &lopdf::Dictionary| {
+        dictionary
+            .get(b"Rect")
+            .ok()
+            .and_then(|rect| rect.as_array().ok())
+            .map(|array| array.iter().filter_map(number).collect::<Vec<_>>())
+    };
+    match (rect(left), rect(right)) {
+        (Some(left), Some(right)) => {
+            left.len() == 4
+                && right.len() == 4
+                && left
+                    .iter()
+                    .zip(right.iter())
+                    .all(|(left, right)| (left - right).abs() < 0.01)
+        }
+        _ => false,
+    }
+}
+
+/// The page's current `/Annots` array, resolving a reference through the
+/// appended revision first so earlier passes' edits are preserved.
+fn current_annots(
+    incremental: &lopdf::IncrementalDocument,
+    page_id: lopdf::ObjectId,
+) -> Option<Vec<lopdf::Object>> {
+    let page = dictionary_any(incremental, page_id)?;
+    let annots = resolve_object_any(incremental, page.get(b"Annots").ok()?)?;
+    annots.as_array().ok().cloned()
+}
+
+/// Appends the copy-page fields to the output `/AcroForm /Fields`, keeping the
+/// existing fields in place. The AcroForm may be a reference object or inline
+/// in the catalog, and `/Fields` may itself be a reference.
+fn append_acro_form_fields(
+    incremental: &mut lopdf::IncrementalDocument,
+    additions: &[lopdf::ObjectId],
+) -> Result<(), CommandError> {
+    let (root, acro_form) = {
+        let previous = incremental.get_prev_documents();
+        let root = previous
+            .trailer
+            .get(b"Root")
+            .and_then(lopdf::Object::as_reference)
+            .map_err(|error| lopdf_error("the saved document has no /Root reference", error))?;
+        let acro_form = previous
+            .catalog()
+            .ok()
+            .and_then(|catalog| catalog.get(b"AcroForm").ok().cloned());
+        (root, acro_form)
+    };
+
+    match acro_form {
+        Some(lopdf::Object::Reference(acro_form_id)) => {
+            incremental
+                .opt_clone_object_to_new_document(acro_form_id)
+                .map_err(|error| lopdf_error("could not clone the AcroForm", error))?;
+            append_fields_to(incremental, FieldsOwner::Reference(acro_form_id), additions)
+        }
+        Some(lopdf::Object::Dictionary(_)) => {
+            incremental
+                .opt_clone_object_to_new_document(root)
+                .map_err(|error| lopdf_error("could not clone the catalog", error))?;
+            append_fields_to(incremental, FieldsOwner::Inline(root), additions)
+        }
+        _ => {
+            // A document with form widgets but no AcroForm: create one so the
+            // copied widgets are discoverable by other readers.
+            incremental
+                .opt_clone_object_to_new_document(root)
+                .map_err(|error| lopdf_error("could not clone the catalog", error))?;
+            let acro_form_id = incremental
+                .new_document
+                .try_new_object_id()
+                .map_err(|error| lopdf_error("could not allocate an AcroForm", error))?;
+            let mut acro_form = lopdf::Dictionary::new();
+            acro_form.set(b"Fields".to_vec(), fields_array(additions, &[]));
+            incremental.new_document.set_object(acro_form_id, acro_form);
+            let catalog = incremental
+                .new_document
+                .get_dictionary_mut(root)
+                .map_err(|error| lopdf_error("could not edit the catalog", error))?;
+            catalog.set(b"AcroForm".to_vec(), lopdf::Object::Reference(acro_form_id));
+            Ok(())
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum FieldsOwner {
+    Reference(lopdf::ObjectId),
+    Inline(lopdf::ObjectId),
+}
+
+fn fields_owner_dictionary_mut(
+    incremental: &mut lopdf::IncrementalDocument,
+    owner: FieldsOwner,
+) -> Result<&mut lopdf::Dictionary, CommandError> {
+    match owner {
+        FieldsOwner::Reference(id) => incremental
+            .new_document
+            .get_dictionary_mut(id)
+            .map_err(|error| lopdf_error("could not edit the AcroForm", error)),
+        FieldsOwner::Inline(root) => incremental
+            .new_document
+            .get_dictionary_mut(root)
+            .map_err(|error| lopdf_error("could not edit the catalog", error))?
+            .get_mut(b"AcroForm")
+            .map_err(|error| lopdf_error("could not read the AcroForm", error))?
+            .as_dict_mut()
+            .map_err(|error| lopdf_error("the AcroForm is not a dictionary", error)),
+    }
+}
+
+fn append_fields_to(
+    incremental: &mut lopdf::IncrementalDocument,
+    owner: FieldsOwner,
+    additions: &[lopdf::ObjectId],
+) -> Result<(), CommandError> {
+    let current = {
+        let dictionary = match owner {
+            FieldsOwner::Reference(id) => incremental
+                .new_document
+                .get_dictionary(id)
+                .or_else(|_| incremental.get_prev_documents().get_dictionary(id))
+                .map_err(|error| lopdf_error("could not read the AcroForm", error))?,
+            FieldsOwner::Inline(root) => incremental
+                .new_document
+                .get_dictionary(root)
+                .or_else(|_| incremental.get_prev_documents().get_dictionary(root))
+                .map_err(|error| lopdf_error("could not read the catalog", error))?
+                .get(b"AcroForm")
+                .and_then(lopdf::Object::as_dict)
+                .map_err(|error| lopdf_error("could not read the AcroForm", error))?,
+        };
+        dictionary.get(b"Fields").ok().cloned()
+    };
+
+    let existing: Vec<lopdf::Object> = match current {
+        Some(lopdf::Object::Reference(fields_id)) => {
+            incremental
+                .opt_clone_object_to_new_document(fields_id)
+                .map_err(|error| lopdf_error("could not clone the form field list", error))?;
+            incremental
+                .new_document
+                .get_object(fields_id)
+                .and_then(lopdf::Object::as_array)
+                .map_err(|error| lopdf_error("the form field list is not an array", error))?
+                .clone()
+        }
+        Some(lopdf::Object::Array(fields)) => fields,
+        Some(_) => {
+            return Err(lopdf_error(
+                "the form field list is not an array",
+                "AcroForm /Fields",
+            ))
+        }
+        None => Vec::new(),
+    };
+
+    let array = fields_array(additions, &existing);
+    let dictionary = fields_owner_dictionary_mut(incremental, owner)?;
+    dictionary.set(b"Fields".to_vec(), array);
+    Ok(())
+}
+
+/// Builds a `/Fields` array from the existing entries plus the additions,
+/// keeping every reference at most once.
+fn fields_array(additions: &[lopdf::ObjectId], existing: &[lopdf::Object]) -> lopdf::Object {
+    let mut seen = std::collections::HashSet::new();
+    let mut objects = Vec::with_capacity(existing.len() + additions.len());
+    for object in existing {
+        if let Ok(id) = object.as_reference() {
+            if !seen.insert(id) {
+                continue;
+            }
+        }
+        objects.push(object.clone());
+    }
+    for id in additions {
+        if seen.insert(*id) {
+            objects.push(lopdf::Object::Reference(*id));
+        }
+    }
+    lopdf::Object::Array(objects)
 }
 
 /// Resolves a page attribute through the `/Parent` chain, matching the PDF
@@ -1043,6 +1728,13 @@ fn apply_object_edit(
         ObjectEdit::SetChoiceValue { field_name, label } => {
             apply_choice_value(incremental, field_name, label)
         }
+        ObjectEdit::SetTextValue { field_name, text } => {
+            apply_text_value(incremental, field_name, text)
+        }
+        ObjectEdit::SetCheckboxValue {
+            field_name,
+            checked,
+        } => apply_checkbox_value(incremental, field_name, *checked),
         ObjectEdit::CreateFormFields { fields } => {
             crate::form_create::apply_created_fields(incremental, fields)
         }
@@ -1111,15 +1803,91 @@ fn find_form_field_id(document: &lopdf::Document, name: &str) -> Option<lopdf::O
     })
 }
 
-/// Returns the non-Off state name from a widget's normal appearance dictionary.
-fn widget_on_state(widget: &lopdf::Dictionary, document: &lopdf::Document) -> Option<Vec<u8>> {
-    let normal = widget
-        .get_deref(b"AP", document)
-        .ok()?
-        .as_dict()
-        .ok()?
-        .get_deref(b"N", document)
+/// Resolves an object that may live in the appended revision or in the
+/// document it appends to. Copy-page fields are written into the new
+/// revision, so every lookup in the save pipeline must consider both.
+fn resolve_object_any<'a>(
+    incremental: &'a lopdf::IncrementalDocument,
+    object: &'a lopdf::Object,
+) -> Option<&'a lopdf::Object> {
+    match object {
+        lopdf::Object::Reference(id) => incremental
+            .new_document
+            .get_object(*id)
+            .ok()
+            .or_else(|| incremental.get_prev_documents().get_object(*id).ok()),
+        other => Some(other),
+    }
+}
+
+fn dictionary_any(
+    incremental: &lopdf::IncrementalDocument,
+    id: lopdf::ObjectId,
+) -> Option<&lopdf::Dictionary> {
+    incremental
+        .new_document
+        .get_dictionary(id)
+        .ok()
+        .or_else(|| incremental.get_prev_documents().get_dictionary(id).ok())
+}
+
+/// Finds a field by name in the appended revision's `/AcroForm`, where the
+/// copy-page fixup registers renamed widgets and cloned parent fields.
+fn find_form_field_id_any(
+    incremental: &lopdf::IncrementalDocument,
+    name: &str,
+) -> Option<lopdf::ObjectId> {
+    if let Some(id) = find_form_field_id_in_new(incremental, name) {
+        return Some(id);
+    }
+    find_form_field_id(incremental.get_prev_documents(), name)
+}
+
+fn find_form_field_id_in_new(
+    incremental: &lopdf::IncrementalDocument,
+    name: &str,
+) -> Option<lopdf::ObjectId> {
+    let previous = incremental.get_prev_documents();
+    let root = previous
+        .trailer
+        .get(b"Root")
+        .and_then(lopdf::Object::as_reference)
         .ok()?;
+    let acro_form = previous.catalog().ok()?.get(b"AcroForm").ok()?.clone();
+    let acro_form = match acro_form {
+        lopdf::Object::Reference(id) => incremental.new_document.get_dictionary(id).ok()?,
+        lopdf::Object::Dictionary(_) => incremental
+            .new_document
+            .get_dictionary(root)
+            .ok()?
+            .get(b"AcroForm")
+            .ok()?
+            .as_dict()
+            .ok()?,
+        _ => return None,
+    };
+    let fields = resolve_object_any(incremental, acro_form.get(b"Fields").ok()?)?;
+    fields.as_array().ok()?.iter().find_map(|field| {
+        let id = field.as_reference().ok()?;
+        let dictionary = dictionary_any(incremental, id)?;
+        let field_name = dictionary
+            .get(b"T")
+            .and_then(lopdf::Object::as_str)
+            .ok()
+            .map(decode_pdf_text)?;
+        (field_name == name).then_some(id)
+    })
+}
+
+/// Returns the non-Off state name from a widget's normal appearance
+/// dictionary, resolving objects across the previous revision and the
+/// appended one.
+fn widget_on_state_any(
+    incremental: &lopdf::IncrementalDocument,
+    widget: &lopdf::Dictionary,
+) -> Option<Vec<u8>> {
+    let appearance = resolve_object_any(incremental, widget.get(b"AP").ok()?)?;
+    let normal = resolve_object_any(incremental, appearance.as_dict().ok()?.get(b"N").ok()?)?;
     normal
         .as_dict()
         .ok()?
@@ -1134,19 +1902,18 @@ fn apply_radio_group(
     state: &str,
 ) -> Result<(), CommandError> {
     let (field_id, widget_ids, on_states) = {
-        let previous = incremental.get_prev_documents();
-        let field_id = find_form_field_id(previous, field_name).ok_or_else(|| {
+        let field_id = find_form_field_id_any(incremental, field_name).ok_or_else(|| {
             lopdf_error(
                 "could not find a radio field in the saved document",
                 field_name,
             )
         })?;
-        let field = previous
-            .get_dictionary(field_id)
-            .map_err(|error| lopdf_error("could not read the radio field dictionary", error))?;
+        let field = dictionary_any(incremental, field_id)
+            .ok_or_else(|| lopdf_error("could not read the radio field dictionary", field_name))?;
         let widget_ids: Vec<lopdf::ObjectId> = match field
-            .get_deref(b"Kids", previous)
+            .get(b"Kids")
             .ok()
+            .and_then(|kids| resolve_object_any(incremental, kids))
             .and_then(|kids| kids.as_array().ok())
         {
             Some(kids) => kids
@@ -1158,10 +1925,8 @@ fn apply_radio_group(
         let on_states: Vec<Option<Vec<u8>>> = widget_ids
             .iter()
             .map(|id| {
-                previous
-                    .get_dictionary(*id)
-                    .ok()
-                    .and_then(|widget| widget_on_state(widget, previous))
+                dictionary_any(incremental, *id)
+                    .and_then(|widget| widget_on_state_any(incremental, widget))
             })
             .collect();
         (field_id, widget_ids, on_states)
@@ -1207,19 +1972,18 @@ fn apply_choice_value(
     label: &str,
 ) -> Result<(), CommandError> {
     let (field_id, index) = {
-        let previous = incremental.get_prev_documents();
-        let field_id = find_form_field_id(previous, field_name).ok_or_else(|| {
+        let field_id = find_form_field_id_any(incremental, field_name).ok_or_else(|| {
             lopdf_error(
                 "could not find a choice field in the saved document",
                 field_name,
             )
         })?;
-        let field = previous
-            .get_dictionary(field_id)
-            .map_err(|error| lopdf_error("could not read the choice field dictionary", error))?;
+        let field = dictionary_any(incremental, field_id)
+            .ok_or_else(|| lopdf_error("could not read the choice field dictionary", field_name))?;
         let index = field
-            .get_deref(b"Opt", previous)
+            .get(b"Opt")
             .ok()
+            .and_then(|options| resolve_object_any(incremental, options))
             .and_then(|options| options.as_array().ok())
             .and_then(|options| {
                 options
@@ -1248,6 +2012,93 @@ fn apply_choice_value(
         }
     }
 
+    Ok(())
+}
+
+fn apply_text_value(
+    incremental: &mut lopdf::IncrementalDocument,
+    field_name: &str,
+    text: &str,
+) -> Result<(), CommandError> {
+    let field_id = find_form_field_id_any(incremental, field_name).ok_or_else(|| {
+        lopdf_error(
+            "could not find a text field in the saved document",
+            field_name,
+        )
+    })?;
+    incremental
+        .opt_clone_object_to_new_document(field_id)
+        .map_err(|error| lopdf_error("could not clone the text field", error))?;
+    let field = incremental
+        .new_document
+        .get_dictionary_mut(field_id)
+        .map_err(|error| lopdf_error("could not edit the text field", error))?;
+    field.set(b"V".to_vec(), text_string_object(text));
+    Ok(())
+}
+
+fn apply_checkbox_value(
+    incremental: &mut lopdf::IncrementalDocument,
+    field_name: &str,
+    checked: bool,
+) -> Result<(), CommandError> {
+    let (field_id, widget_ids, on_state) = {
+        let field_id = find_form_field_id_any(incremental, field_name).ok_or_else(|| {
+            lopdf_error(
+                "could not find a checkbox field in the saved document",
+                field_name,
+            )
+        })?;
+        let field = dictionary_any(incremental, field_id).ok_or_else(|| {
+            lopdf_error("could not read the checkbox field dictionary", field_name)
+        })?;
+        let widget_ids: Vec<lopdf::ObjectId> = match field
+            .get(b"Kids")
+            .ok()
+            .and_then(|kids| resolve_object_any(incremental, kids))
+            .and_then(|kids| kids.as_array().ok())
+        {
+            Some(kids) => kids
+                .iter()
+                .filter_map(|kid| kid.as_reference().ok())
+                .collect(),
+            None => vec![field_id],
+        };
+        let on_state = widget_ids
+            .iter()
+            .find_map(|id| {
+                dictionary_any(incremental, *id)
+                    .and_then(|widget| widget_on_state_any(incremental, widget))
+            })
+            .unwrap_or_else(|| b"Yes".to_vec());
+        (field_id, widget_ids, on_state)
+    };
+
+    incremental
+        .opt_clone_object_to_new_document(field_id)
+        .map_err(|error| lopdf_error("could not clone the checkbox field", error))?;
+    for id in &widget_ids {
+        incremental
+            .opt_clone_object_to_new_document(*id)
+            .map_err(|error| lopdf_error("could not clone a checkbox widget", error))?;
+    }
+    let appearance = if checked {
+        on_state.clone()
+    } else {
+        b"Off".to_vec()
+    };
+    let field = incremental
+        .new_document
+        .get_dictionary_mut(field_id)
+        .map_err(|error| lopdf_error("could not edit the checkbox field", error))?;
+    field.set(b"V".to_vec(), lopdf::Object::Name(appearance.clone()));
+    for id in &widget_ids {
+        let widget = incremental
+            .new_document
+            .get_dictionary_mut(*id)
+            .map_err(|error| lopdf_error("could not edit a checkbox widget", error))?;
+        widget.set(b"AS".to_vec(), lopdf::Object::Name(appearance.clone()));
+    }
     Ok(())
 }
 

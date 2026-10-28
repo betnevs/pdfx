@@ -649,6 +649,7 @@ impl CreatedField {
             )
             .then_some(self.font_size),
             created: true,
+            raw_name: self.name.clone(),
         }
     }
 

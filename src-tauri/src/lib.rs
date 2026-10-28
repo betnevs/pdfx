@@ -66,6 +66,7 @@ pub fn run() {
             page_ops::delete_page,
             page_ops::move_page,
             page_ops::insert_blank_page,
+            page_ops::copy_page,
             text_edit::text_edit_target,
             text_edit::apply_text_edit,
             text_edit::delete_text_box,

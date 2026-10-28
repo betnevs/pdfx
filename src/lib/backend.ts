@@ -1239,6 +1239,20 @@ export async function insertBlankPage(
 }
 
 /**
+ * Duplicates the page at `pageIndex` immediately after it.
+ *
+ * The duplicate is an independent page: its content, annotations, links and
+ * form fields are copied, so editing one page leaves the other unchanged.
+ * The returned selection is the inserted copy.
+ */
+export async function copyPage(
+  documentId: string,
+  pageIndex: number,
+): Promise<PageOperationView> {
+  return invoke<PageOperationView>("copy_page", { documentId, pageIndex });
+}
+
+/**
  * Renders only a viewport-sized region of a page, in display pixels at
  * `scale`. Used at high zoom where a full-page bitmap would be too large.
  */
