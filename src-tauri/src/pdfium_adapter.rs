@@ -86,6 +86,7 @@ pub enum TextMarkupAnnotationKind {
     Highlight,
     Underline,
     Strikeout,
+    Squiggly,
 }
 
 /// The geometric annotations PDFX creates through PDFium.
@@ -214,6 +215,7 @@ macro_rules! with_text_markup {
             PdfPageAnnotation::Highlight($annotation_ref) => $body,
             PdfPageAnnotation::Underline($annotation_ref) => $body,
             PdfPageAnnotation::Strikeout($annotation_ref) => $body,
+            PdfPageAnnotation::Squiggly($annotation_ref) => $body,
             _ => Err(PdfiumError::UnknownPdfAnnotationType),
         }
     };
@@ -251,6 +253,12 @@ pub fn create_text_markup_annotation(
         }
         TextMarkupAnnotationKind::Strikeout => {
             let mut annotation = annotations.create_strikeout_annotation()?;
+            let result = annotation.set_bounds(rect.to_pdf_rect());
+            annotation.close();
+            result?;
+        }
+        TextMarkupAnnotationKind::Squiggly => {
+            let mut annotation = annotations.create_squiggly_annotation()?;
             let result = annotation.set_bounds(rect.to_pdf_rect());
             annotation.close();
             result?;
@@ -314,6 +322,27 @@ pub fn create_ink_annotation(
     let mut page = pages.get(page_index)?;
     let annotations = page.annotations_mut();
     let mut annotation = annotations.create_ink_annotation()?;
+    let result = annotation.set_bounds(rect.to_pdf_rect());
+    annotation.close();
+    result?;
+    Ok(AnnotationRef::new(page_index, annotations.len() - 1))
+}
+
+/// Creates a free text annotation (`/Subtype /FreeText`) with `text` contents
+/// and `rect` bounds.
+///
+/// Pdfium does not generate an appearance for the annotation in this build, so
+/// callers install one with [`set_annotation_appearance`] before saving.
+pub fn create_free_text_annotation(
+    document: &PdfDocument<'_>,
+    page_index: i32,
+    text: &str,
+    rect: AnnotationRect,
+) -> Result<AnnotationRef, AdapterError> {
+    let pages = document.pages();
+    let mut page = pages.get(page_index)?;
+    let annotations = page.annotations_mut();
+    let mut annotation = annotations.create_free_text_annotation(text)?;
     let result = annotation.set_bounds(rect.to_pdf_rect());
     annotation.close();
     result?;

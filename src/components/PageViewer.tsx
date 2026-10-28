@@ -24,7 +24,9 @@ import {
   type FitMode,
 } from "../lib/pageGeometry";
 import type { PageRender, ZoomMode } from "../lib/useDocumentViewer";
+import { EraserLayer } from "./EraserLayer";
 import { FormLayer } from "./FormLayer";
+import { FreeTextLayer } from "./FreeTextLayer";
 import { LineLayer } from "./LineLayer";
 import { PageImageLayer } from "./PageImageLayer";
 import { PageTextLayer } from "./PageTextLayer";
@@ -541,6 +543,19 @@ export function PageSurface({
         />
       )}
       {info && (
+        <FreeTextLayer
+          documentId={documentId}
+          pageIndex={pageIndex}
+          pageWidth={info.width}
+          pageHeight={info.height}
+          readOnly={readOnly}
+          canAnnotate={canAnnotate}
+          annotations={annotations}
+          selectedAnnotation={selectedAnnotation}
+          onSelectAnnotation={onSelectAnnotation}
+        />
+      )}
+      {info && (
         <StampLayer
           documentId={documentId}
           pageIndex={pageIndex}
@@ -567,6 +582,20 @@ export function PageSurface({
           scale={scale}
           readOnly={readOnly}
           canModifyContent={canModifyContent}
+        />
+      )}
+      {info && (
+        <EraserLayer
+          documentId={documentId}
+          pageIndex={pageIndex}
+          pageWidth={info.width}
+          pageHeight={info.height}
+          readOnly={readOnly}
+          canAnnotate={canAnnotate}
+          annotations={annotations}
+          selectedName={selectedAnnotation?.name ?? null}
+          onSelectAnnotation={onSelectAnnotation}
+          onChanged={onAnnotationsChanged}
         />
       )}
     </div>

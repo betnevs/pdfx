@@ -2104,6 +2104,13 @@ export function PageTextLayer({
               >
                 删除线
               </button>
+              <button
+                type="button"
+                disabled={markupBusy}
+                onClick={() => void createMarkup("squiggly")}
+              >
+                波浪线
+              </button>
             </span>
           ) : (
             <span className="text-annotation-reason">

@@ -383,13 +383,14 @@ fn normalize_radio_options(options: Vec<String>) -> Vec<String> {
 
 /// Derives a PDF name-object on-state from an option label, uniquifying
 /// collisions. Non-ASCII labels cannot be PDF names and fall back to
-/// `ChoiceN`.
+/// `ChoiceN`; the same fallback applies to `Off`, which is the reserved
+/// off-state and cannot be an on-state.
 fn radio_export_value(label: &str, index: usize, used: &mut HashSet<String>) -> String {
     let sanitized: String = label
         .chars()
         .filter(|character| character.is_ascii_alphanumeric())
         .collect();
-    let base = if sanitized.is_empty() {
+    let base = if sanitized.is_empty() || sanitized == "Off" {
         format!("Choice{}", index + 1)
     } else {
         sanitized

@@ -44,11 +44,13 @@ use tauri::AppHandle;
 use crate::commands::{
     load_page, with_open_document, CommandError, CommandErrorCode, DisplayGeometry,
 };
+use crate::fonts::{missing_glyph_error, noto_sans_sc};
 use crate::pdfium_adapter::{
     annotation_author, annotation_border_width, annotation_bounds, annotation_color,
     annotation_contents, annotation_creation_date, annotation_fill_color, annotation_ink_strokes,
     annotation_name, annotation_quads, annotation_string_value, annotation_type,
     append_annotation_quads, append_ink_strokes,
+    create_free_text_annotation as create_native_free_text_annotation,
     create_ink_annotation as create_native_ink_annotation,
     create_shape_annotation as create_shape_native,
     create_stamp_annotation as create_stamp_pdf_annotation,
@@ -80,11 +82,28 @@ const LINE_WIDTH_KEY: &str = "PDFXLineWidth";
 const SHAPE_GEOMETRY_KEY: &str = "PDFXShapeGeometry";
 const SHAPE_FILL_KEY: &str = "PDFXFillColor";
 const SHAPE_STROKE_KEY: &str = "PDFXStrokeColor";
+/// Private text-annotation keys. A native `/FreeText` annotation is rendered
+/// from vector outlines in its `/AP`, so no font resource is needed; the
+/// editable style is mirrored here. `/Q` is written by the save pipeline from
+/// [FREETEXT_ALIGN_KEY] because PDFium exposes no integer annotation value API.
+const FREETEXT_KIND_KEY: &str = "PDFXFreeTextKind";
+const FREETEXT_FONT_SIZE_KEY: &str = "PDFXFreeTextFontSize";
+const FREETEXT_ALIGN_KEY: &str = "PDFXFreeTextAlign";
 /// Marker stored in a shape colour key for "no fill" / "no stroke".
 const NO_COLOR: &str = "none";
 const DEFAULT_MARKUP_COLOR: &str = "#ffd400";
 const DEFAULT_NOTE_COLOR: &str = "#f9a825";
 const DEFAULT_INK_COLOR: &str = "#c62828";
+const DEFAULT_FREETEXT_COLOR: &str = "#111827";
+const DEFAULT_FREETEXT_FONT_SIZE: f32 = 12.0;
+const MIN_FREETEXT_FONT_SIZE: f32 = 6.0;
+const MAX_FREETEXT_FONT_SIZE: f32 = 72.0;
+const MAX_FREETEXT_CHARS: usize = 5_000;
+/// Inner padding and line spacing of a free text box, in page points.
+const FREETEXT_PADDING: f32 = 4.0;
+const FREETEXT_LINE_HEIGHT: f32 = 1.25;
+/// Smallest free text box accepted from the frontend.
+const MIN_FREETEXT_SIZE: f32 = 12.0;
 /// Underline and strikeout stroke width in page points.
 const MARKUP_LINE_WIDTH: f32 = 1.5;
 const DEFAULT_INK_LINE_WIDTH: f32 = 3.0;
@@ -110,6 +129,7 @@ pub enum TextMarkupKind {
     Highlight,
     Underline,
     Strikeout,
+    Squiggly,
 }
 
 /// Every annotation kind PDFX can create and manage. Stamps carry their
@@ -120,11 +140,80 @@ pub enum AnnotationKind {
     Highlight,
     Underline,
     Strikeout,
+    Squiggly,
     Square,
     Circle,
     Note,
     Ink,
     Stamp,
+    FreeText,
+    Callout,
+}
+
+/// The two free text annotation layouts PDFX creates.
+///
+/// Both are native `/FreeText` annotations. `Callout` additionally draws a
+/// labelled box in its appearance. It deliberately has no leader line: the
+/// drawing tool only creates the box, and no `/CL` entry is written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FreeTextKind {
+    FreeText,
+    Callout,
+}
+
+/// Horizontal alignment of free text inside its box.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FreeTextAlign {
+    Left,
+    Center,
+    Right,
+}
+
+impl FreeTextAlign {
+    fn key(self) -> &'static str {
+        match self {
+            Self::Left => "left",
+            Self::Center => "center",
+            Self::Right => "right",
+        }
+    }
+
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "left" => Some(Self::Left),
+            "center" => Some(Self::Center),
+            "right" => Some(Self::Right),
+            _ => None,
+        }
+    }
+
+    /// The PDF `/Q` value: 0 left, 1 centre, 2 right.
+    pub(crate) fn pdf_q(self) -> i64 {
+        match self {
+            Self::Left => 0,
+            Self::Center => 1,
+            Self::Right => 2,
+        }
+    }
+}
+
+impl FreeTextKind {
+    fn key(self) -> &'static str {
+        match self {
+            Self::FreeText => "freetext",
+            Self::Callout => "callout",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "freetext" => Some(Self::FreeText),
+            "callout" => Some(Self::Callout),
+            _ => None,
+        }
+    }
 }
 
 impl From<TextMarkupKind> for TextMarkupAnnotationKind {
@@ -133,6 +222,7 @@ impl From<TextMarkupKind> for TextMarkupAnnotationKind {
             TextMarkupKind::Highlight => Self::Highlight,
             TextMarkupKind::Underline => Self::Underline,
             TextMarkupKind::Strikeout => Self::Strikeout,
+            TextMarkupKind::Squiggly => Self::Squiggly,
         }
     }
 }
@@ -143,6 +233,7 @@ impl From<TextMarkupKind> for AnnotationKind {
             TextMarkupKind::Highlight => Self::Highlight,
             TextMarkupKind::Underline => Self::Underline,
             TextMarkupKind::Strikeout => Self::Strikeout,
+            TextMarkupKind::Squiggly => Self::Squiggly,
         }
     }
 }
@@ -162,11 +253,13 @@ impl AnnotationKind {
             PdfPageAnnotationType::Highlight => Some(Self::Highlight),
             PdfPageAnnotationType::Underline => Some(Self::Underline),
             PdfPageAnnotationType::Strikeout => Some(Self::Strikeout),
+            PdfPageAnnotationType::Squiggly => Some(Self::Squiggly),
             PdfPageAnnotationType::Square => Some(Self::Square),
             PdfPageAnnotationType::Circle => Some(Self::Circle),
             PdfPageAnnotationType::Text => Some(Self::Note),
             PdfPageAnnotationType::Ink => Some(Self::Ink),
             PdfPageAnnotationType::Stamp => Some(Self::Stamp),
+            PdfPageAnnotationType::FreeText => Some(Self::FreeText),
             _ => None,
         }
     }
@@ -176,7 +269,14 @@ impl AnnotationKind {
             Self::Highlight => Some(TextMarkupKind::Highlight),
             Self::Underline => Some(TextMarkupKind::Underline),
             Self::Strikeout => Some(TextMarkupKind::Strikeout),
-            Self::Square | Self::Circle | Self::Note | Self::Ink | Self::Stamp => None,
+            Self::Squiggly => Some(TextMarkupKind::Squiggly),
+            Self::Square
+            | Self::Circle
+            | Self::Note
+            | Self::Ink
+            | Self::Stamp
+            | Self::FreeText
+            | Self::Callout => None,
         }
     }
 }
@@ -339,6 +439,44 @@ pub struct CreateInkRequest {
     pub strokes: Vec<Vec<InkPoint>>,
 }
 
+/// The frontend's request to place a free text box or callout box.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateFreeTextRequest {
+    pub page_index: u32,
+    pub kind: FreeTextKind,
+    /// Display-space box; the text wraps inside it.
+    pub rect: TextMarkupRect,
+    /// Text and callout border colour as `#rrggbb`.
+    pub color: String,
+    pub opacity: u8,
+    pub text: String,
+    pub font_size: f32,
+    pub align: FreeTextAlign,
+}
+
+/// The frontend's request to edit a free text annotation's body and style in
+/// one undoable action.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateFreeTextRequest {
+    pub name: String,
+    pub text: String,
+    pub font_size: f32,
+    pub align: FreeTextAlign,
+    pub color: String,
+    pub opacity: u8,
+}
+
+/// The editable body and typography of a free text annotation.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FreeTextView {
+    pub kind: FreeTextKind,
+    pub font_size: f32,
+    pub align: FreeTextAlign,
+}
+
 /// One annotation as the annotation list and overlay consume it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -366,6 +504,8 @@ pub struct AnnotationView {
     pub shape: Option<ShapeView>,
     /// The built-in stamp design and editable frame; `None` for other kinds.
     pub stamp: Option<StampView>,
+    /// Free text / callout typography; `None` for every other kind.
+    pub free_text: Option<FreeTextView>,
 }
 
 /// The outcome of creating, restyling or deleting one annotation.
@@ -408,6 +548,8 @@ pub(crate) struct AnnotationSnapshot {
     /// The stamp frame in PDF user space, which preserves rotation across
     /// restore; `None` for other kinds.
     pub(crate) stamp_frame: Option<StampFrame>,
+    /// Free text / callout typography; `None` for every other kind.
+    pub(crate) free_text: Option<FreeTextView>,
 }
 
 impl AnnotationSnapshot {
@@ -438,6 +580,7 @@ impl AnnotationSnapshot {
                 .collect(),
             shape: self.shape.clone(),
             stamp: self.stamp,
+            free_text: self.free_text,
         }
     }
 }
@@ -506,6 +649,55 @@ fn normalize_note_text(text: &str) -> Result<String, CommandError> {
         ));
     }
     Ok(text.to_owned())
+}
+
+/// Validates free text and proves the bundled font can draw every character,
+/// so a saved appearance never contains a hole. Newlines and tabs are allowed;
+/// other control characters are rejected.
+fn normalize_free_text(text: &str) -> Result<String, CommandError> {
+    let text = text.replace("\r\n", "\n").replace('\r', "\n");
+    if text.chars().count() > MAX_FREETEXT_CHARS {
+        return Err(invalid_argument(format!(
+            "the free text must not exceed {MAX_FREETEXT_CHARS} characters"
+        )));
+    }
+    if text
+        .chars()
+        .any(|character| character.is_control() && !matches!(character, '\n' | '\t'))
+    {
+        return Err(invalid_argument(
+            "the free text must not contain control characters",
+        ));
+    }
+    let font = noto_sans_sc();
+    let missing = font.missing_characters(&text);
+    if !missing.is_empty() {
+        let missing: String = missing.into_iter().take(8).collect();
+        return Err(missing_glyph_error(font.family, &missing));
+    }
+    Ok(text)
+}
+
+fn validate_freetext_font_size(font_size: f32) -> Result<(), CommandError> {
+    if !font_size.is_finite()
+        || !(MIN_FREETEXT_FONT_SIZE..=MAX_FREETEXT_FONT_SIZE).contains(&font_size)
+    {
+        return Err(invalid_argument(format!(
+            "the free text font size must be between {MIN_FREETEXT_FONT_SIZE} and \
+             {MAX_FREETEXT_FONT_SIZE} points"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_freetext_rect(rect: TextMarkupRect) -> Result<(), CommandError> {
+    validate_rect(rect, "a free text box")?;
+    if rect.width < MIN_FREETEXT_SIZE || rect.height < MIN_FREETEXT_SIZE {
+        return Err(invalid_argument(format!(
+            "a free text box needs at least {MIN_FREETEXT_SIZE} by {MIN_FREETEXT_SIZE} points"
+        )));
+    }
+    Ok(())
 }
 
 fn parse_color(color: &str) -> Result<(u8, u8, u8), CommandError> {
@@ -1082,6 +1274,61 @@ fn markup_appearance_stream(kind: TextMarkupKind, rgb: (u8, u8, u8), quads: &[[f
             }
             stream.push_str("Q\n");
         }
+        TextMarkupKind::Squiggly => {
+            // A zigzag riding on the bottom edge of each quad, inside the
+            // annotation bounds so the Form XObject does not clip it.
+            stream.push_str(&format!("{red:.4} {green:.4} {blue:.4} RG 1.2 w 0 J 0 j\n"));
+            for quad in quads {
+                // The first edge of the quad is the display bottom edge; its
+                // direction depends on page rotation. The zigzag rises into
+                // the quad along the normal that points at the quad centre.
+                let (lx, ly) = quad_point(quad, 0);
+                let (rx, ry) = quad_point(quad, 1);
+                let (cx, cy) = (
+                    (quad_point(quad, 0).0
+                        + quad_point(quad, 1).0
+                        + quad_point(quad, 2).0
+                        + quad_point(quad, 3).0)
+                        / 4.0,
+                    (quad_point(quad, 0).1
+                        + quad_point(quad, 1).1
+                        + quad_point(quad, 2).1
+                        + quad_point(quad, 3).1)
+                        / 4.0,
+                );
+                let (ex, ey) = (rx - lx, ry - ly);
+                let length = (ex * ex + ey * ey).sqrt();
+                if length <= f32::EPSILON {
+                    continue;
+                }
+                let mut nx = -ey / length;
+                let mut ny = ex / length;
+                if (cx - lx) * nx + (cy - ly) * ny < 0.0 {
+                    nx = -nx;
+                    ny = -ny;
+                }
+                let amplitude = 2.5f32;
+                let lift = 1.0f32;
+                let steps = (length / 3.0).ceil().max(2.0) as usize;
+                let point = |t: f32, offset: f32| {
+                    format!(
+                        "{:.4} {:.4} ",
+                        lx + ex * t + nx * offset,
+                        ly + ey * t + ny * offset
+                    )
+                };
+                stream.push_str(&point(0.0, lift));
+                stream.push_str("m\n");
+                for step in 1..=steps {
+                    let t = step as f32 / steps as f32;
+                    let offset = lift + if step % 2 == 1 { amplitude } else { 0.0 };
+                    stream.push_str(&point(t, offset));
+                    stream.push_str("l\n");
+                }
+                stream.push_str("S\n");
+            }
+            stream.push_str("Q\n");
+        }
     }
     stream
 }
@@ -1145,6 +1392,330 @@ fn ink_appearance_stream(
     }
     stream.push_str("Q\n");
     stream
+}
+
+fn free_text_face() -> Result<ttf_parser::Face<'static>, CommandError> {
+    noto_sans_sc()
+        .face()
+        .ok_or_else(|| internal_error("the bundled Noto Sans SC font could not be parsed"))
+}
+
+fn free_text_advance(face: &ttf_parser::Face<'_>, character: char, scale: f32) -> f32 {
+    let character = if character == '\t' { ' ' } else { character };
+    face.glyph_index(character)
+        .and_then(|glyph| face.glyph_hor_advance(glyph))
+        .map(|advance| f32::from(advance) * scale)
+        .unwrap_or(0.0)
+}
+
+/// Characters that may break between themselves without a space.
+fn is_cjk(character: char) -> bool {
+    matches!(
+        character as u32,
+        0x1100..=0x11FF
+            | 0x2E80..=0x303F
+            | 0x3040..=0x30FF
+            | 0x3100..=0x312F
+            | 0x3400..=0x4DBF
+            | 0x4E00..=0x9FFF
+            | 0xA000..=0xA4CF
+            | 0xAC00..=0xD7AF
+            | 0xF900..=0xFAFF
+            | 0xFE30..=0xFE4F
+            | 0xFF00..=0xFFEF
+            | 0x20000..=0x2FA1F
+    )
+}
+
+/// Greedy line wrapping with explicit newlines, CJK character breaks and
+/// Latin word breaks. Tabs are treated as spaces.
+fn wrap_free_text(
+    face: &ttf_parser::Face<'_>,
+    text: &str,
+    font_size: f32,
+    max_width: f32,
+) -> Vec<String> {
+    let units = f32::from(face.units_per_em()).max(1.0);
+    let scale = font_size / units;
+    let mut lines: Vec<String> = Vec::new();
+
+    for raw in text.split('\n') {
+        let mut tokens: Vec<String> = Vec::new();
+        let mut word = String::new();
+        for character in raw.chars() {
+            if character == ' ' || character == '\t' {
+                if !word.is_empty() {
+                    tokens.push(std::mem::take(&mut word));
+                }
+                if tokens.last().is_some_and(|token| token == " ") {
+                    continue;
+                }
+                tokens.push(" ".to_owned());
+            } else if is_cjk(character) {
+                if !word.is_empty() {
+                    tokens.push(std::mem::take(&mut word));
+                }
+                tokens.push(character.to_string());
+            } else {
+                word.push(character);
+            }
+        }
+        if !word.is_empty() {
+            tokens.push(word);
+        }
+
+        let mut line = String::new();
+        let mut width = 0.0f32;
+        for token in tokens {
+            if token == " " {
+                if line.is_empty() {
+                    continue;
+                }
+                let advance = free_text_advance(face, ' ', scale);
+                if width + advance > max_width {
+                    lines.push(std::mem::take(&mut line));
+                    width = 0.0;
+                    continue;
+                }
+                line.push(' ');
+                width += advance;
+                continue;
+            }
+
+            let token_width: f32 = token
+                .chars()
+                .map(|character| free_text_advance(face, character, scale))
+                .sum();
+            if !line.is_empty() && width + token_width > max_width {
+                lines.push(line.trim_end().to_string());
+                line.clear();
+                width = 0.0;
+            }
+            if token_width > max_width && line.is_empty() {
+                // A single word wider than the box is split by character.
+                for character in token.chars() {
+                    let advance = free_text_advance(face, character, scale);
+                    if !line.is_empty() && width + advance > max_width {
+                        lines.push(std::mem::take(&mut line));
+                        width = 0.0;
+                    }
+                    line.push(character);
+                    width += advance;
+                }
+            } else {
+                line.push_str(&token);
+                width += token_width;
+            }
+        }
+        lines.push(line.trim_end().to_string());
+    }
+
+    while lines.len() > 1 && lines.last().is_some_and(|line| line.is_empty()) {
+        lines.pop();
+    }
+    lines
+}
+
+/// Collects one glyph's TrueType outline as PDF path operators in the local
+/// top-left-origin text box space.
+struct FreeTextOutline {
+    stream: String,
+    pen_x: f32,
+    baseline: f32,
+    scale: f32,
+    current: (f32, f32),
+    start: (f32, f32),
+}
+
+impl FreeTextOutline {
+    fn map(&self, x: f32, y: f32) -> (f32, f32) {
+        (self.pen_x + x * self.scale, self.baseline - y * self.scale)
+    }
+}
+
+impl ttf_parser::OutlineBuilder for FreeTextOutline {
+    fn move_to(&mut self, x: f32, y: f32) {
+        let point = self.map(x, y);
+        self.stream
+            .push_str(&format!("{:.4} {:.4} m\n", point.0, point.1));
+        self.current = point;
+        self.start = point;
+    }
+
+    fn line_to(&mut self, x: f32, y: f32) {
+        let point = self.map(x, y);
+        self.stream
+            .push_str(&format!("{:.4} {:.4} l\n", point.0, point.1));
+        self.current = point;
+    }
+
+    fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
+        let control = self.map(x1, y1);
+        let end = self.map(x, y);
+        let current = self.current;
+        let first = (
+            current.0 + (control.0 - current.0) * 2.0 / 3.0,
+            current.1 + (control.1 - current.1) * 2.0 / 3.0,
+        );
+        let second = (
+            end.0 + (control.0 - end.0) * 2.0 / 3.0,
+            end.1 + (control.1 - end.1) * 2.0 / 3.0,
+        );
+        self.stream.push_str(&format!(
+            "{:.4} {:.4} {:.4} {:.4} {:.4} {:.4} c\n",
+            first.0, first.1, second.0, second.1, end.0, end.1
+        ));
+        self.current = end;
+    }
+
+    fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
+        let first = self.map(x1, y1);
+        let second = self.map(x2, y2);
+        let end = self.map(x, y);
+        self.stream.push_str(&format!(
+            "{:.4} {:.4} {:.4} {:.4} {:.4} {:.4} c\n",
+            first.0, first.1, second.0, second.1, end.0, end.1
+        ));
+        self.current = end;
+    }
+
+    fn close(&mut self) {
+        self.stream.push_str("h\n");
+        self.current = self.start;
+    }
+}
+
+/// Draws wrapped text as filled vector outlines in the local box space.
+#[allow(clippy::too_many_arguments)]
+fn append_free_text_glyphs(
+    stream: &mut String,
+    face: &ttf_parser::Face<'_>,
+    lines: &[String],
+    align: FreeTextAlign,
+    font_size: f32,
+    box_width: f32,
+    box_height: f32,
+    padding: f32,
+) {
+    let units = f32::from(face.units_per_em()).max(1.0);
+    let scale = font_size / units;
+    let ascender = f32::from(face.ascender()) * scale;
+    let line_height = (font_size * FREETEXT_LINE_HEIGHT).max(1.0);
+    let mut drew_glyph = false;
+
+    for (index, line) in lines.iter().enumerate() {
+        let baseline = padding + ascender + index as f32 * line_height;
+        if baseline - ascender > box_height {
+            break;
+        }
+        let width: f32 = line
+            .chars()
+            .map(|character| free_text_advance(face, character, scale))
+            .sum();
+        let start_x = match align {
+            FreeTextAlign::Left => padding,
+            FreeTextAlign::Center => ((box_width - width) / 2.0).max(0.0),
+            FreeTextAlign::Right => (box_width - padding - width).max(0.0),
+        };
+
+        let mut pen_x = start_x;
+        for character in line.chars() {
+            let advance = free_text_advance(face, character, scale);
+            if character != ' ' && character != '\t' {
+                if let Some(glyph) = face.glyph_index(character) {
+                    let mut outline = FreeTextOutline {
+                        stream: String::new(),
+                        pen_x,
+                        baseline,
+                        scale,
+                        current: (0.0, 0.0),
+                        start: (0.0, 0.0),
+                    };
+                    face.outline_glyph(glyph, &mut outline);
+                    if !outline.stream.is_empty() {
+                        stream.push_str(&outline.stream);
+                        drew_glyph = true;
+                    }
+                }
+            }
+            pen_x += advance;
+        }
+    }
+
+    if drew_glyph {
+        stream.push_str("f\n");
+    }
+}
+
+/// Builds the normal appearance of a free text or callout box.
+///
+/// The stream is drawn in a local top-left-origin space and mapped into PDF
+/// user space with one `cm` matrix derived from [`DisplayGeometry`]. That keeps
+/// the text upright on the rotated page while the `/AP` Form XObject still has
+/// the annotation's `/Rect` as its `/BBox`. Glyph outlines come from the
+/// bundled Noto Sans SC program, so the stream needs no font resource and
+/// renders identically in readers that do not fall back to page resources.
+#[allow(clippy::too_many_arguments)]
+fn free_text_appearance_stream(
+    geometry: &DisplayGeometry,
+    display_rect: TextMarkupRect,
+    kind: FreeTextKind,
+    text: &str,
+    font_size: f32,
+    align: FreeTextAlign,
+    rgb: (u8, u8, u8),
+) -> Result<String, CommandError> {
+    let face = free_text_face()?;
+    let width = display_rect.width.max(1.0);
+    let height = display_rect.height.max(1.0);
+    let max_width = (width - FREETEXT_PADDING * 2.0).max(1.0);
+    let lines = wrap_free_text(&face, text, font_size, max_width);
+
+    // Derive the local -> PDF matrix from three mapped points, which covers
+    // CropBox offsets and all four page rotations without exposing geometry
+    // internals.
+    let origin = geometry.point_inverse(display_rect.x, display_rect.y);
+    let x_axis = geometry.point_inverse(display_rect.x + 1.0, display_rect.y);
+    let y_axis = geometry.point_inverse(display_rect.x, display_rect.y + 1.0);
+    let a = x_axis.0 - origin.0;
+    let b = x_axis.1 - origin.1;
+    let c = y_axis.0 - origin.0;
+    let d = y_axis.1 - origin.1;
+
+    let (red, green, blue) = color_components(rgb);
+    let mut stream = format!(
+        "q\n/GS gs\n{a:.6} {b:.6} {c:.6} {d:.6} {:.4} {:.4} cm\n",
+        origin.0, origin.1
+    );
+
+    if kind == FreeTextKind::Callout {
+        let tint = |channel: f32| (channel * 0.08 + 0.92).min(1.0);
+        stream.push_str(&format!(
+            "{:.4} {:.4} {:.4} rg\n0 0 {width:.4} {height:.4} re f\n",
+            tint(red),
+            tint(green),
+            tint(blue)
+        ));
+        stream.push_str(&format!(
+            "{red:.4} {green:.4} {blue:.4} RG 1.5 w 0.75 0.75 {:.4} {:.4} re S\n",
+            (width - 1.5).max(0.1),
+            (height - 1.5).max(0.1)
+        ));
+    }
+
+    stream.push_str(&format!("{red:.4} {green:.4} {blue:.4} rg\n"));
+    append_free_text_glyphs(
+        &mut stream,
+        &face,
+        &lines,
+        align,
+        font_size,
+        width,
+        height,
+        FREETEXT_PADDING,
+    );
+    stream.push_str("Q\n");
+    Ok(stream)
 }
 
 fn page_geometry(
@@ -1307,6 +1878,68 @@ fn capture_snapshot(
                 frame: frame_view,
             }),
             stamp_frame: Some(frame),
+            free_text: None,
+        });
+    }
+
+    if kind == AnnotationKind::FreeText {
+        let free_text_kind = annotation_string_value(document, target, FREETEXT_KIND_KEY)
+            .map_err(map_adapter_error)?
+            .and_then(|value| FreeTextKind::parse(&value))
+            .ok_or_else(|| {
+                internal_error(format!(
+                    "free text annotation {} on page {page_index} was not created by PDFX",
+                    target.index
+                ))
+            })?;
+        let font_size = annotation_string_value(document, target, FREETEXT_FONT_SIZE_KEY)
+            .map_err(map_adapter_error)?
+            .and_then(|value| value.parse::<f32>().ok())
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .unwrap_or(DEFAULT_FREETEXT_FONT_SIZE);
+        let align = annotation_string_value(document, target, FREETEXT_ALIGN_KEY)
+            .map_err(map_adapter_error)?
+            .and_then(|value| FreeTextAlign::parse(&value))
+            .unwrap_or(FreeTextAlign::Left);
+        let text = annotation_contents(document, target)
+            .map_err(map_adapter_error)?
+            .unwrap_or_default();
+        let measured = annotation_color(document, target).ok();
+        let color = annotation_string_value(document, target, COLOR_KEY)
+            .map_err(map_adapter_error)?
+            .unwrap_or_else(|| {
+                measured
+                    .map(|(red, green, blue, _)| format_color(red, green, blue))
+                    .unwrap_or_else(|| DEFAULT_FREETEXT_COLOR.to_owned())
+            });
+        let opacity = stored_opacity
+            .or_else(|| measured.map(|(_, _, _, alpha)| alpha_to_opacity(alpha)))
+            .unwrap_or(100);
+        return Ok(AnnotationSnapshot {
+            page_index,
+            name,
+            kind: match free_text_kind {
+                FreeTextKind::FreeText => AnnotationKind::FreeText,
+                FreeTextKind::Callout => AnnotationKind::Callout,
+            },
+            author,
+            created_at,
+            color,
+            opacity,
+            line_width: None,
+            text: Some(text),
+            rect,
+            quads: Vec::new(),
+            rects: vec![display_rect(geometry, rect)],
+            strokes: Vec::new(),
+            shape: None,
+            stamp: None,
+            stamp_frame: None,
+            free_text: Some(FreeTextView {
+                kind: free_text_kind,
+                font_size,
+                align,
+            }),
         });
     }
 
@@ -1368,6 +2001,7 @@ fn capture_snapshot(
         shape: None,
         stamp: None,
         stamp_frame: None,
+        free_text: None,
     })
 }
 
@@ -1375,6 +2009,7 @@ fn default_color_for(kind: AnnotationKind) -> &'static str {
     match kind {
         AnnotationKind::Note => DEFAULT_NOTE_COLOR,
         AnnotationKind::Ink => DEFAULT_INK_COLOR,
+        AnnotationKind::FreeText | AnnotationKind::Callout => DEFAULT_FREETEXT_COLOR,
         _ => DEFAULT_MARKUP_COLOR,
     }
 }
@@ -1469,6 +2104,7 @@ fn capture_shape_snapshot(
         shape: Some(shape),
         stamp: None,
         stamp_frame: None,
+        free_text: None,
     })
 }
 
@@ -1688,6 +2324,75 @@ pub(crate) fn restore_annotation_snapshot(
             shape,
             &appearance.appearance,
         );
+    }
+
+    if let Some(free_text) = snapshot.free_text {
+        let geometry = page_geometry(document, snapshot.page_index)?;
+        let display = snapshot
+            .rects
+            .first()
+            .copied()
+            .unwrap_or_else(|| display_rect(&geometry, snapshot.rect));
+        let text = snapshot.text.as_deref().unwrap_or_default();
+        let appearance = free_text_appearance_stream(
+            &geometry,
+            display,
+            free_text.kind,
+            text,
+            free_text.font_size,
+            free_text.align,
+            parse_color(&snapshot.color)?,
+        )?;
+        let target = create_native_free_text_annotation(
+            document,
+            snapshot.page_index as i32,
+            text,
+            snapshot.rect,
+        )
+        .map_err(map_adapter_error)?;
+        write_common_properties(
+            document,
+            target,
+            &snapshot.name,
+            snapshot.author.as_deref(),
+            snapshot.created_at.as_deref(),
+            &snapshot.color,
+            snapshot.opacity,
+        )?;
+        set_annotation_contents(document, target, text).map_err(map_adapter_error)?;
+        set_annotation_string_value(document, target, FREETEXT_KIND_KEY, free_text.kind.key())
+            .map_err(map_adapter_error)?;
+        set_annotation_string_value(
+            document,
+            target,
+            FREETEXT_FONT_SIZE_KEY,
+            &format!("{:.4}", free_text.font_size),
+        )
+        .map_err(map_adapter_error)?;
+        set_annotation_string_value(document, target, FREETEXT_ALIGN_KEY, free_text.align.key())
+            .map_err(map_adapter_error)?;
+        set_annotation_string_value(
+            document,
+            target,
+            "DA",
+            &format!(
+                "/{} {:.4} Tf 0 g",
+                noto_sans_sc().postscript_name,
+                free_text.font_size
+            ),
+        )
+        .map_err(map_adapter_error)?;
+        set_annotation_border_width(
+            document,
+            target,
+            if free_text.kind == FreeTextKind::Callout {
+                1.5
+            } else {
+                0.0
+            },
+        )
+        .map_err(map_adapter_error)?;
+        return set_annotation_appearance(document, target, &appearance).map_err(map_adapter_error);
     }
 
     match snapshot.kind {
@@ -1994,6 +2699,133 @@ pub fn create_ink_from_settings(
     create_ink_with_author(document_id, settings.annotation_author.clone(), request)
 }
 
+/// Creates a native free text or callout box attributed to `author`.
+///
+/// Both layouts are `/FreeText` annotations with `/Contents`, `/DA` and a
+/// generated appearance made of vector glyph outlines. `Callout` adds a box to
+/// that appearance but is not a comment thread: it has no `/Popup`, `/Parent`
+/// or `/IRT`, and it deletes as one annotation.
+pub fn create_free_text_with_author(
+    document_id: String,
+    author: String,
+    request: CreateFreeTextRequest,
+) -> Result<AnnotationMutationView, CommandError> {
+    let author = normalize_author(&author)?;
+    let rgb = validate_color_opacity(&request.color, request.opacity)?;
+    validate_freetext_font_size(request.font_size)?;
+    validate_freetext_rect(request.rect)?;
+    let text = normalize_free_text(&request.text)?;
+    let color = format_color(rgb.0, rgb.1, rgb.2);
+    with_open_document(&document_id, |entry| {
+        ensure_annotation_editable(&entry.document)?;
+        let geometry = page_geometry(&entry.document, request.page_index)?;
+        let bounds = pdf_rect_for_display(&geometry, request.rect);
+        let appearance = free_text_appearance_stream(
+            &geometry,
+            request.rect,
+            request.kind,
+            &text,
+            request.font_size,
+            request.align,
+            rgb,
+        )?;
+        let name = next_annotation_name();
+        let created_at = pdf_date_now();
+
+        let target = create_native_free_text_annotation(
+            &entry.document,
+            request.page_index as i32,
+            &text,
+            bounds,
+        )
+        .map_err(map_adapter_error)?;
+        write_common_properties(
+            &entry.document,
+            target,
+            &name,
+            Some(&author),
+            Some(&created_at),
+            &color,
+            request.opacity,
+        )?;
+        set_annotation_contents(&entry.document, target, &text).map_err(map_adapter_error)?;
+        set_annotation_string_value(
+            &entry.document,
+            target,
+            FREETEXT_KIND_KEY,
+            request.kind.key(),
+        )
+        .map_err(map_adapter_error)?;
+        set_annotation_string_value(
+            &entry.document,
+            target,
+            FREETEXT_FONT_SIZE_KEY,
+            &format!("{:.4}", request.font_size),
+        )
+        .map_err(map_adapter_error)?;
+        set_annotation_string_value(
+            &entry.document,
+            target,
+            FREETEXT_ALIGN_KEY,
+            request.align.key(),
+        )
+        .map_err(map_adapter_error)?;
+        set_annotation_string_value(
+            &entry.document,
+            target,
+            "DA",
+            &format!(
+                "/{} {:.4} Tf 0 g",
+                noto_sans_sc().postscript_name,
+                request.font_size
+            ),
+        )
+        .map_err(map_adapter_error)?;
+        set_annotation_border_width(
+            &entry.document,
+            target,
+            if request.kind == FreeTextKind::Callout {
+                1.5
+            } else {
+                0.0
+            },
+        )
+        .map_err(map_adapter_error)?;
+        set_annotation_appearance(&entry.document, target, &appearance)
+            .map_err(map_adapter_error)?;
+
+        let snapshot = capture_snapshot(&entry.document, request.page_index, target, &geometry)?;
+        let view = snapshot.view(&geometry);
+        let history = push_annotation_action(entry, request.page_index, name, None, Some(snapshot));
+        Ok(AnnotationMutationView {
+            annotation: Some(view),
+            page_index: request.page_index,
+            history,
+        })
+    })
+}
+
+/// Creates free text using the author from persisted settings.
+pub fn create_free_text_from_settings(
+    document_id: String,
+    settings: &Settings,
+    request: CreateFreeTextRequest,
+) -> Result<AnnotationMutationView, CommandError> {
+    create_free_text_with_author(document_id, settings.annotation_author.clone(), request)
+}
+
+/// The `create_free_text_annotation` command. `kind` selects a plain free text
+/// box or a callout box; both are native `/FreeText` annotations.
+#[tauri::command]
+pub fn create_free_text_annotation(
+    app: AppHandle,
+    document_id: String,
+    request: CreateFreeTextRequest,
+) -> Result<AnnotationMutationView, CommandError> {
+    let settings = crate::commands::settings_store(&app)?.load();
+    create_free_text_from_settings(document_id, &settings, request)
+}
+
 /// The `create_text_markup_annotation` command. The author is read from
 /// settings at creation time and never accepted from the frontend.
 #[tauri::command]
@@ -2267,6 +3099,12 @@ fn is_managed_annotation(
         return Ok(false);
     };
     if kind != AnnotationKind::Stamp {
+        if kind == AnnotationKind::FreeText {
+            return Ok(annotation_string_value(document, target, FREETEXT_KIND_KEY)
+                .map_err(map_adapter_error)?
+                .and_then(|value| FreeTextKind::parse(&value))
+                .is_some());
+        }
         return Ok(true);
     }
     Ok(annotation_string_value(document, target, STAMP_KEY)
@@ -2402,6 +3240,98 @@ pub fn update_annotation_style(
     })
 }
 
+/// Replaces a free text annotation's body, alignment, font size, colour and
+/// opacity as one undoable action. The appearance is rebuilt from the new text
+/// and style, and `/Q` follows on save from the private alignment key.
+#[tauri::command]
+pub fn update_free_text(
+    document_id: String,
+    request: UpdateFreeTextRequest,
+) -> Result<AnnotationMutationView, CommandError> {
+    validate_freetext_font_size(request.font_size)?;
+    validate_color_opacity(&request.color, request.opacity)?;
+    let text = normalize_free_text(&request.text)?;
+    with_open_document(&document_id, |entry| {
+        ensure_annotation_editable(&entry.document)?;
+        let Some((page_index, target, geometry)) = locate(&entry.document, &request.name)? else {
+            return Err(invalid_argument(format!(
+                "no annotation named {} exists in this document",
+                request.name
+            )));
+        };
+        let before = capture_snapshot(&entry.document, page_index, target, &geometry)?;
+        let Some(free_text) = before.free_text else {
+            return Err(invalid_argument(
+                "only free text and callout annotations have editable text",
+            ));
+        };
+        let mut after = before.clone();
+        after.text = Some(text);
+        after.color = request.color;
+        after.opacity = request.opacity;
+        after.free_text = Some(FreeTextView {
+            kind: free_text.kind,
+            font_size: request.font_size,
+            align: request.align,
+        });
+        restore_annotation_snapshot(&entry.document, &after)?;
+        let after = locate(&entry.document, &request.name)?
+            .and_then(|(_, target, geometry)| {
+                capture_snapshot(&entry.document, page_index, target, &geometry).ok()
+            })
+            .unwrap_or(after);
+        let view = after.view(&geometry);
+        let history =
+            push_annotation_action(entry, page_index, request.name, Some(before), Some(after));
+        Ok(AnnotationMutationView {
+            annotation: Some(view),
+            page_index,
+            history,
+        })
+    })
+}
+
+/// Moves or resizes a free text or callout box as one undoable action. The
+/// appearance is rebuilt so text re-wraps inside the new width.
+#[tauri::command]
+pub fn transform_free_text_annotation(
+    document_id: String,
+    name: String,
+    rect: TextMarkupRect,
+) -> Result<AnnotationMutationView, CommandError> {
+    validate_freetext_rect(rect)?;
+    with_open_document(&document_id, |entry| {
+        ensure_annotation_editable(&entry.document)?;
+        let Some((page_index, target, geometry)) = locate(&entry.document, &name)? else {
+            return Err(invalid_argument(format!(
+                "no annotation named {name} exists in this document"
+            )));
+        };
+        let before = capture_snapshot(&entry.document, page_index, target, &geometry)?;
+        if before.free_text.is_none() {
+            return Err(invalid_argument(
+                "only free text and callout annotations can be moved or resized",
+            ));
+        }
+        let mut after = before.clone();
+        after.rect = pdf_rect_for_display(&geometry, rect);
+        after.rects = vec![rect];
+        restore_annotation_snapshot(&entry.document, &after)?;
+        let after = locate(&entry.document, &name)?
+            .and_then(|(_, target, geometry)| {
+                capture_snapshot(&entry.document, page_index, target, &geometry).ok()
+            })
+            .unwrap_or(after);
+        let view = after.view(&geometry);
+        let history = push_annotation_action(entry, page_index, name, Some(before), Some(after));
+        Ok(AnnotationMutationView {
+            annotation: Some(view),
+            page_index,
+            history,
+        })
+    })
+}
+
 /// Replaces a sticky note's body. The annotation keeps its name, author,
 /// creation time, colour and position.
 #[tauri::command]
@@ -2500,6 +3430,65 @@ pub fn delete_annotation(
         let history = push_annotation_action(entry, page_index, name, Some(before), None);
         Ok(AnnotationMutationView {
             annotation: None,
+            page_index,
+            history,
+        })
+    })
+}
+
+/// Removes one stroke from an ink annotation.
+///
+/// The eraser overlay hit-tests a stroke in display space and passes its
+/// index. The remaining strokes are rebuilt as `/InkList`, the annotation
+/// `/Rect` shrinks to their bounds and the appearance stream is regenerated,
+/// so the saved file and the editor agree. The action is recorded as a
+/// stroke-granular snapshot: undo restores every stroke, redo removes the one
+/// again. Erasing the last stroke deletes the annotation, and undoing that
+/// recreates it with the same name, author and creation time.
+#[tauri::command]
+pub fn erase_ink_stroke(
+    document_id: String,
+    name: String,
+    stroke_index: usize,
+) -> Result<AnnotationMutationView, CommandError> {
+    with_open_document(&document_id, |entry| {
+        ensure_annotation_editable(&entry.document)?;
+        let Some((page_index, target, geometry)) = locate(&entry.document, &name)? else {
+            return Err(invalid_argument(format!(
+                "no annotation named {name} exists in this document"
+            )));
+        };
+        let before = capture_snapshot(&entry.document, page_index, target, &geometry)?;
+        if before.kind != AnnotationKind::Ink {
+            return Err(invalid_argument(format!(
+                "annotation {name} is not an ink annotation"
+            )));
+        }
+        if stroke_index >= before.strokes.len() {
+            return Err(invalid_argument(format!(
+                "stroke {stroke_index} does not exist in annotation {name}"
+            )));
+        }
+
+        let mut remaining = before.strokes.clone();
+        remaining.remove(stroke_index);
+        let (after, view) = if remaining.is_empty() {
+            remove_annotation(&entry.document, target).map_err(map_adapter_error)?;
+            (None, None)
+        } else {
+            let mut after = before.clone();
+            let padding = after.line_width.unwrap_or(DEFAULT_INK_LINE_WIDTH) / 2.0 + 1.0;
+            after.rect = strokes_bounds(&remaining, padding);
+            after.rects = vec![display_rect(&geometry, after.rect)];
+            after.strokes = remaining;
+            restore_annotation_snapshot(&entry.document, &after)?;
+            let view = after.view(&geometry);
+            (Some(after), Some(view))
+        };
+
+        let history = push_annotation_action(entry, page_index, name, Some(before), after);
+        Ok(AnnotationMutationView {
+            annotation: view,
             page_index,
             history,
         })
