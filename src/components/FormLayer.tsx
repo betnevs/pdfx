@@ -35,21 +35,40 @@ const FILLABLE_KINDS: ReadonlySet<FormFieldView["kind"]> = new Set([
 const FORMS_DISABLED_REASON = "此文档不允许填写表单";
 const LOAD_FAILED_REASON = "表单字段无法载入";
 const STRUCTURE_DISABLED_REASON = "此文档的权限限制不允许创建表单字段";
+/** Shown wherever a signature field is placed or selected. */
+const SIGNATURE_DISCLOSURE = "仅创建签名字段结构，不执行证书签名";
 const REQUIRED_MARK = "必填";
 const DEFAULT_FIELD_WIDTH = 180;
 const DEFAULT_FIELD_HEIGHT = 24;
 /** Buttons and radio widgets are placed at this size unless dragged larger. */
 const SMALL_FIELD_SIZE = 16;
+/** A list box is placed tall enough to show a few option rows. */
+const LIST_FIELD_HEIGHT = 48;
+/** A signature placeholder needs room for its label and signing line. */
+const SIGNATURE_FIELD_WIDTH = 240;
+const SIGNATURE_FIELD_HEIGHT = 60;
 /** A drag shorter than this in either direction uses the default size. */
 const MIN_DRAG_SIZE = 12;
 const DEFAULT_FONT_SIZE = 12;
 
-type CreateKind = "text" | "checkbox" | "radio";
+type CreateKind = "text" | "checkbox" | "radio" | "comboBox" | "listBox" | "signature";
 
 const TOOL_LABELS: Record<CreateKind, string> = {
   text: "添加文本字段",
   checkbox: "添加复选框",
   radio: "添加单选按钮组",
+  comboBox: "添加下拉框",
+  listBox: "添加列表框",
+  signature: "添加签名字段",
+};
+
+const TOOL_HINTS: Record<CreateKind, string> = {
+  text: "在页面上点击或拖动以放置文本字段",
+  checkbox: "在页面上点击或拖动以放置复选框",
+  radio: "在页面上点击或拖动以放置单选按钮组",
+  comboBox: "在页面上点击或拖动以放置下拉框",
+  listBox: "在页面上点击或拖动以放置列表框",
+  signature: "在页面上点击或拖动以放置签名字段结构",
 };
 
 interface PagePoint {
@@ -67,10 +86,14 @@ interface FieldPanelDraft {
   /** Kept as text so an invalid entry can be reported instead of lost. */
   fontSize: string;
   checked: boolean;
-  /** Radio group option labels in display order. */
+  /** Radio, combo box and list box option labels in display order. */
   options: string[];
-  /** Radio group default option index. */
+  /** Radio group and combo box default option index. */
   selectedIndex: number | null;
+  /** List box default selected indices. */
+  selectedIndices: number[];
+  /** List box MultiSelect property. */
+  multiSelect: boolean;
 }
 
 /** A radio group is one panel entry even though it has one widget per option. */
@@ -98,6 +121,8 @@ function draftFor(field: FormFieldView): FieldPanelDraft {
     checked: field.checked,
     options: [...field.options],
     selectedIndex: field.selectedIndex,
+    selectedIndices: [...field.selectedIndices],
+    multiSelect: field.multiSelect,
   };
 }
 
@@ -105,6 +130,13 @@ function sameOptions(left: string[], right: string[]): boolean {
   return (
     left.length === right.length &&
     left.every((option, index) => option === right[index])
+  );
+}
+
+function sameIndices(left: number[], right: number[]): boolean {
+  return (
+    left.length === right.length &&
+    left.every((index, position) => index === right[position])
   );
 }
 
@@ -130,6 +162,21 @@ function sameDraft(draft: FieldPanelDraft, field: FormFieldView): boolean {
         sameOptions(draft.options, field.options) &&
         draft.selectedIndex === field.selectedIndex
       );
+    case "comboBox":
+      return (
+        sameOptions(draft.options, field.options) &&
+        draft.selectedIndex === field.selectedIndex &&
+        Number.parseFloat(draft.fontSize) ===
+          (field.fontSize ?? DEFAULT_FONT_SIZE)
+      );
+    case "listBox":
+      return (
+        sameOptions(draft.options, field.options) &&
+        sameIndices(draft.selectedIndices, field.selectedIndices) &&
+        draft.multiSelect === field.multiSelect &&
+        Number.parseFloat(draft.fontSize) ===
+          (field.fontSize ?? DEFAULT_FONT_SIZE)
+      );
     default:
       return true;
   }
@@ -147,8 +194,20 @@ function placementRect(
     current !== null &&
     Math.abs(current.x - anchor.x) >= MIN_DRAG_SIZE &&
     Math.abs(current.y - anchor.y) >= MIN_DRAG_SIZE;
-  const defaultWidth = kind === "text" ? DEFAULT_FIELD_WIDTH : SMALL_FIELD_SIZE;
-  const defaultHeight = kind === "text" ? DEFAULT_FIELD_HEIGHT : SMALL_FIELD_SIZE;
+  const defaultSize = (): [number, number] => {
+    switch (kind) {
+      case "text":
+      case "comboBox":
+        return [DEFAULT_FIELD_WIDTH, DEFAULT_FIELD_HEIGHT];
+      case "listBox":
+        return [DEFAULT_FIELD_WIDTH, LIST_FIELD_HEIGHT];
+      case "signature":
+        return [SIGNATURE_FIELD_WIDTH, SIGNATURE_FIELD_HEIGHT];
+      default:
+        return [SMALL_FIELD_SIZE, SMALL_FIELD_SIZE];
+    }
+  };
+  const [defaultWidth, defaultHeight] = defaultSize();
   let width = dragged
     ? Math.abs(current.x - anchor.x)
     : Math.min(defaultWidth, pageWidth);
@@ -408,6 +467,13 @@ export function FormLayer({
             if (updated?.kind === "radio") {
               return { ...current, selectedIndex: updated.selectedIndex };
             }
+            if (updated?.kind === "comboBox" || updated?.kind === "listBox") {
+              return {
+                ...current,
+                selectedIndex: updated.selectedIndex,
+                selectedIndices: [...updated.selectedIndices],
+              };
+            }
             return current;
           });
         }
@@ -429,6 +495,10 @@ export function FormLayer({
 
   const pageFields = fields.filter(
     (field) => field.pageIndex === pageIndex && FILLABLE_KINDS.has(field.kind),
+  );
+  // Signature fields are shown as inert placeholders: PDFX never signs them.
+  const pageSignatures = fields.filter(
+    (field) => field.pageIndex === pageIndex && field.kind === "signature",
   );
   const createdPageFields = fields.filter(
     (field) => field.pageIndex === pageIndex && field.created,
@@ -519,35 +589,74 @@ export function FormLayer({
     setStructureBusy(true);
     setNotice(null);
     try {
-      const request: CreateFormFieldRequest =
-        kind === "text"
-          ? {
-              kind: "text",
-              rect,
-              name: null,
-              tooltip: null,
-              required: false,
-              multiline: false,
-              fontSize: DEFAULT_FONT_SIZE,
-            }
-          : kind === "checkbox"
-            ? {
-                kind: "checkbox",
-                rect,
-                name: null,
-                tooltip: null,
-                required: false,
-                checked: false,
-              }
-            : {
-                kind: "radio",
-                rect,
-                name: null,
-                tooltip: null,
-                required: false,
-                options: ["选项 1"],
-                selectedIndex: null,
-              };
+      let request: CreateFormFieldRequest;
+      switch (kind) {
+        case "text":
+          request = {
+            kind: "text",
+            rect,
+            name: null,
+            tooltip: null,
+            required: false,
+            multiline: false,
+            fontSize: DEFAULT_FONT_SIZE,
+          };
+          break;
+        case "checkbox":
+          request = {
+            kind: "checkbox",
+            rect,
+            name: null,
+            tooltip: null,
+            required: false,
+            checked: false,
+          };
+          break;
+        case "radio":
+          request = {
+            kind: "radio",
+            rect,
+            name: null,
+            tooltip: null,
+            required: false,
+            options: ["选项 1"],
+            selectedIndex: null,
+          };
+          break;
+        case "comboBox":
+          request = {
+            kind: "comboBox",
+            rect,
+            name: null,
+            tooltip: null,
+            required: false,
+            options: ["选项 1"],
+            selectedIndex: null,
+            fontSize: DEFAULT_FONT_SIZE,
+          };
+          break;
+        case "listBox":
+          request = {
+            kind: "listBox",
+            rect,
+            name: null,
+            tooltip: null,
+            required: false,
+            options: ["选项 1"],
+            selectedIndices: [],
+            multiSelect: false,
+            fontSize: DEFAULT_FONT_SIZE,
+          };
+          break;
+        case "signature":
+          request = {
+            kind: "signature",
+            rect,
+            name: null,
+            tooltip: null,
+          };
+          break;
+      }
       const result = await createFormField(documentId, pageIndex, request);
       setFields(result.fields);
       setHistory(result.history);
@@ -581,40 +690,86 @@ export function FormLayer({
       return;
     }
     const tooltip = next.tooltip.trim() === "" ? null : next.tooltip;
+    const parsedFontSize = () => Number.parseFloat(next.fontSize);
+    const fontSizeIsValid = () => {
+      const fontSize = parsedFontSize();
+      return Number.isFinite(fontSize) && fontSize >= 4 && fontSize <= 200;
+    };
     let request: UpdateFormFieldRequest;
-    if (field.kind === "text") {
-      const fontSize = Number.parseFloat(next.fontSize);
-      if (!Number.isFinite(fontSize) || fontSize < 4 || fontSize > 200) {
-        setPanelError("字号必须在 4 到 200 点之间。");
+    switch (field.kind) {
+      case "text":
+        if (!fontSizeIsValid()) {
+          setPanelError("字号必须在 4 到 200 点之间。");
+          return;
+        }
+        request = {
+          kind: "text",
+          name: next.name,
+          tooltip,
+          required: next.required,
+          multiline: next.multiline,
+          fontSize: parsedFontSize(),
+        };
+        break;
+      case "checkbox":
+        request = {
+          kind: "checkbox",
+          name: next.name,
+          tooltip,
+          required: next.required,
+          checked: next.checked,
+        };
+        break;
+      case "radio":
+        request = {
+          kind: "radio",
+          name: next.name,
+          tooltip,
+          required: next.required,
+          options: next.options,
+          selectedIndex: next.selectedIndex,
+        };
+        break;
+      case "comboBox":
+        if (!fontSizeIsValid()) {
+          setPanelError("字号必须在 4 到 200 点之间。");
+          return;
+        }
+        request = {
+          kind: "comboBox",
+          name: next.name,
+          tooltip,
+          required: next.required,
+          options: next.options,
+          selectedIndex: next.selectedIndex,
+          fontSize: parsedFontSize(),
+        };
+        break;
+      case "listBox":
+        if (!fontSizeIsValid()) {
+          setPanelError("字号必须在 4 到 200 点之间。");
+          return;
+        }
+        request = {
+          kind: "listBox",
+          name: next.name,
+          tooltip,
+          required: next.required,
+          options: next.options,
+          selectedIndices: next.selectedIndices,
+          multiSelect: next.multiSelect,
+          fontSize: parsedFontSize(),
+        };
+        break;
+      case "signature":
+        request = {
+          kind: "signature",
+          name: next.name,
+          tooltip,
+        };
+        break;
+      default:
         return;
-      }
-      request = {
-        kind: "text",
-        name: next.name,
-        tooltip,
-        required: next.required,
-        multiline: next.multiline,
-        fontSize,
-      };
-    } else if (field.kind === "checkbox") {
-      request = {
-        kind: "checkbox",
-        name: next.name,
-        tooltip,
-        required: next.required,
-        checked: next.checked,
-      };
-    } else if (field.kind === "radio") {
-      request = {
-        kind: "radio",
-        name: next.name,
-        tooltip,
-        required: next.required,
-        options: next.options,
-        selectedIndex: next.selectedIndex,
-      };
-    } else {
-      return;
     }
     setStructureBusy(true);
     setPanelError(null);
@@ -674,8 +829,13 @@ export function FormLayer({
     void commitPanel(next);
   }
 
+  const editsOptions = (field: FormFieldView | null) =>
+    field?.kind === "radio" ||
+    field?.kind === "comboBox" ||
+    field?.kind === "listBox";
+
   function addPanelOption() {
-    if (!panelDraft || selectedField?.kind !== "radio") {
+    if (!panelDraft || !editsOptions(selectedField)) {
       return;
     }
     const options = [
@@ -688,7 +848,7 @@ export function FormLayer({
   function removePanelOption(index: number) {
     if (
       !panelDraft ||
-      selectedField?.kind !== "radio" ||
+      !editsOptions(selectedField) ||
       panelDraft.options.length <= 1
     ) {
       return;
@@ -702,7 +862,37 @@ export function FormLayer({
     } else if (selectedIndex !== null && selectedIndex > index) {
       selectedIndex -= 1;
     }
-    applyDraftChange({ options, selectedIndex });
+    const selectedIndices = panelDraft.selectedIndices
+      .filter((position) => position !== index)
+      .map((position) => (position > index ? position - 1 : position));
+    applyDraftChange({ options, selectedIndex, selectedIndices });
+  }
+
+  function setPanelMultiSelect(multiSelect: boolean) {
+    if (!panelDraft) {
+      return;
+    }
+    // Turning multi-select off keeps the first default: the backend rejects
+    // more than one default on a single-select list.
+    const selectedIndices = multiSelect
+      ? panelDraft.selectedIndices
+      : panelDraft.selectedIndices.slice(0, 1);
+    applyDraftChange({
+      multiSelect,
+      selectedIndices,
+      selectedIndex: selectedIndices[0] ?? null,
+    });
+  }
+
+  function setPanelSelectedIndices(indices: number[]) {
+    if (!panelDraft) {
+      return;
+    }
+    const selectedIndices = [...new Set(indices)].sort((left, right) => left - right);
+    applyDraftChange({
+      selectedIndices,
+      selectedIndex: selectedIndices[0] ?? null,
+    });
   }
 
   async function runStructureHistory(kind: "undo" | "redo") {
@@ -1075,6 +1265,47 @@ export function FormLayer({
     }
   };
 
+  const renderSignature = (field: FormFieldView) => {
+    const label = `${field.name}：签名字段（${SIGNATURE_DISCLOSURE}）`;
+    const content = (
+      <>
+        <span className="form-field-signature-label">签名</span>
+        <span className="form-field-signature-hint">{SIGNATURE_DISCLOSURE}</span>
+      </>
+    );
+    // Created signatures open the property panel; discovered ones stay inert
+    // and only explain that PDFX never signs them.
+    if (field.created) {
+      return (
+        <button
+          key={field.fieldId}
+          type="button"
+          className="form-field form-field--signature form-field--created"
+          style={rectStyle(field)}
+          aria-label={label}
+          title={label}
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={() => selectField(baseCreatedId(field))}
+        >
+          {content}
+        </button>
+      );
+    }
+    return (
+      <div
+        key={field.fieldId}
+        className="form-field form-field--signature"
+        style={rectStyle(field)}
+        role="img"
+        aria-label={label}
+        title={label}
+        onPointerDown={(event) => event.stopPropagation()}
+      >
+        {content}
+      </div>
+    );
+  };
+
   return (
     <div
       ref={layerRef}
@@ -1107,11 +1338,7 @@ export function FormLayer({
                 ? STRUCTURE_DISABLED_REASON
                 : placingKind === kind
                   ? "退出表单字段工具"
-                  : kind === "text"
-                    ? "在页面上点击或拖动以放置文本字段"
-                    : kind === "checkbox"
-                      ? "在页面上点击或拖动以放置复选框"
-                      : "在页面上点击或拖动以放置单选按钮组"
+                  : TOOL_HINTS[kind]
             }
             onClick={() => togglePlacing(kind)}
           >
@@ -1147,6 +1374,11 @@ export function FormLayer({
         )}
         {!canModifyContent && (
           <span className="form-edit-reason">{STRUCTURE_DISABLED_REASON}</span>
+        )}
+        {(placingKind === "signature" || selectedField?.kind === "signature") && (
+          <span className="form-edit-reason" role="status">
+            {SIGNATURE_DISCLOSURE}
+          </span>
         )}
       </div>
 
@@ -1255,68 +1487,72 @@ export function FormLayer({
               }}
             />
           </label>
-          <label className="form-field-panel-row form-field-panel-row--check">
-            <input
-              type="checkbox"
-              aria-label="必填字段"
-              checked={panelDraft.required}
-              disabled={structureBusy}
-              onChange={(event) => {
-                const next = {
-                  ...panelDraft,
-                  required: event.target.checked,
-                };
-                setPanelDraft(next);
-                void commitPanel(next);
-              }}
-            />
-            必填
-          </label>
+          {selectedField.kind !== "signature" && (
+            <label className="form-field-panel-row form-field-panel-row--check">
+              <input
+                type="checkbox"
+                aria-label="必填字段"
+                checked={panelDraft.required}
+                disabled={structureBusy}
+                onChange={(event) => {
+                  const next = {
+                    ...panelDraft,
+                    required: event.target.checked,
+                  };
+                  setPanelDraft(next);
+                  void commitPanel(next);
+                }}
+              />
+              必填
+            </label>
+          )}
           {selectedField.kind === "text" && (
-            <>
-              <label className="form-field-panel-row form-field-panel-row--check">
-                <input
-                  type="checkbox"
-                  aria-label="多行文本"
-                  checked={panelDraft.multiline}
-                  disabled={structureBusy}
-                  onChange={(event) => {
-                    const next = {
-                      ...panelDraft,
-                      multiline: event.target.checked,
-                    };
-                    setPanelDraft(next);
-                    void commitPanel(next);
-                  }}
-                />
-                多行
-              </label>
-              <label className="form-field-panel-row">
-                字号
-                <input
-                  type="number"
-                  aria-label="字号"
-                  min={4}
-                  max={200}
-                  step={1}
-                  value={panelDraft.fontSize}
-                  disabled={structureBusy}
-                  onChange={(event) =>
-                    setPanelDraft({
-                      ...panelDraft,
-                      fontSize: event.target.value,
-                    })
+            <label className="form-field-panel-row form-field-panel-row--check">
+              <input
+                type="checkbox"
+                aria-label="多行文本"
+                checked={panelDraft.multiline}
+                disabled={structureBusy}
+                onChange={(event) => {
+                  const next = {
+                    ...panelDraft,
+                    multiline: event.target.checked,
+                  };
+                  setPanelDraft(next);
+                  void commitPanel(next);
+                }}
+              />
+              多行
+            </label>
+          )}
+          {(selectedField.kind === "text" ||
+            selectedField.kind === "comboBox" ||
+            selectedField.kind === "listBox") && (
+            <label className="form-field-panel-row">
+              字号
+              <input
+                type="number"
+                aria-label="字号"
+                min={4}
+                max={200}
+                step={1}
+                value={panelDraft.fontSize}
+                disabled={structureBusy}
+                onChange={(event) =>
+                  setPanelDraft({
+                    ...panelDraft,
+                    fontSize: event.target.value,
+                  })
+                }
+                onBlur={() => void commitPanel()}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    void commitPanel();
                   }
-                  onBlur={() => void commitPanel()}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter") {
-                      event.preventDefault();
-                      void commitPanel();
-                    }
-                  }}
-                />
-              </label>
-            </>
+                }}
+              />
+            </label>
           )}
           {selectedField.kind === "checkbox" && (
             <label className="form-field-panel-row form-field-panel-row--check">
@@ -1332,7 +1568,12 @@ export function FormLayer({
               默认选中
             </label>
           )}
-          {selectedField.kind === "radio" && (
+          {selectedField.kind === "signature" && (
+            <p className="form-field-panel-row form-field-panel-disclosure">
+              {SIGNATURE_DISCLOSURE}
+            </p>
+          )}
+          {editsOptions(selectedField) && (
             <div className="form-field-panel-options">
               <span className="form-field-panel-row">选项</span>
               {panelDraft.options.map((option, index) => (
@@ -1384,17 +1625,49 @@ export function FormLayer({
                   添加选项
                 </button>
               </div>
+              {selectedField.kind === "listBox" && (
+                <label className="form-field-panel-row form-field-panel-row--check">
+                  <input
+                    type="checkbox"
+                    aria-label="允许多选"
+                    checked={panelDraft.multiSelect}
+                    disabled={structureBusy}
+                    onChange={(event) =>
+                      setPanelMultiSelect(event.target.checked)
+                    }
+                  />
+                  允许多选
+                </label>
+              )}
               <label className="form-field-panel-row">
                 默认选项
                 <select
                   aria-label="默认选项"
+                  multiple={
+                    selectedField.kind === "listBox" && panelDraft.multiSelect
+                  }
                   value={
-                    panelDraft.selectedIndex === null
-                      ? ""
-                      : String(panelDraft.selectedIndex)
+                    selectedField.kind === "listBox"
+                      ? panelDraft.multiSelect
+                        ? panelDraft.selectedIndices.map(String)
+                        : panelDraft.selectedIndices.length > 0
+                          ? String(panelDraft.selectedIndices[0])
+                          : ""
+                      : panelDraft.selectedIndex === null
+                        ? ""
+                        : String(panelDraft.selectedIndex)
                   }
                   disabled={structureBusy}
                   onChange={(event) => {
+                    if (selectedField.kind === "listBox") {
+                      setPanelSelectedIndices(
+                        Array.from(
+                          event.target.selectedOptions,
+                          (option) => Number.parseInt(option.value, 10),
+                        ),
+                      );
+                      return;
+                    }
                     const selectedIndex =
                       event.target.value === ""
                         ? null
@@ -1402,7 +1675,9 @@ export function FormLayer({
                     applyDraftChange({ selectedIndex });
                   }}
                 >
-                  <option value="">无</option>
+                  {!(selectedField.kind === "listBox" && panelDraft.multiSelect) && (
+                    <option value="">无</option>
+                  )}
                   {panelDraft.options.map((option, index) => (
                     <option key={`default-${index}`} value={index}>
                       {option || `选项 ${index + 1}`}
@@ -1431,6 +1706,7 @@ export function FormLayer({
       )}
 
       {pageFields.map(renderControl)}
+      {pageSignatures.map(renderSignature)}
       {!canFillForms && (
         <span className="form-layer-notice" role="status">
           {FORMS_DISABLED_REASON}

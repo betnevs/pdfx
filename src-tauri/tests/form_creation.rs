@@ -698,6 +698,752 @@ fn updates_radio_options_and_default_together_and_history_restores_them() {
 }
 
 #[test]
+fn creates_choice_fields_with_options_defaults_and_font_size() {
+    let pdf = synthetic::single_line_pdf();
+    let document_id = open_synthetic(&pdf);
+
+    let combo = create_form_field(
+        document_id.clone(),
+        0,
+        CreateFormFieldRequest::ComboBox {
+            rect: FormFieldRect {
+                x: 72.0,
+                y: 100.0,
+                width: 180.0,
+                height: 24.0,
+            },
+            name: Some("country".to_owned()),
+            tooltip: Some("请选择国家".to_owned()),
+            required: true,
+            options: vec!["中国".to_owned(), "Japan".to_owned()],
+            selected_index: Some(1),
+            font_size: Some(14.0),
+        },
+    )
+    .expect("create a dropdown field");
+    let field = combo
+        .fields
+        .iter()
+        .find(|field| field.field_id == combo.field_id)
+        .expect("the dropdown is discovered");
+    assert_eq!(field.kind, FormFieldKind::ComboBox);
+    assert_eq!(field.name, "country");
+    assert_eq!(field.options, ["中国", "Japan"]);
+    assert_eq!(field.value.as_deref(), Some("Japan"));
+    assert_eq!(field.selected_index, Some(1));
+    assert_eq!(field.selected_indices, [1]);
+    assert!(!field.multi_select);
+    assert_eq!(field.font_size, Some(14.0));
+    assert!(field.required && field.created);
+    assert_eq!(field.tooltip.as_deref(), Some("请选择国家"));
+    assert!(
+        missing_required_fields(document_id.clone())
+            .expect("required fields")
+            .is_empty(),
+        "a default selection answers the required dropdown"
+    );
+
+    let list = create_form_field(
+        document_id.clone(),
+        0,
+        CreateFormFieldRequest::ListBox {
+            rect: FormFieldRect {
+                x: 72.0,
+                y: 140.0,
+                width: 180.0,
+                height: 48.0,
+            },
+            name: Some("tags".to_owned()),
+            tooltip: None,
+            required: false,
+            options: vec!["A".to_owned(), "B".to_owned(), "C".to_owned()],
+            selected_indices: vec![0, 2],
+            multi_select: true,
+            font_size: Some(10.0),
+        },
+    )
+    .expect("create a multi-select list");
+    let field = list
+        .fields
+        .iter()
+        .find(|field| field.field_id == list.field_id)
+        .expect("the list is discovered");
+    assert_eq!(field.kind, FormFieldKind::ListBox);
+    assert_eq!(field.options, ["A", "B", "C"]);
+    assert_eq!(field.value.as_deref(), Some("A"));
+    assert_eq!(field.selected_index, Some(0));
+    assert_eq!(field.selected_indices, [0, 2]);
+    assert!(field.multi_select);
+    assert_eq!(field.font_size, Some(10.0));
+
+    let required_list = create_form_field(
+        document_id.clone(),
+        0,
+        CreateFormFieldRequest::ListBox {
+            rect: FormFieldRect {
+                x: 72.0,
+                y: 200.0,
+                width: 180.0,
+                height: 48.0,
+            },
+            name: Some("level".to_owned()),
+            tooltip: None,
+            required: true,
+            options: vec!["Low".to_owned(), "High".to_owned()],
+            selected_indices: Vec::new(),
+            multi_select: false,
+            font_size: None,
+        },
+    )
+    .expect("create an unanswered required list");
+    assert_eq!(required_list.field_id, "new:3");
+    let field = required_list
+        .fields
+        .iter()
+        .find(|field| field.field_id == required_list.field_id)
+        .expect("the required list is discovered");
+    assert_eq!(field.value, None);
+    assert_eq!(field.selected_indices, Vec::<u32>::new());
+    assert_eq!(
+        missing_required_fields(document_id.clone())
+            .expect("required fields")
+            .len(),
+        1,
+        "an unanswered required list box blocks saving"
+    );
+
+    let invalid = fill_form_field(
+        document_id.clone(),
+        required_list.field_id.clone(),
+        FormFieldValueInput::Choice {
+            value: "Nope".to_owned(),
+        },
+    )
+    .expect_err("a value outside /Opt is rejected");
+    assert_eq!(invalid.code, CommandErrorCode::FormValueInvalid);
+
+    let filled = fill_form_field(
+        document_id.clone(),
+        required_list.field_id.clone(),
+        FormFieldValueInput::Choice {
+            value: "High".to_owned(),
+        },
+    )
+    .expect("choose a list option");
+    let field = filled
+        .fields
+        .iter()
+        .find(|field| field.field_id == required_list.field_id)
+        .expect("still discovered");
+    assert_eq!(field.value.as_deref(), Some("High"));
+    assert_eq!(field.selected_index, Some(1));
+    assert_eq!(field.selected_indices, [1]);
+    assert!(filled.history.dirty);
+    assert!(missing_required_fields(document_id.clone())
+        .expect("required fields")
+        .is_empty());
+
+    undo_text_edit(document_id.clone()).expect("undo the list selection");
+    let field = form_fields(document_id.clone())
+        .expect("fields after undo")
+        .into_iter()
+        .find(|field| field.field_id == required_list.field_id)
+        .expect("the required list survives undo");
+    assert_eq!(field.value, None);
+    assert_eq!(
+        missing_required_fields(document_id.clone())
+            .expect("required fields after undo")
+            .len(),
+        1
+    );
+    redo_text_edit(document_id.clone()).expect("redo the list selection");
+    assert_eq!(
+        form_fields(document_id.clone())
+            .expect("fields after redo")
+            .into_iter()
+            .find(|field| field.field_id == required_list.field_id)
+            .and_then(|field| field.value),
+        Some("High".to_owned())
+    );
+
+    let deleted = delete_form_field(document_id.clone(), combo.field_id.clone())
+        .expect("delete the dropdown");
+    assert!(deleted.fields.iter().all(|field| field.name != "country"));
+    undo_text_edit(document_id.clone()).expect("undo the dropdown deletion");
+    assert!(form_fields(document_id.clone())
+        .expect("fields after undo")
+        .iter()
+        .any(|field| field.name == "country" && field.kind == FormFieldKind::ComboBox));
+
+    close_document(document_id).expect("close document");
+}
+
+#[test]
+fn updates_choice_and_signature_properties_through_the_history() {
+    let pdf = synthetic::single_line_pdf();
+    let dir = support::temp::TempDir::new("create-choice-signature-update");
+    let output = dir.path().join("output.pdf");
+    let document_id = open_synthetic(&pdf);
+    let rect = FormFieldRect {
+        x: 72.0,
+        y: 100.0,
+        width: 180.0,
+        height: 24.0,
+    };
+
+    let combo = create_form_field(
+        document_id.clone(),
+        0,
+        CreateFormFieldRequest::ComboBox {
+            rect,
+            name: Some("country".to_owned()),
+            tooltip: None,
+            required: false,
+            options: vec!["中国".to_owned(), "Japan".to_owned()],
+            selected_index: None,
+            font_size: None,
+        },
+    )
+    .expect("create the dropdown");
+    let list = create_form_field(
+        document_id.clone(),
+        0,
+        CreateFormFieldRequest::ListBox {
+            rect: FormFieldRect { y: 140.0, ..rect },
+            name: Some("tags".to_owned()),
+            tooltip: None,
+            required: false,
+            options: vec!["A".to_owned(), "B".to_owned()],
+            selected_indices: Vec::new(),
+            multi_select: false,
+            font_size: None,
+        },
+    )
+    .expect("create the list");
+    let signature = create_form_field(
+        document_id.clone(),
+        0,
+        CreateFormFieldRequest::Signature {
+            rect: FormFieldRect {
+                y: 200.0,
+                width: 240.0,
+                height: 80.0,
+                ..rect
+            },
+            name: Some("sign_here".to_owned()),
+            tooltip: None,
+        },
+    )
+    .expect("create the signature");
+
+    let updated = update_form_field(
+        document_id.clone(),
+        combo.field_id.clone(),
+        UpdateFormFieldRequest::ComboBox {
+            name: "nation".to_owned(),
+            tooltip: Some("国家".to_owned()),
+            required: true,
+            options: vec!["中国".to_owned(), "日本".to_owned(), "Korea".to_owned()],
+            selected_index: Some(2),
+            font_size: 18.0,
+        },
+    )
+    .expect("update the dropdown properties");
+    let field = updated
+        .fields
+        .iter()
+        .find(|field| field.field_id == combo.field_id)
+        .expect("updated dropdown is discovered");
+    assert_eq!(field.name, "nation");
+    assert_eq!(field.tooltip.as_deref(), Some("国家"));
+    assert_eq!(field.options, ["中国", "日本", "Korea"]);
+    assert_eq!(field.value.as_deref(), Some("Korea"));
+    assert_eq!(field.selected_indices, [2]);
+    assert_eq!(field.font_size, Some(18.0));
+    assert!(field.required);
+    assert!(
+        missing_required_fields(document_id.clone())
+            .expect("required fields")
+            .is_empty(),
+        "the updated default answers the required dropdown"
+    );
+
+    undo_text_edit(document_id.clone()).expect("undo the dropdown update");
+    let field = form_fields(document_id.clone())
+        .expect("fields after undo")
+        .into_iter()
+        .find(|field| field.field_id == combo.field_id)
+        .expect("dropdown survives undo");
+    assert_eq!(field.name, "country");
+    assert_eq!(field.options, ["中国", "Japan"]);
+    assert_eq!(field.value, None);
+    assert_eq!(field.font_size, Some(12.0));
+    assert!(!field.required);
+    redo_text_edit(document_id.clone()).expect("redo the dropdown update");
+    assert!(form_fields(document_id.clone())
+        .expect("fields after redo")
+        .iter()
+        .any(|field| field.name == "nation" && field.selected_indices == [2]));
+
+    let updated = update_form_field(
+        document_id.clone(),
+        list.field_id.clone(),
+        UpdateFormFieldRequest::ListBox {
+            name: "labels".to_owned(),
+            tooltip: None,
+            required: true,
+            options: vec!["A".to_owned(), "B".to_owned(), "C".to_owned()],
+            selected_indices: vec![1, 2],
+            multi_select: true,
+            font_size: 9.0,
+        },
+    )
+    .expect("update the list properties");
+    let field = updated
+        .fields
+        .iter()
+        .find(|field| field.field_id == list.field_id)
+        .expect("updated list is discovered");
+    assert_eq!(field.name, "labels");
+    assert_eq!(field.options, ["A", "B", "C"]);
+    assert_eq!(field.selected_indices, [1, 2]);
+    assert_eq!(field.value.as_deref(), Some("B"));
+    assert!(field.multi_select);
+    assert_eq!(field.font_size, Some(9.0));
+    assert!(field.required);
+
+    let before_error = form_fields(document_id.clone()).expect("fields before the bad update");
+    let rejected = update_form_field(
+        document_id.clone(),
+        list.field_id.clone(),
+        UpdateFormFieldRequest::ListBox {
+            name: "labels".to_owned(),
+            tooltip: None,
+            required: true,
+            options: vec!["A".to_owned(), "B".to_owned(), "C".to_owned()],
+            selected_indices: vec![1, 2],
+            multi_select: false,
+            font_size: 9.0,
+        },
+    )
+    .expect_err("two defaults need multi-select");
+    assert_eq!(rejected.code, CommandErrorCode::InvalidArgument);
+    assert_eq!(
+        form_fields(document_id.clone()).expect("fields after the rejection"),
+        before_error,
+        "a rejected update changes nothing"
+    );
+
+    let updated = update_form_field(
+        document_id.clone(),
+        signature.field_id.clone(),
+        UpdateFormFieldRequest::Signature {
+            name: "signature_here".to_owned(),
+            tooltip: Some("签名处".to_owned()),
+        },
+    )
+    .expect("update the signature properties");
+    let field = updated
+        .fields
+        .iter()
+        .find(|field| field.field_id == signature.field_id)
+        .expect("updated signature is discovered");
+    assert_eq!(field.name, "signature_here");
+    assert_eq!(field.tooltip.as_deref(), Some("签名处"));
+    assert_eq!(field.kind, FormFieldKind::Signature);
+    assert_eq!(field.value, None);
+
+    let wrong_kind = update_form_field(
+        document_id.clone(),
+        combo.field_id.clone(),
+        UpdateFormFieldRequest::Signature {
+            name: "nation".to_owned(),
+            tooltip: None,
+        },
+    )
+    .expect_err("a dropdown cannot be updated as a signature");
+    assert_eq!(wrong_kind.code, CommandErrorCode::InvalidArgument);
+
+    let duplicate = update_form_field(
+        document_id.clone(),
+        signature.field_id.clone(),
+        UpdateFormFieldRequest::Signature {
+            name: "nation".to_owned(),
+            tooltip: None,
+        },
+    )
+    .expect_err("a duplicate name is rejected");
+    assert_eq!(duplicate.code, CommandErrorCode::FormFieldNameDuplicate);
+
+    let filled_signature = fill_form_field(
+        document_id.clone(),
+        signature.field_id.clone(),
+        FormFieldValueInput::Choice {
+            value: "signed".to_owned(),
+        },
+    )
+    .expect_err("a signature field cannot be filled");
+    assert_eq!(filled_signature.code, CommandErrorCode::FormValueInvalid);
+    assert!(
+        filled_signature.message.contains("不执行证书签名"),
+        "{}",
+        filled_signature.message
+    );
+
+    save_as(&document_id, &output);
+    let parsed = lopdf::Document::load(&output).expect("parse the saved output");
+    let saved_combo = field_named(&parsed, "nation");
+    let combo_flags = saved_combo.get(b"Ff").expect("/Ff").as_i64().unwrap();
+    assert_eq!(combo_flags & (1 << 1), 1 << 1, "Required bit");
+    let options: Vec<String> = saved_combo
+        .get(b"Opt")
+        .expect("/Opt")
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(decode_pdf_text)
+        .collect();
+    assert_eq!(options, ["中国", "日本", "Korea"]);
+    assert_eq!(decode_pdf_text(saved_combo.get(b"V").expect("/V")), "Korea");
+    assert_eq!(
+        saved_combo
+            .get(b"I")
+            .expect("/I")
+            .as_array()
+            .unwrap()
+            .first()
+            .unwrap()
+            .as_i64()
+            .unwrap(),
+        2
+    );
+    let da = decode_pdf_text(saved_combo.get(b"DA").expect("/DA"));
+    assert!(da.contains("18 Tf"), "got /DA {da:?}");
+
+    let saved_list = field_named(&parsed, "labels");
+    let list_flags = saved_list.get(b"Ff").expect("/Ff").as_i64().unwrap();
+    assert_eq!(list_flags & (1 << 21), 1 << 21, "MultiSelect bit");
+    let values: Vec<String> = saved_list
+        .get(b"V")
+        .expect("/V")
+        .as_array()
+        .expect("multi-select /V array")
+        .iter()
+        .map(decode_pdf_text)
+        .collect();
+    assert_eq!(values, ["B", "C"]);
+    let saved_signature = field_named(&parsed, "signature_here");
+    assert_eq!(
+        decode_pdf_text(saved_signature.get(b"TU").expect("/TU")),
+        "签名处"
+    );
+
+    // The signature survives a delete/undo cycle like every created field.
+    let deleted = delete_form_field(document_id.clone(), signature.field_id.clone())
+        .expect("delete the signature");
+    assert!(deleted
+        .fields
+        .iter()
+        .all(|field| field.name != "signature_here"));
+    undo_text_edit(document_id.clone()).expect("undo the signature deletion");
+    let restored = form_fields(document_id.clone())
+        .expect("fields after undo")
+        .into_iter()
+        .find(|field| field.name == "signature_here")
+        .expect("the signature is restored");
+    assert_eq!(restored.kind, FormFieldKind::Signature);
+    assert_eq!(restored.tooltip.as_deref(), Some("签名处"));
+
+    close_document(document_id).expect("close document");
+}
+
+#[test]
+fn rejects_invalid_choice_and_signature_requests_without_creating_fields() {
+    let pdf = synthetic::single_line_pdf();
+    let document_id = open_synthetic(&pdf);
+    let rect = FormFieldRect {
+        x: 72.0,
+        y: 100.0,
+        width: 180.0,
+        height: 24.0,
+    };
+    let combo = |rect: FormFieldRect,
+                 name: Option<String>,
+                 options: Vec<String>,
+                 selected_index: Option<usize>| {
+        CreateFormFieldRequest::ComboBox {
+            rect,
+            name,
+            tooltip: None,
+            required: false,
+            options,
+            selected_index,
+            font_size: None,
+        }
+    };
+    let list = |selected_indices: Vec<usize>, multi_select: bool| CreateFormFieldRequest::ListBox {
+        rect,
+        name: None,
+        tooltip: None,
+        required: false,
+        options: vec!["A".to_owned(), "B".to_owned()],
+        selected_indices,
+        multi_select,
+        font_size: None,
+    };
+    let assert_no_fields = |document_id: &str| {
+        assert!(
+            form_fields(document_id.to_owned())
+                .expect("fields after a rejected request")
+                .is_empty(),
+            "a rejected request creates nothing"
+        );
+    };
+
+    let out_of_range = create_form_field(
+        document_id.clone(),
+        0,
+        combo(rect, Some("bad".to_owned()), vec!["A".to_owned()], Some(1)),
+    )
+    .expect_err("an out-of-range default is rejected");
+    assert_eq!(out_of_range.code, CommandErrorCode::InvalidArgument);
+    assert!(
+        out_of_range.message.contains("默认选项"),
+        "{}",
+        out_of_range.message
+    );
+    assert_no_fields(&document_id);
+
+    let out_of_range = create_form_field(document_id.clone(), 0, list(vec![2], false))
+        .expect_err("an out-of-range list default is rejected");
+    assert_eq!(out_of_range.code, CommandErrorCode::InvalidArgument);
+    assert_no_fields(&document_id);
+
+    let too_many = create_form_field(document_id.clone(), 0, list(vec![0, 1], false))
+        .expect_err("a single-select list accepts one default");
+    assert_eq!(too_many.code, CommandErrorCode::InvalidArgument);
+    assert!(too_many.message.contains("多选"), "{}", too_many.message);
+    assert_no_fields(&document_id);
+
+    let tiny = create_form_field(
+        document_id.clone(),
+        0,
+        combo(
+            FormFieldRect {
+                width: 1.0,
+                height: 1.0,
+                ..rect
+            },
+            None,
+            vec!["A".to_owned()],
+            None,
+        ),
+    )
+    .expect_err("a widget below the minimum size is rejected");
+    assert_eq!(tiny.code, CommandErrorCode::InvalidArgument);
+    assert_no_fields(&document_id);
+
+    let outside = create_form_field(
+        document_id.clone(),
+        0,
+        CreateFormFieldRequest::Signature {
+            rect: FormFieldRect {
+                x: 600.0,
+                y: 700.0,
+                width: 100.0,
+                height: 100.0,
+            },
+            name: Some("bad".to_owned()),
+            tooltip: None,
+        },
+    )
+    .expect_err("a widget outside the page is rejected");
+    assert_eq!(outside.code, CommandErrorCode::InvalidArgument);
+    assert_no_fields(&document_id);
+
+    let bad_font = create_form_field(
+        document_id.clone(),
+        0,
+        CreateFormFieldRequest::ComboBox {
+            rect,
+            name: None,
+            tooltip: None,
+            required: false,
+            options: vec!["A".to_owned()],
+            selected_index: None,
+            font_size: Some(1.0),
+        },
+    )
+    .expect_err("a font size below the minimum is rejected");
+    assert_eq!(bad_font.code, CommandErrorCode::InvalidArgument);
+    assert_no_fields(&document_id);
+
+    let control_name = create_form_field(
+        document_id.clone(),
+        0,
+        CreateFormFieldRequest::Signature {
+            rect,
+            name: Some("bad\nname".to_owned()),
+            tooltip: None,
+        },
+    )
+    .expect_err("control characters are rejected");
+    assert_eq!(control_name.code, CommandErrorCode::FormFieldNameInvalid);
+    assert_no_fields(&document_id);
+
+    // Generated names use per-kind prefixes and avoid every existing field.
+    let first = create_form_field(
+        document_id.clone(),
+        0,
+        combo(rect, None, vec!["A".to_owned()], None),
+    )
+    .expect("create an unnamed dropdown");
+    assert!(first
+        .fields
+        .iter()
+        .any(|field| field.field_id == first.field_id && field.name == "combo_box_1"));
+    let second = create_form_field(document_id.clone(), 0, list(Vec::new(), false))
+        .expect("create an unnamed list");
+    assert!(second
+        .fields
+        .iter()
+        .any(|field| field.field_id == second.field_id && field.name == "list_box_1"));
+    let signature = create_form_field(
+        document_id.clone(),
+        0,
+        CreateFormFieldRequest::Signature {
+            rect,
+            name: None,
+            tooltip: None,
+        },
+    )
+    .expect("create an unnamed signature");
+    assert!(signature
+        .fields
+        .iter()
+        .any(|field| field.field_id == signature.field_id && field.name == "signature_1"));
+    let duplicate = create_form_field(
+        document_id.clone(),
+        0,
+        CreateFormFieldRequest::Signature {
+            rect,
+            name: Some("combo_box_1".to_owned()),
+            tooltip: None,
+        },
+    )
+    .expect_err("names stay unique across kinds");
+    assert_eq!(duplicate.code, CommandErrorCode::FormFieldNameDuplicate);
+
+    let unknown_update = update_form_field(
+        document_id.clone(),
+        "new:99".to_owned(),
+        UpdateFormFieldRequest::Signature {
+            name: "any".to_owned(),
+            tooltip: None,
+        },
+    )
+    .expect_err("only session-created fields can be updated");
+    assert_eq!(unknown_update.code, CommandErrorCode::FormFieldNotFound);
+
+    close_document(document_id).expect("close document");
+}
+
+#[test]
+fn choice_labels_may_be_duplicated_or_off_without_confusing_values() {
+    let pdf = synthetic::single_line_pdf();
+    let dir = support::temp::TempDir::new("create-choice-labels");
+    let output = dir.path().join("output.pdf");
+    let document_id = open_synthetic(&pdf);
+
+    let created = create_form_field(
+        document_id.clone(),
+        0,
+        CreateFormFieldRequest::ComboBox {
+            rect: FormFieldRect {
+                x: 72.0,
+                y: 100.0,
+                width: 180.0,
+                height: 24.0,
+            },
+            name: Some("states".to_owned()),
+            tooltip: None,
+            required: true,
+            // "Off" is only reserved for button on-state names; a choice label
+            // is a PDF text string and may be anything. Duplicates are told
+            // apart by /I, and a blank label gets a stable default.
+            options: vec!["Off".to_owned(), "Off".to_owned(), String::new()],
+            selected_index: Some(1),
+            font_size: None,
+        },
+    )
+    .expect("a choice label has no reserved words");
+    let field = created
+        .fields
+        .iter()
+        .find(|field| field.field_id == created.field_id)
+        .expect("the dropdown is discovered");
+    assert_eq!(field.options, ["Off", "Off", "选项 3"]);
+    assert_eq!(field.value.as_deref(), Some("Off"));
+    assert_eq!(field.selected_indices, [1]);
+    assert!(
+        missing_required_fields(document_id.clone())
+            .expect("required fields")
+            .is_empty(),
+        "a label that spells Off still answers the field"
+    );
+
+    save_as(&document_id, &output);
+    let parsed = lopdf::Document::load(&output).expect("parse the output");
+    let saved = field_named(&parsed, "states");
+    let options: Vec<String> = saved
+        .get(b"Opt")
+        .expect("/Opt")
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(decode_pdf_text)
+        .collect();
+    assert_eq!(options, ["Off", "Off", "选项 3"]);
+    assert_eq!(
+        decode_pdf_text(saved.get(b"V").expect("/V")),
+        "Off",
+        "choice values are text strings, not the button Off name"
+    );
+    assert_eq!(
+        saved
+            .get(b"I")
+            .expect("/I")
+            .as_array()
+            .unwrap()
+            .first()
+            .unwrap()
+            .as_i64()
+            .unwrap(),
+        1,
+        "/I tells the two Off labels apart"
+    );
+
+    // The required gate still sees the saved value: PDFium reports the second
+    // Off option as selected and the field as answered.
+    let reopened = open_document(output.to_string_lossy().into_owned(), None)
+        .expect("reopen")
+        .document_id;
+    let field = form_fields(reopened.clone())
+        .expect("reopened fields")
+        .into_iter()
+        .find(|field| field.name == "states")
+        .expect("saved dropdown rediscovered");
+    assert_eq!(field.value.as_deref(), Some("Off"));
+    assert_eq!(field.selected_indices, [1]);
+    assert!(missing_required_fields(reopened.clone())
+        .expect("required fields")
+        .is_empty());
+    close_document(reopened).expect("close reopened");
+
+    close_document(document_id).expect("close document");
+}
+
+#[test]
 fn rejects_invalid_bounds_and_duplicate_names_without_creating_a_field() {
     let pdf = synthetic::single_line_pdf();
     let document_id = open_synthetic(&pdf);
@@ -1990,6 +2736,393 @@ fn saves_checkbox_and_radio_widget_structures_that_other_readers_agree_on() {
 }
 
 #[test]
+fn saves_choice_and_signature_structures_that_other_readers_agree_on() {
+    let pdf = synthetic::single_line_pdf();
+    let source = fs::read(pdf.path_string()).expect("read synthetic source");
+    let dir = support::temp::TempDir::new("create-choice-signature-save");
+    let output = dir.path().join("output.pdf");
+
+    let document_id = open_synthetic(&pdf);
+    let combo = create_form_field(
+        document_id.clone(),
+        0,
+        CreateFormFieldRequest::ComboBox {
+            rect: FormFieldRect {
+                x: 72.0,
+                y: 100.0,
+                width: 180.0,
+                height: 24.0,
+            },
+            name: Some("country".to_owned()),
+            tooltip: Some("请选择国家".to_owned()),
+            required: true,
+            options: vec!["中国".to_owned(), "Japan".to_owned()],
+            selected_index: Some(1),
+            font_size: Some(14.0),
+        },
+    )
+    .expect("create the dropdown");
+    fill_form_field(
+        document_id.clone(),
+        combo.field_id,
+        FormFieldValueInput::Choice {
+            value: "中国".to_owned(),
+        },
+    )
+    .expect("pick the first option before saving");
+
+    create_form_field(
+        document_id.clone(),
+        0,
+        CreateFormFieldRequest::ListBox {
+            rect: FormFieldRect {
+                x: 72.0,
+                y: 140.0,
+                width: 180.0,
+                height: 48.0,
+            },
+            name: Some("tags".to_owned()),
+            tooltip: None,
+            required: false,
+            options: vec!["A".to_owned(), "B".to_owned(), "C".to_owned()],
+            selected_indices: vec![0, 2],
+            multi_select: true,
+            font_size: Some(10.0),
+        },
+    )
+    .expect("create the multi-select list");
+    create_form_field(
+        document_id.clone(),
+        0,
+        CreateFormFieldRequest::ListBox {
+            rect: FormFieldRect {
+                x: 72.0,
+                y: 200.0,
+                width: 180.0,
+                height: 48.0,
+            },
+            name: Some("level".to_owned()),
+            tooltip: None,
+            required: false,
+            options: vec!["Low".to_owned(), "High".to_owned()],
+            selected_indices: Vec::new(),
+            multi_select: false,
+            font_size: None,
+        },
+    )
+    .expect("create an unanswered list");
+    let signature = create_form_field(
+        document_id.clone(),
+        0,
+        CreateFormFieldRequest::Signature {
+            rect: FormFieldRect {
+                x: 72.0,
+                y: 300.0,
+                width: 240.0,
+                height: 80.0,
+            },
+            name: Some("sign_here".to_owned()),
+            tooltip: Some("请在此签名".to_owned()),
+        },
+    )
+    .expect("create the signature placeholder");
+    assert_eq!(signature.field_id, "new:4");
+
+    save_as(&document_id, &output);
+    assert_eq!(
+        fs::read(pdf.path_string()).expect("source after save"),
+        source,
+        "the Source Document is never modified"
+    );
+    let output_bytes = fs::read(&output).expect("read output");
+    assert!(
+        output_bytes.starts_with(&source),
+        "created fields are appended after the unmodified source bytes"
+    );
+
+    // PDFium reopens the output and reports the same structure it would show
+    // for a form authored elsewhere.
+    let reopened = open_document(output.to_string_lossy().into_owned(), None)
+        .expect("reopen the saved output")
+        .document_id;
+    let fields = form_fields(reopened.clone()).expect("fields after reopen");
+    assert_eq!(fields.len(), 4, "one widget per created field");
+    assert!(fields.iter().all(|field| !field.created));
+
+    let country = fields
+        .iter()
+        .find(|field| field.name == "country")
+        .expect("dropdown rediscovered");
+    assert_eq!(country.kind, FormFieldKind::ComboBox);
+    assert_eq!(country.options, ["中国", "Japan"]);
+    assert_eq!(country.value.as_deref(), Some("中国"));
+    assert_eq!(country.selected_indices, [0]);
+    assert!(!country.multi_select);
+    assert!(country.required);
+
+    let tags = fields
+        .iter()
+        .find(|field| field.name == "tags")
+        .expect("multi-select list rediscovered");
+    assert_eq!(tags.kind, FormFieldKind::ListBox);
+    assert_eq!(tags.options, ["A", "B", "C"]);
+    let mut selected = tags.selected_indices.clone();
+    selected.sort_unstable();
+    assert_eq!(selected, [0, 2], "both defaults are selected");
+    assert!(tags.multi_select);
+
+    let level = fields
+        .iter()
+        .find(|field| field.name == "level")
+        .expect("unanswered list rediscovered");
+    assert_eq!(level.kind, FormFieldKind::ListBox);
+    assert_eq!(level.value, None);
+    assert!(level.selected_indices.is_empty());
+    assert!(!level.multi_select);
+
+    let saved_signature = fields
+        .iter()
+        .find(|field| field.name == "sign_here")
+        .expect("signature placeholder rediscovered");
+    assert_eq!(saved_signature.kind, FormFieldKind::Signature);
+    assert_eq!(saved_signature.value, None);
+    assert!(!saved_signature.required);
+    assert!(
+        missing_required_fields(reopened.clone())
+            .expect("required fields")
+            .is_empty(),
+        "the answered dropdown and the unfillable signature do not block saving"
+    );
+
+    let pixels = render_pixels(&reopened, 0, 2.0);
+    let (combo_ink, _) = ink_in_region(&pixels, 2.0, (74.0, 103.0, 210.0, 121.0));
+    assert!(combo_ink > 10, "the dropdown value is painted: {combo_ink}");
+    let (signature_ink, _) = ink_in_region(&pixels, 2.0, (74.0, 302.0, 310.0, 378.0));
+    assert!(
+        signature_ink > 10,
+        "the empty signature area is visible: {signature_ink}"
+    );
+    close_document(reopened).expect("close reopened");
+
+    // Independently parse the AcroForm structure with lopdf.
+    let parsed = lopdf::Document::load(&output).expect("lopdf parses the output");
+    let catalog = lopdf_catalog(&parsed);
+    let acro_form = lopdf_dict(&parsed, catalog.get(b"AcroForm").expect("/AcroForm"));
+    assert!(
+        !acro_form.has(b"NeedAppearances"),
+        "generated forms never set /NeedAppearances"
+    );
+    let sig_flags = acro_form
+        .get(b"SigFlags")
+        .expect("/SigFlags")
+        .as_i64()
+        .expect("signature flags");
+    assert_eq!(sig_flags & 1, 1, "SignaturesExist");
+    assert_eq!(sig_flags & 2, 0, "an empty placeholder is not AppendOnly");
+
+    let saved_combo = field_named(&parsed, "country");
+    assert_eq!(
+        saved_combo.get(b"FT").expect("/FT").as_name().unwrap(),
+        b"Ch"
+    );
+    let combo_flags = saved_combo.get(b"Ff").expect("/Ff").as_i64().unwrap();
+    assert_eq!(combo_flags & (1 << 17), 1 << 17, "Combo bit");
+    assert_eq!(combo_flags & (1 << 21), 0, "a dropdown is not multi-select");
+    assert_eq!(combo_flags & (1 << 1), 1 << 1, "Required bit");
+    let combo_options: Vec<String> = saved_combo
+        .get(b"Opt")
+        .expect("/Opt")
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(decode_pdf_text)
+        .collect();
+    assert_eq!(combo_options, ["中国", "Japan"]);
+    assert_eq!(
+        decode_pdf_text(saved_combo.get(b"V").expect("/V")),
+        "中国",
+        "non-ASCII /V is UTF-16BE"
+    );
+    let combo_indices: Vec<i64> = saved_combo
+        .get(b"I")
+        .expect("/I")
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|index| index.as_i64().unwrap())
+        .collect();
+    assert_eq!(combo_indices, [0]);
+    let combo_da = decode_pdf_text(saved_combo.get(b"DA").expect("/DA"));
+    assert!(combo_da.contains("PdfxNoto"), "got /DA {combo_da:?}");
+    assert!(combo_da.contains("14 Tf"), "got /DA {combo_da:?}");
+    assert_rect_close(
+        &numbers(saved_combo.get(b"Rect").expect("/Rect")),
+        [72.0, 668.0, 252.0, 692.0],
+    );
+    for action in [b"AA".as_slice(), b"A".as_slice()] {
+        assert!(
+            saved_combo.get(action).is_err(),
+            "choice fields carry no actions"
+        );
+    }
+
+    let saved_tags = field_named(&parsed, "tags");
+    let tag_flags = saved_tags.get(b"Ff").expect("/Ff").as_i64().unwrap();
+    assert_eq!(tag_flags & (1 << 21), 1 << 21, "MultiSelect bit");
+    assert_eq!(tag_flags & (1 << 17), 0, "a list box is not a combo box");
+    let tag_options: Vec<String> = saved_tags
+        .get(b"Opt")
+        .expect("/Opt")
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(decode_pdf_text)
+        .collect();
+    assert_eq!(tag_options, ["A", "B", "C"]);
+    let tag_values: Vec<String> = saved_tags
+        .get(b"V")
+        .expect("/V")
+        .as_array()
+        .expect("multi-select /V is an array")
+        .iter()
+        .map(decode_pdf_text)
+        .collect();
+    assert_eq!(tag_values, ["A", "C"]);
+    let tag_indices: Vec<i64> = saved_tags
+        .get(b"I")
+        .expect("/I")
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|index| index.as_i64().unwrap())
+        .collect();
+    assert_eq!(tag_indices, [0, 2]);
+    let tags_da = decode_pdf_text(saved_tags.get(b"DA").expect("/DA"));
+    assert!(tags_da.contains("10 Tf"), "got /DA {tags_da:?}");
+
+    let saved_level = field_named(&parsed, "level");
+    assert!(
+        saved_level.get(b"V").is_err(),
+        "an unanswered list has no /V"
+    );
+    assert!(
+        saved_level.get(b"I").is_err(),
+        "an unanswered list has no /I"
+    );
+    let level_ap = lopdf_dict(&parsed, saved_level.get(b"AP").expect("/AP"));
+    let level_content =
+        String::from_utf8_lossy(&stream_content(&parsed, level_ap.get(b"N").unwrap())).into_owned();
+    assert!(
+        level_content.contains("Tj"),
+        "even an empty list paints its options: {level_content:?}"
+    );
+
+    let saved_sig = field_named(&parsed, "sign_here");
+    assert_eq!(
+        saved_sig.get(b"FT").expect("/FT").as_name().unwrap(),
+        b"Sig"
+    );
+    assert_eq!(
+        saved_sig.get(b"Ff").expect("/Ff").as_i64().unwrap(),
+        0,
+        "signature fields are never required or otherwise flagged"
+    );
+    assert_eq!(
+        decode_pdf_text(saved_sig.get(b"TU").expect("/TU")),
+        "请在此签名"
+    );
+    for forbidden in [
+        b"V".as_slice(),
+        b"SV".as_slice(),
+        b"Lock".as_slice(),
+        b"AA".as_slice(),
+    ] {
+        assert!(
+            saved_sig.get(forbidden).is_err(),
+            "an empty signature placeholder writes no /{}",
+            String::from_utf8_lossy(forbidden)
+        );
+    }
+    let page_id = parsed.get_pages().get(&1).copied().expect("page 1");
+    assert_eq!(
+        saved_sig.get(b"P").expect("/P").as_reference().unwrap(),
+        page_id
+    );
+    assert_rect_close(
+        &numbers(saved_sig.get(b"Rect").expect("/Rect")),
+        [72.0, 412.0, 312.0, 492.0],
+    );
+    let sig_ap = lopdf_dict(&parsed, saved_sig.get(b"AP").expect("/AP"));
+    let sig_normal = sig_ap.get(b"N").expect("/AP /N");
+    let sig_stream = parsed
+        .get_object(sig_normal.as_reference().expect("appearance reference"))
+        .expect("signature appearance")
+        .as_stream()
+        .expect("stream");
+    assert_rect_close(
+        &numbers(sig_stream.dict.get(b"BBox").expect("/BBox")),
+        [72.0, 412.0, 312.0, 492.0],
+    );
+    let sig_content =
+        String::from_utf8_lossy(&sig_stream.get_plain_content().unwrap()).into_owned();
+    assert!(
+        sig_content.contains("/PdfxNoto"),
+        "the Chinese placeholder label uses the embedded font: {sig_content:?}"
+    );
+    assert!(
+        sig_content.contains("Tj"),
+        "the Chinese 签名 label is drawn: {sig_content:?}"
+    );
+
+    // The subset really contains the choice labels and the signature label.
+    let dr = lopdf_dict(&parsed, acro_form.get(b"DR").expect("/DR"));
+    let fonts = lopdf_dict(&parsed, dr.get(b"Font").expect("/DR /Font"));
+    let type0 = lopdf_dict(&parsed, fonts.get(b"PdfxNoto").expect("PdfxNoto font"));
+    let cmap = String::from_utf8_lossy(&stream_content(
+        &parsed,
+        type0.get(b"ToUnicode").expect("/ToUnicode"),
+    ))
+    .into_owned();
+    for codepoint in ["<4E2D>", "<56FD>", "<7B7E>", "<540D>"] {
+        assert!(
+            cmap.contains(codepoint),
+            "{codepoint} is in the ToUnicode CMap: {cmap}"
+        );
+    }
+
+    // Every field name is unique across the saved form.
+    let names: Vec<String> = acro_form
+        .get(b"Fields")
+        .expect("/Fields")
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|field| decode_pdf_text(lopdf_dict(&parsed, field).get(b"T").unwrap()))
+        .collect();
+    assert_eq!(names.len(), 4);
+    let unique: std::collections::HashSet<_> = names.iter().collect();
+    assert_eq!(unique.len(), 4, "field names stay unique: {names:?}");
+    assert_eq!(page_annots(&parsed, 1).len(), 4);
+
+    // A second save re-applies the same writer without duplicating structure.
+    save_changes(&document_id);
+    let parsed = lopdf::Document::load(&output).expect("parse the repeat save");
+    let catalog = lopdf_catalog(&parsed);
+    let acro_form = lopdf_dict(&parsed, catalog.get(b"AcroForm").expect("/AcroForm"));
+    assert_eq!(
+        acro_form.get(b"Fields").unwrap().as_array().unwrap().len(),
+        4
+    );
+    assert_eq!(page_annots(&parsed, 1).len(), 4);
+    assert!(
+        field_named(&parsed, "sign_here").get(b"SigFlags").is_err(),
+        "SigFlags belongs to /AcroForm, not the field"
+    );
+
+    close_document(document_id).expect("close document");
+}
+
+#[test]
 fn saved_widgets_fill_through_the_shared_path_and_keep_values_consistent() {
     let pdf = synthetic::single_line_pdf();
     let dir = support::temp::TempDir::new("create-check-radio-refill");
@@ -2534,6 +3667,128 @@ fn checkbox_and_radio_appearances_compensate_page_rotation() {
 }
 
 #[test]
+fn choice_and_signature_appearances_compensate_page_rotation() {
+    let pdf = synthetic::rotated_crop_pdf();
+    let dir = support::temp::TempDir::new("create-choice-signature-rotated");
+    let output = dir.path().join("output.pdf");
+    let document_id = open_synthetic(&pdf);
+
+    for page_index in 0..3u32 {
+        create_form_field(
+            document_id.clone(),
+            page_index,
+            CreateFormFieldRequest::ComboBox {
+                rect: FormFieldRect {
+                    x: 40.0,
+                    y: 200.0,
+                    width: 180.0,
+                    height: 30.0,
+                },
+                name: Some(format!("rotated_country_{page_index}")),
+                tooltip: None,
+                required: false,
+                options: vec!["中国".to_owned(), "Japan".to_owned()],
+                selected_index: Some(0),
+                font_size: Some(11.0),
+            },
+        )
+        .expect("create a dropdown on a rotated page");
+        create_form_field(
+            document_id.clone(),
+            page_index,
+            CreateFormFieldRequest::Signature {
+                rect: FormFieldRect {
+                    x: 40.0,
+                    y: 250.0,
+                    width: 180.0,
+                    height: 30.0,
+                },
+                name: Some(format!("rotated_sign_{page_index}")),
+                tooltip: None,
+            },
+        )
+        .expect("create a signature on a rotated page");
+    }
+    save_as(&document_id, &output);
+
+    let parsed = lopdf::Document::load(&output).expect("parse output");
+    let rotations = [90u16, 180, 270];
+    let prefixes = ["rotated_country_", "rotated_sign_"];
+    for page_index in 0..3usize {
+        for prefix in prefixes {
+            let field = field_named(&parsed, &format!("{prefix}{page_index}"));
+            let rect = numbers(field.get(b"Rect").expect("/Rect"));
+            assert_eq!(rect.len(), 4);
+            let [x0, y0, x1, y1] = [rect[0], rect[1], rect[2], rect[3]];
+            let expected_matrix = match rotations[page_index] {
+                90 => format!("0 1 -1 0 {x1} {y0} cm"),
+                180 => format!("-1 0 0 -1 {x1} {y1} cm"),
+                _ => format!("0 -1 1 0 {x0} {y1} cm"),
+            };
+            let ap = lopdf_dict(&parsed, field.get(b"AP").expect("/AP"));
+            let normal = ap.get(b"N").expect("/AP /N");
+            let stream = parsed
+                .get_object(normal.as_reference().expect("appearance reference"))
+                .expect("appearance stream")
+                .as_stream()
+                .expect("stream");
+            assert_rect_close(
+                &numbers(stream.dict.get(b"BBox").expect("/BBox")),
+                [x0, y0, x1, y1],
+            );
+            let content =
+                String::from_utf8_lossy(&stream.get_plain_content().unwrap()).into_owned();
+            assert!(
+                content.contains(&expected_matrix),
+                "{prefix}{page_index} on page {page_index}: {content}"
+            );
+        }
+    }
+
+    // PDFium maps both kinds back to the display rectangle they were drawn in.
+    let reopened = open_document(output.to_string_lossy().into_owned(), None)
+        .expect("reopen")
+        .document_id;
+    let fields = form_fields(reopened.clone()).expect("reopened fields");
+    for page_index in 0..3u32 {
+        let combo = fields
+            .iter()
+            .find(|field| field.name == format!("rotated_country_{page_index}"))
+            .expect("dropdown rediscovered");
+        assert_eq!(combo.kind, FormFieldKind::ComboBox);
+        assert_eq!(combo.value.as_deref(), Some("中国"));
+        assert!((combo.rect.x - 40.0).abs() < 0.01);
+        assert!((combo.rect.y - 200.0).abs() < 0.01);
+        assert!((combo.rect.width - 180.0).abs() < 0.01);
+        assert!((combo.rect.height - 30.0).abs() < 0.01);
+        let signature = fields
+            .iter()
+            .find(|field| field.name == format!("rotated_sign_{page_index}"))
+            .expect("signature rediscovered");
+        assert_eq!(signature.kind, FormFieldKind::Signature);
+        assert!((signature.rect.x - 40.0).abs() < 0.01);
+        assert!((signature.rect.y - 250.0).abs() < 0.01);
+        assert!((signature.rect.width - 180.0).abs() < 0.01);
+        assert!((signature.rect.height - 30.0).abs() < 0.01);
+    }
+    for page_index in 0..3u32 {
+        let pixels = render_pixels(&reopened, page_index, 2.0);
+        let (combo_ink, _) = ink_in_region(&pixels, 2.0, (42.0, 202.0, 218.0, 228.0));
+        assert!(
+            combo_ink > 10,
+            "page {page_index} paints the dropdown: {combo_ink}"
+        );
+        let (signature_ink, _) = ink_in_region(&pixels, 2.0, (42.0, 252.0, 218.0, 278.0));
+        assert!(
+            signature_ink > 10,
+            "page {page_index} paints the signature area: {signature_ink}"
+        );
+    }
+    close_document(reopened).expect("close reopened");
+    close_document(document_id).expect("close document");
+}
+
+#[test]
 fn merges_created_fields_into_an_existing_acroform() {
     let dir = support::temp::TempDir::new("create-text-merge");
     let source = dir.path().join("source.pdf");
@@ -2623,6 +3878,183 @@ fn merges_created_fields_into_an_existing_acroform() {
         acro_form.get(b"Fields").unwrap().as_array().unwrap().len(),
         source_fields + 1,
         "the existing /Fields entries are preserved and one is added"
+    );
+    assert!(field_named(&parsed, "full_name").get(b"V").is_ok());
+
+    close_document(document_id).expect("close document");
+}
+
+#[test]
+fn merges_choice_and_signature_into_an_existing_acroform_and_preserves_it() {
+    let dir = support::temp::TempDir::new("create-choice-signature-merge");
+    let source = dir.path().join("source.pdf");
+    fs::copy(fixture_path("form-acroform"), &source).expect("copy fixture");
+    let output = dir.path().join("output.pdf");
+    let (source_fields, source_da, source_sigflags, source_need_appearances) = {
+        let parsed = lopdf::Document::load(&source).expect("parse fixture");
+        let catalog = lopdf_catalog(&parsed);
+        let acro_form = lopdf_dict(&parsed, catalog.get(b"AcroForm").expect("/AcroForm"));
+        (
+            acro_form
+                .get(b"Fields")
+                .expect("/Fields")
+                .as_array()
+                .expect("field array")
+                .len(),
+            acro_form.get(b"DA").ok().map(decode_pdf_text),
+            acro_form
+                .get(b"SigFlags")
+                .ok()
+                .and_then(|o| o.as_i64().ok()),
+            acro_form.has(b"NeedAppearances"),
+        )
+    };
+
+    let document_id = open_document(source.to_string_lossy().into_owned(), None)
+        .expect("open the form fixture")
+        .document_id;
+    let before = form_fields(document_id.clone()).expect("existing fields");
+    let existing_names: Vec<String> = before.iter().map(|field| field.name.clone()).collect();
+
+    let duplicate = create_form_field(
+        document_id.clone(),
+        0,
+        CreateFormFieldRequest::ComboBox {
+            rect: FormFieldRect {
+                x: 72.0,
+                y: 520.0,
+                width: 180.0,
+                height: 24.0,
+            },
+            name: Some("country".to_owned()),
+            tooltip: None,
+            required: false,
+            options: vec!["A".to_owned()],
+            selected_index: None,
+            font_size: None,
+        },
+    )
+    .expect_err("an existing field name is reserved");
+    assert_eq!(duplicate.code, CommandErrorCode::FormFieldNameDuplicate);
+
+    create_form_field(
+        document_id.clone(),
+        0,
+        CreateFormFieldRequest::ComboBox {
+            rect: FormFieldRect {
+                x: 72.0,
+                y: 520.0,
+                width: 180.0,
+                height: 24.0,
+            },
+            name: Some("merged_country".to_owned()),
+            tooltip: None,
+            required: false,
+            options: vec!["中国".to_owned(), "Japan".to_owned()],
+            selected_index: Some(0),
+            font_size: Some(13.0),
+        },
+    )
+    .expect("create a dropdown beside the existing form");
+    create_form_field(
+        document_id.clone(),
+        0,
+        CreateFormFieldRequest::Signature {
+            rect: FormFieldRect {
+                x: 72.0,
+                y: 560.0,
+                width: 240.0,
+                height: 60.0,
+            },
+            name: Some("merged_sign".to_owned()),
+            tooltip: Some("签名".to_owned()),
+        },
+    )
+    .expect("create a signature beside the existing form");
+    save_as(&document_id, &output);
+
+    let reopened = open_document(output.to_string_lossy().into_owned(), None)
+        .expect("reopen merged output")
+        .document_id;
+    let fields = form_fields(reopened.clone()).expect("reopened fields");
+    assert_eq!(fields.len(), before.len() + 2);
+    for name in &existing_names {
+        assert!(
+            fields.iter().any(|field| &field.name == name),
+            "existing field {name} survives"
+        );
+    }
+    assert_eq!(
+        fields
+            .iter()
+            .find(|field| field.name == "full_name")
+            .and_then(|field| field.value.as_deref()),
+        Some("Ada Lovelace"),
+        "existing values survive the merge"
+    );
+    let merged_country = fields
+        .iter()
+        .find(|field| field.name == "merged_country")
+        .expect("the new dropdown is discovered");
+    assert_eq!(merged_country.kind, FormFieldKind::ComboBox);
+    assert_eq!(merged_country.options, ["中国", "Japan"]);
+    assert_eq!(merged_country.value.as_deref(), Some("中国"));
+    let merged_sign = fields
+        .iter()
+        .find(|field| field.name == "merged_sign")
+        .expect("the new signature is discovered");
+    assert_eq!(merged_sign.kind, FormFieldKind::Signature);
+    assert_eq!(merged_sign.value, None);
+    close_document(reopened).expect("close reopened");
+
+    let parsed = lopdf::Document::load(&output).expect("parse merged output");
+    let catalog = lopdf_catalog(&parsed);
+    let acro_form = lopdf_dict(&parsed, catalog.get(b"AcroForm").expect("/AcroForm"));
+    assert_eq!(
+        acro_form.has(b"NeedAppearances"),
+        source_need_appearances,
+        "an existing /NeedAppearances setting is preserved untouched"
+    );
+    assert_eq!(
+        acro_form.get(b"Fields").unwrap().as_array().unwrap().len(),
+        source_fields + 2,
+        "the existing /Fields entries are preserved and two are added"
+    );
+    if let Some(source_da) = source_da {
+        assert_eq!(
+            decode_pdf_text(acro_form.get(b"DA").expect("/DA")),
+            source_da,
+            "the existing default appearance is preserved"
+        );
+    }
+    let new_sigflags = acro_form
+        .get(b"SigFlags")
+        .expect("/SigFlags")
+        .as_i64()
+        .expect("signature flags");
+    assert_eq!(new_sigflags & 1, 1, "SignaturesExist");
+    if let Some(source_sigflags) = source_sigflags {
+        assert_eq!(
+            new_sigflags & !1,
+            source_sigflags & !1,
+            "existing signature flags are preserved"
+        );
+    }
+    assert_eq!(
+        field_named(&parsed, "merged_country")
+            .get(b"FT")
+            .unwrap()
+            .as_name()
+            .unwrap(),
+        b"Ch"
+    );
+    assert_eq!(
+        field_named(&parsed, "merged_sign")
+            .get(b"FT")
+            .unwrap()
+            .as_name()
+            .unwrap(),
+        b"Sig"
     );
     assert!(field_named(&parsed, "full_name").get(b"V").is_ok());
 
@@ -2865,6 +4297,45 @@ fn permission_restricted_documents_refuse_creation_with_a_chinese_reason() {
             required: false,
             options: vec!["A".to_owned()],
             selected_index: None,
+        },
+        CreateFormFieldRequest::ComboBox {
+            rect: FormFieldRect {
+                x: 72.0,
+                y: 180.0,
+                width: 180.0,
+                height: 24.0,
+            },
+            name: None,
+            tooltip: None,
+            required: false,
+            options: vec!["A".to_owned()],
+            selected_index: None,
+            font_size: None,
+        },
+        CreateFormFieldRequest::ListBox {
+            rect: FormFieldRect {
+                x: 72.0,
+                y: 220.0,
+                width: 180.0,
+                height: 48.0,
+            },
+            name: None,
+            tooltip: None,
+            required: false,
+            options: vec!["A".to_owned()],
+            selected_indices: Vec::new(),
+            multi_select: false,
+            font_size: None,
+        },
+        CreateFormFieldRequest::Signature {
+            rect: FormFieldRect {
+                x: 72.0,
+                y: 280.0,
+                width: 240.0,
+                height: 60.0,
+            },
+            name: None,
+            tooltip: None,
         },
     ] {
         let error = create_form_field(opened.document_id.clone(), 0, request)
