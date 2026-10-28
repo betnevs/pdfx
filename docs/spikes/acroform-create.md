@@ -11,8 +11,10 @@
 
 Creating AcroForms with `lopdf` is viable. The probe creates text, checkbox,
 radio group, list, combo/dropdown and empty signature fields; PDFium recognizes
-every field and state; Chrome renders and edits them; PDFKit (Preview's PDF
-engine) renders them and reads back their values. Merging into an existing
+every field and state; Chrome paints every field that has an appearance and
+successfully edits a text field and a checkbox; PDFKit (Preview's PDF engine)
+paints the same fields and reads back every field's value and state (the empty
+signature field has structure but no visible box). Merging into an existing
 AcroForm preserves the old fields, values and page content, and flattening
 produces a form-free copy whose rendered page is pixel-identical to the
 interactive form.
@@ -39,8 +41,9 @@ Two reader caveats must stay visible:
 - Checkbox: `/AP /N` has `Off` and `Yes` states, with `/V` and `/AS` in sync.
 - Radio: a parent field with `/Kids`, one widget per option, unique on-state
   export values, and exactly one kid selected through `/AS` and parent `/V`.
-- List and combo: `/Opt`, `/V`, `/I` for multi-selection, and appearance
-  streams that show the selected rows/value.
+- List and combo: `/Opt`, `/V`, and `/I`; the list multi-select flag and
+  multi-index path are implemented, while the committed fixture selects one
+  row. Appearance streams show the selected rows/value.
 - Empty signature: an `/AcroForm` field with `/FT /Sig` and `SigFlags` bit 1.
   No certificate signing and no appearance stream.
 - Merge into an existing AcroForm using `lopdf::IncrementalDocument`: existing
@@ -250,4 +253,6 @@ Proposed exact additions under `### 表单` (after the bullet describing
   Chrome's viewer).
 - Rotation-compensated appearances, multiline appearance layout, and CJK
   appearance fonts (implementation work).
+- List multi-select with more than one selected row (code path exists; no
+  multi-row fixture).
 - Certificate signing and signature validation (explicitly out of scope).
