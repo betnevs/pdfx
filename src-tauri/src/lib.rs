@@ -36,6 +36,9 @@ pub fn run() {
             commands::open_document,
             commands::open_document_window,
             commands::render_page,
+            commands::render_thumbnail,
+            commands::render_page_region,
+            commands::page_info,
             commands::extract_text,
             commands::close_document,
         ])

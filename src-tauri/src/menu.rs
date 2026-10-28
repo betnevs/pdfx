@@ -1,11 +1,18 @@
 use tauri::menu::{Menu, MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 use tauri::{AppHandle, Runtime};
 
+/// The platform's fullscreen shortcut. Fullscreen is a custom menu item so the
+/// frontend can restore the page and zoom it had before entering it.
+#[cfg(target_os = "macos")]
+const FULLSCREEN_ACCELERATOR: &str = "Ctrl+Command+F";
+#[cfg(not(target_os = "macos"))]
+const FULLSCREEN_ACCELERATOR: &str = "F11";
+
 /// Builds the native application menu.
 ///
-/// Entries are placeholders for now; later tickets replace each id with the
-/// real editor command. Clipboard and window items use Tauri's predefined
-/// items so they behave natively on every platform.
+/// Menu ids are forwarded to the focused window and handled by the frontend.
+/// Clipboard and window items use Tauri's predefined items so they behave
+/// natively on every platform.
 pub fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     let open = MenuItemBuilder::with_id("file.open", "打开…")
         .accelerator("CmdOrCtrl+O")
@@ -37,13 +44,25 @@ pub fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     let zoom_out = MenuItemBuilder::with_id("view.zoom_out", "缩小")
         .accelerator("CmdOrCtrl+-")
         .build(app)?;
+    let fit_width = MenuItemBuilder::with_id("view.fit_width", "适合宽度")
+        .accelerator("CmdOrCtrl+1")
+        .build(app)?;
+    let fit_page = MenuItemBuilder::with_id("view.fit_page", "适合页面")
+        .accelerator("CmdOrCtrl+2")
+        .build(app)?;
+    let fullscreen = MenuItemBuilder::with_id("view.fullscreen", "全屏")
+        .accelerator(FULLSCREEN_ACCELERATOR)
+        .build(app)?;
 
     let view = SubmenuBuilder::new(app, "视图")
         .item(&actual_size)
         .item(&zoom_in)
         .item(&zoom_out)
         .separator()
-        .fullscreen_with_text("进入全屏")
+        .item(&fit_width)
+        .item(&fit_page)
+        .separator()
+        .item(&fullscreen)
         .build()?;
 
     let help = SubmenuBuilder::new(app, "帮助")
