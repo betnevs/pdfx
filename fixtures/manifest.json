@@ -76,6 +76,42 @@
       "description": "两页 AcroForm：文本、复选框、单选组、列表框、下拉框，含必填与只读字段；js_guard 字段带 JavaScript 击键动作（PDFX 不执行）。"
     },
     {
+      "id": "signature-signed",
+      "category": "signature",
+      "path": "pdfs/signature-signed.pdf",
+      "sha256": "545be4fd8de6025a3abfd69d6f9b559cd02bdcc39b6ada6f78ed08570f3a992c",
+      "size_bytes": 2147,
+      "page_count": 1,
+      "valid": true,
+      "password": null,
+      "owner_password": null,
+      "description": "一个已签名的签名字段（/V 指向含 /ByteRange、/Contents 的签名字典）与一个通过 /Parent 继承 /FT 的空签名字段；另含普通文本字段。"
+    },
+    {
+      "id": "signature-field-only",
+      "category": "signature",
+      "path": "pdfs/signature-field-only.pdf",
+      "sha256": "c1196626eaa59e8b31a3a89a720b9c2dafd63a2bcfac34652c25f712b68e18df",
+      "size_bytes": 1575,
+      "page_count": 1,
+      "valid": true,
+      "password": null,
+      "owner_password": null,
+      "description": "两个空签名字段：终态 widget 与通过 /Parent 继承 /FT 的嵌套字段；无 /V。"
+    },
+    {
+      "id": "encrypted-signature-restricted",
+      "category": "signature",
+      "path": "pdfs/encrypted-signature-restricted.pdf",
+      "sha256": "a93967cea5457af0bfb81d1d6183910f0d4a8979426868c782ce4f64889811f9",
+      "size_bytes": 2057,
+      "page_count": 1,
+      "valid": true,
+      "password": "",
+      "owner_password": "pdfx-owner",
+      "description": "用户密码为空可直接打开；所有者密码 pdfx-owner 限制修改、复制与注释；含已签名与空签名字段，用于只读 + Save As 的签名确认组合。"
+    },
+    {
       "id": "structure-metadata",
       "category": "structure",
       "path": "pdfs/structure-metadata.pdf",

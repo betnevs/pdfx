@@ -19,6 +19,7 @@ import {
 } from "./components/PageOperationDialogs";
 import { RecoveryPrompt } from "./components/RecoveryPrompt";
 import { SaveOptionsDialog } from "./components/SaveOptionsDialog";
+import { SignatureWarningBanner } from "./components/SignatureWarningBanner";
 import {
   choosePdfFile,
   closeDocument,
@@ -165,6 +166,10 @@ export function App() {
   const [appInfo, setAppInfo] = useState<AppInfoState>({ status: "loading" });
   const [editor, setEditor] = useState<EditorState>({ status: "empty" });
   const [notice, setNotice] = useState<CommandError | null>(null);
+  // The signature warning is dismissible for the session. A successful save
+  // re-shows it in the "now invalid" state, as does opening another document.
+  const [signatureWarningDismissed, setSignatureWarningDismissed] =
+    useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const settings = useSettings();
   // A `?open=` window belongs to one Document; the start-up recovery question
@@ -271,6 +276,13 @@ export function App() {
   });
   const saveRef = useRef(save);
   saveRef.current = save;
+
+  // Dismissal lasts until another document is opened or a save completes: the
+  // post-save warning announces that the signatures are now invalid.
+  const signatureDocumentId = openDocumentView?.documentId ?? null;
+  useEffect(() => {
+    setSignatureWarningDismissed(false);
+  }, [signatureDocumentId, save.saveGeneration]);
 
   // Page operations follow the same content-modification permission gate as
   // the Rust commands: a read-only document shows disabled controls and a
@@ -1089,6 +1101,14 @@ export function App() {
         </div>
       )}
 
+      {open?.document.signature && !signatureWarningDismissed && (
+        <SignatureWarningBanner
+          signature={open.document.signature}
+          invalidated={save.signatureInvalidated}
+          onDismiss={() => setSignatureWarningDismissed(true)}
+        />
+      )}
+
       {open && save.requiredFields && save.requiredFields.length > 0 && (
         <div className="app-notice app-notice--error" role="alert">
           <span>
@@ -1145,6 +1165,7 @@ export function App() {
           busy={save.busy}
           sourceEncrypted={open.document.encrypted}
           outputEncrypted={save.confirmation.outputEncrypted}
+          signature={open.document.signature ?? null}
           initialProtect={save.confirmation.preferPassword}
           onSave={save.confirmSaveOptions}
           onCancel={save.cancelConfirmation}

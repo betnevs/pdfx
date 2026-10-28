@@ -350,6 +350,7 @@ fn save_as(document_id: &str, target: &Path) {
         SaveDocumentRequest {
             save_as_path: Some(target.to_string_lossy().into_owned()),
             confirm_unencrypted_output: false,
+            confirm_signature_invalidation: false,
             password: None,
         },
         &mut |_| {},

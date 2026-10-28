@@ -1,4 +1,4 @@
-import type { DocumentView } from "./backend";
+import type { DocumentView, SignatureSummary } from "./backend";
 
 /** Visible explanation for a Permission-Restricted (read-only) document. */
 export const READ_ONLY_REASON =
@@ -45,6 +45,47 @@ export const UNENCRYPTED_OUTPUT_HEADING = "输出将不加密";
 /** Explanation when the current Output Document already carries a password. */
 export const PROTECTED_OUTPUT_WARNING =
   "当前输出文件已设置打开密码；不设置新密码将写入不加密的文件。";
+
+/**
+ * Digital-signature warning copy.
+ *
+ * The banner and the save dialog name the consequence in Chinese but never
+ * reveal signer identities, reasons, document text or signature bytes. PDFX
+ * only reports that signature structures exist; it never signs or verifies.
+ */
+export const SIGNATURE_WARNING_TITLE = "数字签名警告";
+export const SIGNATURE_WARNING =
+  "此文档包含数字签名。编辑或保存会使签名失效。PDFX 不执行证书签名。";
+export const SIGNATURE_FIELD_WARNING =
+  "此文档包含签名字段。编辑或保存会改变文档结构。PDFX 不执行证书签名。";
+export const SIGNATURE_INVALIDATED_WARNING =
+  "此文档已保存，原有数字签名已失效。PDFX 不执行证书签名。";
+export const SIGNATURE_SAVE_CONFIRM_HEADING = "保存会使数字签名失效";
+export const SIGNATURE_SAVE_CONFIRM_WARNING =
+  "保存会改写文档，已有数字签名将失效。确定继续保存吗？";
+export const SIGNATURE_FIELD_SAVE_CONFIRM_HEADING = "保存会改变文档结构";
+export const SIGNATURE_FIELD_SAVE_CONFIRM_WARNING =
+  "保存会改写文档结构；PDFX 不执行证书签名。确定继续保存吗？";
+export const SIGNATURE_SAVE_CONFIRM_BUTTON = "继续保存（签名将失效）";
+export const SIGNATURE_FIELD_SAVE_CONFIRM_BUTTON = "继续保存（结构将改变）";
+/** Copy for the save error the backend raises when no confirmation was given. */
+export const SIGNATURE_SAVE_CONFIRM_REQUIRED =
+  "保存数字签名文档前需要确认签名将失效。请重试并确认。";
+
+/** The banner copy for one document, in its normal or post-save state. */
+export function signatureWarningText(
+  summary: SignatureSummary,
+  invalidated: boolean,
+): { title: string; message: string } {
+  return {
+    title: SIGNATURE_WARNING_TITLE,
+    message: invalidated
+      ? SIGNATURE_INVALIDATED_WARNING
+      : summary.signedCount > 0
+        ? SIGNATURE_WARNING
+        : SIGNATURE_FIELD_WARNING,
+  };
+}
 
 /** The save and edit affordances a Document allows. */
 export interface DocumentPolicy {

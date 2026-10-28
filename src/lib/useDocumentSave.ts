@@ -87,6 +87,16 @@ export interface DocumentSave {
   requiredFields: FormFieldView[] | null;
   /** Where the document was last written in this session. */
   lastSavedPath: string | null;
+  /**
+   * The latest successful save wrote a document whose actual signatures are
+   * now invalid. The signature warning switches to its invalidated state.
+   */
+  signatureInvalidated: boolean;
+  /**
+   * Increments after every successful save. The workspace uses it to re-show a
+   * dismissed signature warning once a new save has invalidated signatures.
+   */
+  saveGeneration: number;
   /** Saves to the Output Document, falling back to Save As on the first save. */
   saveChanges: () => void;
   /** Chooses a target path and writes a new Output Document. */
@@ -133,6 +143,8 @@ export function useDocumentSave(
     null,
   );
   const [lastSavedPath, setLastSavedPath] = useState<string | null>(null);
+  const [signatureInvalidated, setSignatureInvalidated] = useState(false);
+  const [saveGeneration, setSaveGeneration] = useState(0);
 
   const documentRef = useRef(document);
   documentRef.current = document;
@@ -168,6 +180,8 @@ export function useDocumentSave(
     setConfirmation(null);
     setRequiredFields(null);
     setLastSavedPath(documentRef.current?.outputPath ?? null);
+    setSignatureInvalidated(false);
+    setSaveGeneration(0);
     // A restored Document may already have an Output Document from before the
     // crash; Save Changes overwrites it instead of forcing another Save As.
     hasOutputRef.current = Boolean(documentRef.current?.outputPath);
@@ -273,6 +287,8 @@ export function useDocumentSave(
         setHistory(result.history);
         setLastSavedPath(result.outputPath);
         setRequiredFields(null);
+        setSignatureInvalidated(Boolean(result.signatureInvalidated));
+        setSaveGeneration((generation) => generation + 1);
         optionsRef.current.onSaved?.(result.outputPath);
         return "saved";
       } catch (saveError) {
@@ -340,10 +356,14 @@ export function useDocumentSave(
         return Promise.resolve("cancelled");
       }
       // Save As always offers the opening-password option. Save Changes shows
-      // the dialog only when the write needs a protection decision: an
-      // encrypted Source Document (ADR-0007) or a protected Output Document
-      // whose password would otherwise be silently dropped.
-      const needsDecision = current.encrypted || outputEncryptedRef.current;
+      // the dialog only when the write needs a decision: an encrypted Source
+      // Document (ADR-0007), a protected Output Document whose password would
+      // otherwise be silently dropped, or a document whose signature
+      // structures would be invalidated by writing it.
+      const needsDecision =
+        current.encrypted ||
+        outputEncryptedRef.current ||
+        Boolean(current.signature);
       if (kind === "save_as" || needsDecision) {
         // A newer attempt supersedes an older, unanswered dialog.
         const previous = confirmationResolverRef.current;
@@ -489,6 +509,11 @@ export function useDocumentSave(
         // Clicking the explicit unencrypted action is the ADR-0007 acceptance.
         request.confirmUnencryptedOutput = true;
       }
+      if (documentRef.current?.signature) {
+        // The dialog showed the signature warning and the user chose the
+        // explicit save action; the confirmation is per-save and not retained.
+        request.confirmSignatureInvalidation = true;
+      }
       void runSave(pending.kind, request).then((outcome) => resolve?.(outcome));
     },
     [confirmation, runSave],
@@ -521,6 +546,12 @@ export function useDocumentSave(
       void startSave(failure.kind, failure.request, true);
       return;
     }
+    if (documentRef.current?.signature) {
+      // The confirmation is never retained either: every retry is a new save
+      // attempt, so it goes back through the dialog and asks again.
+      void startSave(failure.kind, failure.request, false);
+      return;
+    }
     void runSave(failure.kind, failure.request);
   }, [error, runSave, saveAs, startSave]);
 
@@ -547,6 +578,8 @@ export function useDocumentSave(
     confirmation,
     requiredFields,
     lastSavedPath,
+    signatureInvalidated,
+    saveGeneration,
     saveChanges,
     saveAs,
     saveForClose,

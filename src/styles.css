@@ -177,6 +177,51 @@ button {
   cursor: pointer;
 }
 
+/* Non-blocking digital-signature warning: editing or saving invalidates the
+   signature structures, but the user may keep working. */
+.signature-warning {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 8px 20px;
+  border-bottom: 1px solid var(--pdfx-warning-border);
+  background: var(--pdfx-warning-soft);
+  color: var(--pdfx-warning-text);
+  font-size: 13px;
+}
+
+.signature-warning--invalidated {
+  border-bottom-color: var(--pdfx-danger-border);
+  background: var(--pdfx-danger-soft);
+  color: var(--pdfx-danger-text);
+}
+
+.signature-warning-body {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 4px 10px;
+}
+
+.signature-warning-body p {
+  margin: 0;
+}
+
+.signature-warning-title {
+  font-weight: 600;
+}
+
+.signature-warning button {
+  padding: 3px 10px;
+  border: 1px solid currentColor;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
 .empty-workspace {
   max-width: 420px;
   padding: 48px 40px;

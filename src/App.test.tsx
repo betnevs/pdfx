@@ -10,6 +10,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import {
   READ_ONLY_REASON,
+  SIGNATURE_INVALIDATED_WARNING,
+  SIGNATURE_WARNING,
+  SIGNATURE_WARNING_TITLE,
   UNENCRYPTED_OUTPUT_WARNING,
 } from "./lib/document-policy";
 import { notifyDocumentChanged } from "./lib/documentEvents";
@@ -44,6 +47,15 @@ const documentView = {
   encrypted: false,
   readOnly: false,
   permissions: allGrantedPermissions,
+};
+
+/** Counts only, exactly what the Rust command boundary exposes. */
+const signatureSummary = { signedCount: 1, fieldCount: 2 };
+const signedDocumentView = {
+  ...documentView,
+  name: "signed.pdf",
+  path: "/tmp/signed.pdf",
+  signature: signatureSummary,
 };
 
 const idleHistory = {
@@ -286,7 +298,7 @@ type TestUser = ReturnType<typeof userEvent.setup>;
  */
 async function acceptSaveOptions(
   user: TestUser,
-  options: { password?: string; unencrypted?: boolean } = {},
+  options: { password?: string; unencrypted?: boolean; signature?: boolean } = {},
 ): Promise<void> {
   const dialog = await screen.findByRole("dialog", { name: "保存选项" });
   if (options.password) {
@@ -308,7 +320,11 @@ async function acceptSaveOptions(
   }
   await user.click(
     within(dialog).getByRole("button", {
-      name: options.unencrypted ? "继续保存（不加密）" : "保存",
+      name: options.signature
+        ? "继续保存（签名将失效）"
+        : options.unencrypted
+          ? "继续保存（不加密）"
+          : "保存",
     }),
   );
 }
@@ -3552,6 +3568,340 @@ describe("PDFX workspace", () => {
     await waitFor(() => expect(menuHandler).toBeDefined());
     act(() => menuHandler?.({ payload: "file.print" }));
     expect(screen.queryByRole("dialog", { name: "打印" })).not.toBeInTheDocument();
+  });
+
+  it("warns about signature invalidation on open and lets the user dismiss it", async () => {
+    installDocumentBackend({ open_document: () => signedDocumentView });
+    openDialogMock.mockResolvedValueOnce("/tmp/signed.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("signed.pdf");
+
+    const banner = screen.getByRole("status", { name: SIGNATURE_WARNING_TITLE });
+    expect(banner).toHaveTextContent(SIGNATURE_WARNING);
+    expect(banner).toHaveTextContent("编辑或保存会使签名失效");
+    expect(banner).toHaveTextContent("PDFX 不执行证书签名");
+    // The warning is non-blocking: editing and saving stay available.
+    expect(screen.getByRole("button", { name: "保存更改" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "另存为…" })).toBeEnabled();
+
+    await user.click(within(banner).getByRole("button", { name: "关闭" }));
+    expect(screen.queryByRole("status", { name: SIGNATURE_WARNING_TITLE })).not.toBeInTheDocument();
+  });
+
+  it("does not show the signature warning for an ordinary document", async () => {
+    installDocumentBackend();
+    openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("report.pdf");
+
+    expect(screen.queryByText(SIGNATURE_WARNING)).not.toBeInTheDocument();
+    expect(screen.queryByRole("status", { name: SIGNATURE_WARNING_TITLE })).not.toBeInTheDocument();
+  });
+
+  it("requires an explicit signature confirmation before Save As writes a file", async () => {
+    let history = dirtyHistory;
+    installDocumentBackend({
+      open_document: () => signedDocumentView,
+      edit_history: () => history,
+      save_document: () => {
+        history = cleanHistory;
+        return savedResult({
+          signature: signatureSummary,
+          signatureInvalidated: true,
+        });
+      },
+    });
+    openDialogMock.mockResolvedValueOnce("/tmp/signed.pdf");
+    saveDialogMock.mockResolvedValue("/tmp/copy.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("signed.pdf");
+    expect(await screen.findByText("未保存")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "另存为…" }));
+    let dialog = await screen.findByRole("dialog", { name: "保存选项" });
+    expect(within(dialog).getByText("保存会使数字签名失效")).toBeInTheDocument();
+    expect(
+      within(dialog).getByText(
+        "保存会改写文档，已有数字签名将失效。确定继续保存吗？",
+      ),
+    ).toBeInTheDocument();
+
+    // Cancelling writes nothing and keeps the unsaved edits for a retry.
+    await user.click(within(dialog).getByRole("button", { name: "取消" }));
+    expect(commandCalls("save_document")).toHaveLength(0);
+    expect(screen.getByText("未保存")).toBeInTheDocument();
+    expect(screen.getByRole("status", { name: SIGNATURE_WARNING_TITLE })).toHaveTextContent(SIGNATURE_WARNING);
+
+    // The explicit action is the confirmation the command boundary requires.
+    await user.click(screen.getByRole("button", { name: "另存为…" }));
+    dialog = await screen.findByRole("dialog", { name: "保存选项" });
+    await user.click(
+      within(dialog).getByRole("button", { name: "继续保存（签名将失效）" }),
+    );
+
+    await waitFor(() =>
+      expect(commandCalls("save_document")).toEqual([
+        [
+          "save_document",
+          {
+            documentId: "doc-1",
+            request: {
+              saveAsPath: "/tmp/copy.pdf",
+              confirmUnencryptedOutput: false,
+              confirmSignatureInvalidation: true,
+            },
+          },
+        ],
+      ]),
+    );
+    // After the write the banner announces that the signatures are invalid.
+    await waitFor(() =>
+      expect(screen.getByRole("status", { name: SIGNATURE_WARNING_TITLE })).toHaveTextContent(
+        SIGNATURE_INVALIDATED_WARNING,
+      ),
+    );
+    expect(screen.queryByText("未保存")).not.toBeInTheDocument();
+  });
+
+  it("asks for the signature confirmation again on every Save Changes", async () => {
+    let history = dirtyHistory;
+    installDocumentBackend({
+      open_document: () => signedDocumentView,
+      edit_history: () => history,
+      save_document: () => {
+        history = cleanHistory;
+        return savedResult({
+          signature: signatureSummary,
+          signatureInvalidated: true,
+        });
+      },
+    });
+    openDialogMock.mockResolvedValueOnce("/tmp/signed.pdf");
+    saveDialogMock.mockResolvedValue("/tmp/copy.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("signed.pdf");
+    await user.click(screen.getByRole("button", { name: "另存为…" }));
+    await acceptSaveOptions(user, { signature: true });
+    await screen.findByText(/已保存到/);
+
+    history = { ...dirtyHistory, revision: 3, savedRevision: 2 };
+    act(() => {
+      notifyDocumentChanged({ documentId: "doc-1", pageIndex: 0 });
+    });
+    expect(await screen.findByText("未保存")).toBeInTheDocument();
+
+    // Save Changes would overwrite an unencrypted output of an unencrypted
+    // source, so only the signature warning raises this dialog.
+    await user.click(screen.getByRole("button", { name: "保存更改" }));
+    let dialog = await screen.findByRole("dialog", { name: "保存选项" });
+    expect(within(dialog).getByText("保存会使数字签名失效")).toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "取消" }));
+    expect(commandCalls("save_document")).toHaveLength(1);
+    expect(screen.getByText("未保存")).toBeInTheDocument();
+
+    // The next attempt asks again instead of remembering the confirmation.
+    await user.click(screen.getByRole("button", { name: "保存更改" }));
+    dialog = await screen.findByRole("dialog", { name: "保存选项" });
+    await user.click(
+      within(dialog).getByRole("button", { name: "继续保存（签名将失效）" }),
+    );
+    await waitFor(() => expect(commandCalls("save_document")).toHaveLength(2));
+    expect(commandCalls("save_document")[1]).toEqual([
+      "save_document",
+      {
+        documentId: "doc-1",
+        request: {
+          saveAsPath: null,
+          confirmUnencryptedOutput: false,
+          confirmSignatureInvalidation: true,
+        },
+      },
+    ]);
+  });
+
+  it("keeps the signature warning and unsaved edits when a confirmed save fails", async () => {
+    let attempts = 0;
+    installDocumentBackend({
+      open_document: () => signedDocumentView,
+      edit_history: () => dirtyHistory,
+      save_document: () => {
+        attempts += 1;
+        if (attempts === 1) {
+          throw { code: "save_failed", message: "disk full while writing" };
+        }
+        return savedResult({
+          signature: signatureSummary,
+          signatureInvalidated: true,
+        });
+      },
+    });
+    openDialogMock.mockResolvedValueOnce("/tmp/signed.pdf");
+    saveDialogMock.mockResolvedValue("/tmp/copy.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("signed.pdf");
+    await user.click(screen.getByRole("button", { name: "另存为…" }));
+    await acceptSaveOptions(user, { signature: true });
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("保存失败");
+    expect(screen.getByText("未保存")).toBeInTheDocument();
+    expect(screen.getByRole("status", { name: SIGNATURE_WARNING_TITLE })).toHaveTextContent(SIGNATURE_WARNING);
+
+    // Retrying is a new save attempt: it asks for the confirmation again.
+    await user.click(screen.getByRole("button", { name: "重试保存" }));
+    const dialog = await screen.findByRole("dialog", { name: "保存选项" });
+    expect(within(dialog).getByText("保存会使数字签名失效")).toBeInTheDocument();
+    expect(commandCalls("save_document")).toHaveLength(1);
+    await user.click(
+      within(dialog).getByRole("button", { name: "继续保存（签名将失效）" }),
+    );
+
+    await waitFor(() => expect(commandCalls("save_document")).toHaveLength(2));
+    expect(
+      (
+        commandCalls("save_document")[1][1] as {
+          request: { confirmSignatureInvalidation: boolean };
+        }
+      ).request.confirmSignatureInvalidation,
+    ).toBe(true);
+  });
+
+  it("keeps the password option on a signature Save As", async () => {
+    installDocumentBackend({
+      open_document: () => signedDocumentView,
+      save_document: () =>
+        savedResult({
+          encrypted: true,
+          signature: signatureSummary,
+          signatureInvalidated: true,
+        }),
+    });
+    openDialogMock.mockResolvedValueOnce("/tmp/signed.pdf");
+    saveDialogMock.mockResolvedValueOnce("/tmp/copy.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("signed.pdf");
+    await user.click(screen.getByRole("button", { name: "另存为…" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "保存选项" });
+    await user.click(
+      within(dialog).getByRole("checkbox", { name: "设置打开密码" }),
+    );
+    await user.type(within(dialog).getByLabelText("打开密码"), "signature-secret");
+    await user.type(
+      within(dialog).getByLabelText("确认密码"),
+      "signature-secret",
+    );
+    await user.click(
+      within(dialog).getByRole("button", { name: "加密保存（签名将失效）" }),
+    );
+
+    await waitFor(() =>
+      expect(commandCalls("save_document")).toEqual([
+        [
+          "save_document",
+          {
+            documentId: "doc-1",
+            request: {
+              saveAsPath: "/tmp/copy.pdf",
+              confirmUnencryptedOutput: false,
+              password: "signature-secret",
+              confirmSignatureInvalidation: true,
+            },
+          },
+        ],
+      ]),
+    );
+  });
+
+  it("blocks Save As on a signature document until required fields are filled", async () => {
+    const requiredField = {
+      fieldId: "1:1",
+      name: "notes",
+      kind: "text",
+      pageIndex: 0,
+      order: 0,
+      rect: { x: 72, y: 72, width: 300, height: 60 },
+      value: null,
+      checked: false,
+      options: [],
+      selectedIndex: null,
+      required: true,
+      readOnly: false,
+      multiline: true,
+      radioGroup: null,
+      exportValue: null,
+    };
+    installDocumentBackend({
+      open_document: () => signedDocumentView,
+      edit_history: () => dirtyHistory,
+      form_fields: () => [requiredField],
+      missing_required_fields: () => [requiredField],
+    });
+    openDialogMock.mockResolvedValueOnce("/tmp/signed.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("signed.pdf");
+
+    await user.click(screen.getByRole("button", { name: "另存为…" }));
+
+    expect(
+      await screen.findByText(/必填字段尚未填写，无法保存/),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("dialog", { name: "保存选项" }),
+    ).not.toBeInTheDocument();
+    expect(commandCalls("save_document")).toHaveLength(0);
+  });
+
+  it("shows the signature warning on a read-only document and keeps Save As available", async () => {
+    installDocumentBackend({
+      open_document: () => ({
+        ...signedDocumentView,
+        readOnly: true,
+        permissions: {
+          canModifyContent: false,
+          canAnnotate: false,
+          canAssemble: false,
+          canFillForms: false,
+          canPrint: true,
+          canCopyContent: false,
+        },
+      }),
+    });
+    openDialogMock.mockResolvedValueOnce("/tmp/signed.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+    await screen.findByText("signed.pdf");
+
+    expect(screen.getByText(READ_ONLY_REASON)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "保存更改" })).toBeDisabled();
+    expect(screen.getByRole("status", { name: SIGNATURE_WARNING_TITLE })).toHaveTextContent(SIGNATURE_WARNING);
+
+    saveDialogMock.mockResolvedValueOnce("/tmp/copy.pdf");
+    await user.click(screen.getByRole("button", { name: "另存为…" }));
+    const dialog = await screen.findByRole("dialog", { name: "保存选项" });
+    expect(within(dialog).getByText("保存会使数字签名失效")).toBeInTheDocument();
   });
 });
 

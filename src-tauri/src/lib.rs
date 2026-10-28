@@ -19,6 +19,7 @@ pub mod print_export;
 pub mod recovery;
 pub mod save;
 pub mod settings;
+pub mod signature;
 mod stamp_glyphs;
 pub mod stamps;
 mod target_path;

@@ -10,9 +10,16 @@ import {
   SAVE_PASSWORD_OPTION_LABEL,
   SAVE_PASSWORD_REQUIRED,
   SAVE_PASSWORD_TOO_LONG,
+  SIGNATURE_FIELD_SAVE_CONFIRM_BUTTON,
+  SIGNATURE_FIELD_SAVE_CONFIRM_HEADING,
+  SIGNATURE_FIELD_SAVE_CONFIRM_WARNING,
+  SIGNATURE_SAVE_CONFIRM_BUTTON,
+  SIGNATURE_SAVE_CONFIRM_HEADING,
+  SIGNATURE_SAVE_CONFIRM_WARNING,
   UNENCRYPTED_OUTPUT_HEADING,
   UNENCRYPTED_OUTPUT_WARNING,
 } from "../lib/document-policy";
+import type { SignatureSummary } from "../lib/backend";
 
 export interface SaveOptionsDialogProps {
   /** Name of the document being saved, so the consequence is unambiguous. */
@@ -22,6 +29,12 @@ export interface SaveOptionsDialogProps {
   sourceEncrypted: boolean;
   /** Saving without a password would remove the current output's protection. */
   outputEncrypted: boolean;
+  /**
+   * Signature structures detected when the document was opened. Present means
+   * saving invalidates them, so the dialog states the consequence and its
+   * primary action spells the confirmation out.
+   */
+  signature?: SignatureSummary | null;
   /** Show the password fields straight away (a retry after a password save). */
   initialProtect?: boolean;
   /**
@@ -43,6 +56,7 @@ export function SaveOptionsDialog({
   busy,
   sourceEncrypted,
   outputEncrypted,
+  signature = null,
   initialProtect = false,
   onSave,
   onCancel,
@@ -71,6 +85,24 @@ export function SaveOptionsDialog({
 
   const needsUnencryptedDecision =
     !protect && (sourceEncrypted || outputEncrypted);
+
+  const signatureSigned = (signature?.signedCount ?? 0) > 0;
+  const signatureConsequence = signatureSigned
+    ? "签名将失效"
+    : "结构将改变";
+  const primaryLabel = protect
+    ? signature
+      ? `加密保存（${signatureConsequence}）`
+      : "加密保存"
+    : needsUnencryptedDecision
+      ? signature
+        ? `继续保存（不加密，${signatureConsequence}）`
+        : "继续保存（不加密）"
+      : signature
+        ? signatureSigned
+          ? SIGNATURE_SAVE_CONFIRM_BUTTON
+          : SIGNATURE_FIELD_SAVE_CONFIRM_BUTTON
+        : "保存";
 
   const submit = () => {
     if (busy) {
@@ -182,6 +214,20 @@ export function SaveOptionsDialog({
             )}
           </div>
         ) : null}
+        {signature && (
+          <div className="save-options-warning save-options-signature">
+            <p className="save-options-warning-title">
+              {signatureSigned
+                ? SIGNATURE_SAVE_CONFIRM_HEADING
+                : SIGNATURE_FIELD_SAVE_CONFIRM_HEADING}
+            </p>
+            <p className="password-hint">
+              {signatureSigned
+                ? SIGNATURE_SAVE_CONFIRM_WARNING
+                : SIGNATURE_FIELD_SAVE_CONFIRM_WARNING}
+            </p>
+          </div>
+        )}
         <div className="password-actions">
           <button
             type="button"
@@ -192,11 +238,7 @@ export function SaveOptionsDialog({
             取消
           </button>
           <button type="submit" className="open-button" disabled={busy}>
-            {protect
-              ? "加密保存"
-              : needsUnencryptedDecision
-                ? "继续保存（不加密）"
-                : "保存"}
+            {primaryLabel}
           </button>
         </div>
       </form>

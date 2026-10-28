@@ -42,6 +42,7 @@ export type CommandErrorCode =
   | "no_output_document"
   | "unencrypted_output_confirmation_required"
   | "encrypted_output_confirmation_required"
+  | "signature_invalidation_confirmation_required"
   | "read_only_document"
   | "attachment_too_large"
   | "attachment_not_found"
@@ -81,6 +82,19 @@ export interface DocumentPermissions {
   canCopyContent: boolean;
 }
 
+/**
+ * Counts of the digital-signature structures in a document.
+ *
+ * The backend deliberately exposes counts only: signer identities, signing
+ * reasons, document text and signature bytes never cross the command boundary.
+ */
+export interface SignatureSummary {
+  /** Signature dictionaries (`/V`); non-zero means an actual signature exists. */
+  signedCount: number;
+  /** `/FT /Sig` fields, including empty fields that were never signed. */
+  fieldCount: number;
+}
+
 export interface DocumentView {
   documentId: string;
   name: string;
@@ -107,6 +121,12 @@ export interface DocumentView {
   outputEncrypted?: boolean;
   /** Opened from a Recovery File; `path` is the original Source Document. */
   recovered?: boolean;
+  /**
+   * Signature structures detected when the document was opened, or null for an
+   * ordinary document. Editing or saving invalidates actual signatures; PDFX
+   * never signs and never modifies these structures.
+   */
+  signature?: SignatureSummary | null;
 }
 
 export interface PageImageView {
@@ -1034,6 +1054,12 @@ export interface SaveDocumentRequest {
   /** True only after the user accepted the unencrypted-output warning. */
   confirmUnencryptedOutput: boolean;
   /**
+   * True only after the user accepted that saving a document containing
+   * signature structures invalidates those signatures. Omitted when no
+   * confirmation was asked; the backend refuses the write in that case.
+   */
+  confirmSignatureInvalidation?: boolean;
+  /**
    * Opening password the Output Document must require. Absent means the
    * unencrypted ADR-0007 default. It is held only for the in-flight request:
    * callers must not persist it in settings, logs or save-error state.
@@ -1051,6 +1077,13 @@ export interface SaveResultView {
   encrypted: boolean;
   /** The previous Output Document, preserved before it was replaced. */
   backupPath: string | null;
+  /** Signature structures still present after the save; counts only. */
+  signature?: SignatureSummary | null;
+  /**
+   * The save invalidated an actual signature (`signedCount > 0` before and
+   * after the write); the warning banner switches to its invalidated state.
+   */
+  signatureInvalidated?: boolean;
   /** Clean state after the write; undo/redo history is untouched. */
   history: EditHistoryView;
 }
@@ -1127,6 +1160,7 @@ const COMMAND_ERROR_CODES: ReadonlySet<string> = new Set<CommandErrorCode>([
   "save_target_is_source",
   "no_output_document",
   "unencrypted_output_confirmation_required",
+  "signature_invalidation_confirmation_required",
   "read_only_document",
   "attachment_too_large",
   "attachment_not_found",

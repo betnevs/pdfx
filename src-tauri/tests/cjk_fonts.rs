@@ -261,6 +261,7 @@ fn save_to(document_id: &str, path: Option<&Path>) -> pdfx_lib::save::SaveResult
         SaveDocumentRequest {
             save_as_path: path.map(|path| path.to_string_lossy().into_owned()),
             confirm_unencrypted_output: false,
+            confirm_signature_invalidation: false,
             password: None,
         },
         &mut |update| progress.push(update),
