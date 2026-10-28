@@ -3,6 +3,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { DocumentAccess } from "./components/DocumentAccess";
 import { AnnotationPanel } from "./components/AnnotationPanel";
 import { DocumentToolbar, PageSurface, ThumbnailRail } from "./components/PageViewer";
+import {
+  PrintExport,
+  type PrintExportHandle,
+} from "./components/PrintExport";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { PasswordPrompt } from "./components/PasswordPrompt";
 import { SaveConfirmDialog } from "./components/SaveConfirmDialog";
@@ -100,6 +104,7 @@ export function App() {
   const dirtyRef = useRef(dirty);
   dirtyRef.current = dirty;
   const openingRef = useRef(false);
+  const printExportRef = useRef<PrintExportHandle>(null);
 
   const handleViewerError = useCallback((error: CommandError) => {
     const current = editorRef.current;
@@ -273,6 +278,12 @@ export function App() {
     switch (menuId) {
       case "file.open":
         promptOpen();
+        break;
+      case "file.print":
+        printExportRef.current?.openPrintDialog();
+        break;
+      case "file.export_page":
+        printExportRef.current?.openExportDialog();
         break;
       case "file.save":
         saveRef.current.saveChanges();
@@ -481,6 +492,11 @@ export function App() {
               onFit={viewer.fit}
               onActualSize={viewer.actualSize}
               onToggleFullscreen={viewer.toggleFullscreen}
+            />
+            <PrintExport
+              ref={printExportRef}
+              document={open.document}
+              pageIndex={viewer.pageIndex}
             />
             <DocumentAccess document={open.document} save={save} />
             <div className="document-body">

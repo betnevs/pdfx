@@ -52,6 +52,18 @@
       "description": "用户密码为空可直接打开；所有者密码 pdfx-owner 限制修改、复制与注释。"
     },
     {
+      "id": "encrypted-print-denied",
+      "category": "encrypted",
+      "path": "pdfs/encrypted-print-denied.pdf",
+      "sha256": "7ed7c25df22a087089f134e4f7ebf6197775165aaa28616a91ffe21947718425",
+      "size_bytes": 1233,
+      "page_count": 1,
+      "valid": true,
+      "password": "",
+      "owner_password": "pdfx-owner",
+      "description": "用户密码为空可直接打开；所有者密码 pdfx-owner 仅禁止打印，编辑仍允许。"
+    },
+    {
       "id": "form-acroform",
       "category": "form",
       "path": "pdfs/form-acroform.pdf",

@@ -261,7 +261,7 @@ fn encrypted_sources_refuse_encrypted_output_and_remove_security_decrypts() {
         .iter()
         .filter(|fixture| fixture.category == "encrypted")
         .collect();
-    assert_eq!(encrypted.len(), 2, "expected both encrypted fixtures");
+    assert_eq!(encrypted.len(), 3, "expected every encrypted fixture");
 
     for fixture in encrypted {
         let path = fixtures::fixture_path(fixture);
