@@ -476,6 +476,52 @@ button {
   min-width: 0;
 }
 
+.annotation-note-text {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.annotation-note-text textarea {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 72px;
+  padding: 5px 6px;
+  border: 1px solid var(--pdfx-border);
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  line-height: 1.45;
+  resize: vertical;
+}
+
+.annotation-preview {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--pdfx-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.annotation-control input[type="number"] {
+  width: 64px;
+}
+
+.annotation-shape-meta {
+  margin: 0;
+  color: var(--pdfx-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.annotation-shape-warning {
+  margin: 0;
+  color: var(--pdfx-status-warning);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .annotation-actions {
   display: flex;
   gap: 6px;
@@ -630,6 +676,13 @@ button {
   padding-top: 14px;
   pointer-events: none;
   cursor: default;
+}
+
+/* A scanned page still accepts note placement and ink when annotations are
+   permitted; only the text tools stay disabled. */
+.page-text-layer--message.page-text-layer--annotation-tools {
+  pointer-events: auto;
+  cursor: crosshair;
 }
 
 /* Existing AcroForm widgets sit above the page bitmap but leave empty page
@@ -898,6 +951,68 @@ button {
   pointer-events: none;
 }
 
+.page-text-layer--note-mode,
+.page-text-layer--ink-mode {
+  cursor: crosshair;
+}
+
+.annotation-note {
+  position: absolute;
+  box-sizing: border-box;
+  z-index: 4;
+  border: 1px dashed transparent;
+  border-radius: 2px;
+  cursor: move;
+  touch-action: none;
+  pointer-events: auto;
+}
+
+.annotation-note:hover {
+  border-color: var(--pdfx-blue);
+}
+
+.annotation-note--selected {
+  border: 2px solid var(--pdfx-blue);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--pdfx-blue) 25%, transparent);
+}
+
+.annotation-note-mark {
+  position: absolute;
+  inset: 0;
+  border-radius: 1px;
+  pointer-events: none;
+}
+
+.annotation-note-handle {
+  position: absolute;
+  right: -7px;
+  bottom: -7px;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border: 2px solid var(--pdfx-blue);
+  border-radius: 50%;
+  background: var(--pdfx-pill-bg);
+  cursor: nwse-resize;
+}
+
+.annotation-ink-draft {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.annotation-ink-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
 .text-selection-actions {
   position: absolute;
   left: 8px;
@@ -1099,6 +1214,63 @@ button {
   cursor: crosshair;
 }
 
+/* Rectangle and ellipse annotation overlay. The layer itself never blocks
+   text selection or the text toolbar; only its hit areas, handles and toolbar
+   opt back into pointer events. */
+.shape-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  pointer-events: none;
+}
+
+.shape-layer-svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.shape-hit {
+  pointer-events: all;
+  cursor: move;
+}
+
+.shape-layer--drawing .shape-hit {
+  cursor: crosshair;
+}
+
+.shape-draw-surface {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  cursor: crosshair;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.shape-toolbar {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 8;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  max-width: calc(100% - 16px);
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--pdfx-pill-bg);
+  color: var(--pdfx-pill-text);
+  font-size: 12px;
+  line-height: 1.4;
+  user-select: none;
+  pointer-events: auto;
+}
+
 /* Image overlay. The layer clips to the page: an image dragged past the page
    edge is shown only inside the page box, matching the saved PDF. */
 .page-image-layer {
@@ -1131,6 +1303,20 @@ button {
   pointer-events: auto;
 }
 
+.shape-toolbar-title {
+  font-weight: 600;
+}
+
+.shape-toolbar button {
+  padding: 2px 8px;
+  border: 1px solid var(--pdfx-pill-border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--pdfx-pill-text);
+  font: inherit;
+  cursor: pointer;
+}
+
 .image-edit-toolbar button {
   padding: 2px 8px;
   border: 1px solid var(--pdfx-pill-border);
@@ -1141,6 +1327,19 @@ button {
   cursor: pointer;
 }
 
+.shape-toolbar button:hover:enabled {
+  background: var(--pdfx-pill-hover);
+}
+
+.shape-toolbar button[aria-pressed="true"] {
+  background: var(--pdfx-pill-active);
+}
+
+.shape-toolbar button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
 .image-edit-toolbar button:hover:enabled {
   background: var(--pdfx-pill-hover);
 }
@@ -1148,6 +1347,61 @@ button {
 .image-edit-toolbar button:disabled {
   opacity: 0.45;
   cursor: default;
+}
+
+.shape-toolbar-control {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.shape-toolbar-control input[type="color"] {
+  width: 24px;
+  height: 18px;
+  padding: 1px;
+}
+
+.shape-toolbar-control input[type="number"] {
+  width: 48px;
+}
+
+.shape-toolbar-control input[type="range"] {
+  width: 72px;
+}
+
+.shape-toolbar-warning {
+  color: var(--pdfx-status-warning);
+}
+
+.shape-selection-outline {
+  pointer-events: none;
+}
+
+.shape-transform-preview,
+.shape-create-preview {
+  pointer-events: none;
+}
+
+.shape-handle {
+  position: absolute;
+  box-sizing: border-box;
+  width: 10px;
+  height: 10px;
+  padding: 0;
+  border: 1px solid var(--pdfx-page);
+  border-radius: 50%;
+  background: var(--pdfx-blue);
+  box-shadow: 0 0 0 1px var(--pdfx-blue);
+  transform: translate(-50%, -50%);
+  cursor: nwse-resize;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.shape-handle--rotate {
+  cursor: grab;
+  background: var(--pdfx-page);
+  border-color: var(--pdfx-blue);
 }
 
 .image-edit-reason {

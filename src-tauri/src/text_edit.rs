@@ -567,7 +567,7 @@ pub(crate) enum EditAction {
     Image(ImageEditAction),
     Field(FieldEditAction),
     FormStructure(FormStructureEditAction),
-    Annotation(AnnotationEditAction),
+    Annotation(Box<AnnotationEditAction>),
 }
 
 /// The value a field edit restores during undo or redo.
@@ -2101,14 +2101,14 @@ pub(crate) fn push_annotation_action(
     entry
         .edit
         .undo_stack
-        .push(EditAction::Annotation(AnnotationEditAction {
+        .push(EditAction::Annotation(Box::new(AnnotationEditAction {
             page_index,
             name,
             before_state,
             after_state,
             before,
             after,
-        }));
+        })));
     entry.edit.redo_stack.clear();
     entry.edit.current_state = after_state;
     entry.edit.history_view()
@@ -2129,7 +2129,7 @@ fn apply_annotation_target(
 
 fn undo_annotation(
     entry: &mut OpenDocument,
-    action: AnnotationEditAction,
+    action: Box<AnnotationEditAction>,
 ) -> Result<EditStepView, CommandError> {
     apply_annotation_target(&entry.document, action.before.as_ref(), &action.name)?;
     let page_index = action.page_index;
@@ -2143,7 +2143,7 @@ fn undo_annotation(
 
 fn redo_annotation(
     entry: &mut OpenDocument,
-    action: AnnotationEditAction,
+    action: Box<AnnotationEditAction>,
 ) -> Result<EditStepView, CommandError> {
     apply_annotation_target(&entry.document, action.after.as_ref(), &action.name)?;
     let page_index = action.page_index;

@@ -1206,7 +1206,10 @@ fn saves_an_empty_created_field_with_a_static_appearance() {
     let saved = field_named(&parsed, "empty_note");
     assert!(saved.get(b"V").is_err(), "an empty field has no /V");
     let appearance = lopdf_dict(&parsed, saved.get(b"AP").expect("/AP"));
-    assert!(appearance.get(b"N").is_ok(), "the empty field still has /AP /N");
+    assert!(
+        appearance.get(b"N").is_ok(),
+        "the empty field still has /AP /N"
+    );
     let catalog = lopdf_catalog(&parsed);
     let acro_form = lopdf_dict(&parsed, catalog.get(b"AcroForm").expect("/AcroForm"));
     let dr = lopdf_dict(&parsed, acro_form.get(b"DR").expect("/DR"));

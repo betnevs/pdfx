@@ -4,9 +4,27 @@
 
 **Blocked by:** 12 (文本标记注释与注释列表)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] 便签可放置、输入文本、移动与删除；手绘可连续绘制并调整线宽/颜色/透明度。
-- [ ] 便签与手绘出现在注释列表，点击可定位。
-- [ ] 保存后在其他阅读器中可见；手绘的透明高亮效果在支持混合模式的阅读器中表现合理。
-- [ ] 撤销/重做覆盖放置、移动、属性修改与删除。
+- [x] 便签可放置、输入文本、移动与删除；手绘可连续绘制并调整线宽/颜色/透明度。
+- [x] 便签与手绘出现在注释列表，点击可定位。
+- [ ] 保存后在其他阅读器中可见；手绘的透明高亮效果在支持混合模式的阅读器中表现合理。（native `/Text`、`/Ink`、真实 `/AP`、`/CA` 与像素断言已验证；Preview、Adobe Acrobat Reader、Chrome 及混合模式未人工验证，保持未勾选）
+- [x] 撤销/重做覆盖放置、移动、属性修改与删除。
+
+**Verification notes:**
+
+- 合并：先在 ticket worktree 把 integration `19f9fcb` 合入分支，得到 `df4f4fb`（`merge: integration/pdfx into ticket 13 note and ink annotations`；分支原 tip `ef5d22a`，feature `b3c5f53`），解决冲突并跑通门禁；再在 integration 执行 `eeb3e73`（`merge: ticket 13 sticky notes and ink`，20 文件，+3517/−176）。审计新增的 4 个测试单独提交为 `499dfde`。未修改 spec、ADR、依赖、打包配置或其他 ticket 的实现。
+- 冲突与解决：8 个文件、44 个冲突块——`annotations.rs` 19、`AnnotationPanel.tsx` 9、`pdfium_adapter.rs` 6、`backend.ts` 4、`AnnotationPanel.test.tsx` 3、`lib.rs` 1、`PDFX-PATCH.md` 1、`styles.css` 1。`annotations.rs` 合并为 7 种 `AnnotationKind`（高亮/下划线/删除线/矩形/椭圆/便签/手绘）与统一的 `AnnotationSnapshot`/`list_annotations`，便签/手绘快照保存文本、矩形与笔画；`pdfium_adapter.rs` 同时保留文本标记、形状、便签、手绘的创建、内容、填充、边框、笔画与身份访问器；`lib.rs` 注册全部 11 个注释命令；`backend.ts` 类型与命令函数取并集；`AnnotationPanel` 按选中类型在形状样式、便签文本、手绘线宽与普通颜色/透明度之间分派。ticket 30 表单、ticket 14 图片、ticket 12 文本标记与 ticket 20 形状的既有命令、权限与历史均保留，单一 `text_edit` 撤销栈未变。预期冲突中的 `text_edit.rs`、`PageViewer.tsx`、`PageTextLayer.tsx`、`documentEvents.ts` 实际自动合并；合并后 clippy 的 `large_enum_variant` 要求把 `EditAction::Annotation` 的载荷装箱，仅改类型与调用点，无行为变化。
+- Vendored patch 核对：以 `diff -rq` 对照 pristine 0.9.4（cargo registry 解包目录）确认为 **12 个文件**：`document.rs`、`fonts.rs`、`page/annotation.rs`、`page/annotations.rs`、circle/square/ink/highlight/underline/strikeout/text 七个具体注释文件、`page/field/radio.rs`。`close(self)` 覆盖 **7 种** PDFX 创建的注释（circle、square、ink、highlight、underline、strikeout、text）。分支文档的“nine files / six types”与 integration 的“eleven files / six types”均与实测不符；`PDFX-PATCH.md` 已统一为 twelve/seven，并保留 ticket 20 的 square 小节。本票新增的 vendored 代码改动仅 `page/annotation.rs`、`page/annotation/ink.rs`、`page/annotation/text.rs` 的增量访问器/关闭方法。
+- 勾选 1（放置/文本/移动/删除、连续绘制与样式）：前端 `NoteInk.test.tsx` 覆盖点击放置（空便签创建后选中）、单次指针手势只发一个 `create_ink_annotation`（逐笔提交）、画笔颜色/透明度/线宽的请求值、便签移动/缩放手势各提交一次 `transform_note_annotation`、只读与扫描页工具可用性；`AnnotationPanel.test.tsx` 覆盖便签文本编辑提交与手绘线宽随样式提交。Rust `a_note_saves_as_a_native_text_annotation_with_contents_author_and_appearance`、`an_empty_note_can_be_placed_filled_in_and_undone`、`note_text_edits_are_undoable_and_saved_as_native_contents`、`note_move_and_resize_are_undoable_and_saved_as_native_rectangle`、`deleting_a_note_restores_its_text_author_and_appearance_on_undo`、`ink_saves_as_a_native_ink_annotation_with_inklist_and_appearance` 从命令边界覆盖全流程。真实 Tauri 窗口中的绘制手感未人工验证。
+- 勾选 2（列表与定位）：`list_annotations` 按页序返回便签/手绘，并带 `text`、`rects`、`strokes`、`lineWidth` 等视图；`annotations_are_listed_by_page_across_kinds` 在旋转且页尺寸不同的 3 页 fixture 上断言 note/highlight/ink 的页序与显示坐标；`AnnotationPanel` 按页分组、显示便签摘要与“N 笔 · W pt”，点击条目回调 `App.selectAnnotation`，后者调用 `viewer.goToPage` 并在页面上选中/描边；形状的列表与定位测试未回归。
+- 勾选 3 **未验证（人工）**：保存为 native 注释已由自动化证明——便签 `/Subtype /Text`、`/Contents`、`/T`、`/NM`、`/CreationDate`、真实 `/AP /N` stream、`/Rect`；手绘 `/Subtype /Ink`、`/InkList`（每笔一个坐标数组）、`/C`、`/CA`、`/Border[2]`、`/AP` stream，且 AP 使用 `1 J 1 j` 圆头圆角。输出由独立 lopdf 解析，PDFium 重开并做像素断言。但 Preview、Adobe Acrobat Reader、Chrome 中的可见性/可编辑性及“支持混合模式的阅读器中的透明效果”未在本机人工打开验证，故保持未勾选。手绘透明度以 `/CA` 恒定不透明度写入，未使用 blend mode；跨阅读器混合效果仍需人工矩阵。
+- 勾选 4（统一撤销/重做）：便签放置、空便签填字、文本修改、移动/缩放、删除均有逐级 undo/redo 断言，撤销删除恢复 `/NM`、作者、创建时间、颜色、透明度与矩形；手绘创建/改色/透明度/线宽/删除由同一 `AnnotationEditAction` 快照重建笔画与样式，样式撤销只回退样式而保留笔画，作者与创建时间不变。`each_ink_gesture_is_a_separate_undo_action` 断言两次手势是两步撤销/重做，前端每次 pointerup 只提交一次。保存走 ticket 10 管线后历史保留、dirty 基线前移。
+- 保存/保真：本票没有独立保存路径，只经 `save_document_with_progress`；`repeat_saves_do_not_duplicate_note_or_ink_annotations` 在 Save As 后继续改便签文本与手绘样式再 Save Changes，断言源文件字节不变、输出恰有一个 `/Text` 与一个 `/Ink`、内容/颜色/线宽为更新值、重开仍为 2 条。`notes_and_ink_use_display_geometry_on_rotated_cropped_pages` 在 90° `/Rotate` + CropBox 页面上创建便签与手绘，断言列表/重开显示坐标、保存 `/AP` 为 stream，并用像素命中便签图标与笔画位置。重复保存不产生重复注释，源文件始终不被改写。
+- 权限/只读/扫描页：`read_only_documents_refuse_note_and_ink_changes_but_still_list_them` 断言便签/手绘创建、改文本、变换均 `permission_denied` 且列表仍可读；共享的 `update_annotation_style`/`delete_annotation` 权限路径由既有 ticket 12/20 测试覆盖。`invalid_note_and_ink_requests_are_rejected_without_dirtying_the_document` 覆盖非法颜色/透明度/线宽/空笔画/空文本段/超限文本/非便签改文本/非手绘改线宽等且不产生历史；`notes_and_ink_can_be_placed_on_a_scanned_page` 断言无文本页仍可放置便签与手绘。前端在 `!canAnnotate || readOnly` 时隐藏工具条与属性控件。
+- 作者/时间：创建时只从持久化 `settings.annotationAuthor` 读取，前端不传作者；`notes_and_ink_take_their_author_from_settings_at_creation_time` 断言 Alice→Bob 两次创建分别写入 `/T`，改设置不改旧注释，默认作者来自系统用户名。作者与 `/CreationDate` 在后续编辑、撤销与重做中保持不变。
+- 隐私/依赖/文案/seam：`annotations.rs`、`PageTextLayer.tsx`、`AnnotationPanel.tsx`、`backend.ts` 无网络、遥测、上传或日志调用；相对 `19f9fcb` 无 `Cargo.toml`/`Cargo.lock`/`package.json`/`package-lock.json` 变化，无新依赖或许可证变化；新增文案均为中文。前端只经 `src/lib/backend.ts` 调用新增的 `create_note_annotation`、`create_ink_annotation`、`update_note_text`、`transform_note_annotation` 命令（以及既有 `update_annotation_style`/`delete_annotation`），未新增第二命令 seam；未实现 ticket 25 图章或 ticket 34 波浪线/自由文本/标注框/橡皮擦（实现代码中无对应类型或 UI）。
+- 自动化验证（合并后在 integration 树执行）：`npm run typecheck` 通过；`npm test` **29 文件 / 299 项**通过；`npm run build` 通过；`npm run test:e2e` **12 项**通过；`cargo fmt --check` 通过；`cargo clippy -- -D warnings` exit 0（仅 vendored `pdfium-render` 4 条既有 dead_code warning，符合预期）；`cargo test` 合并后 **210 通过 / 0 失败 / 3 ignored**。审计新增 4 项后重跑 **214 通过 / 0 失败 / 3 ignored（24 个 suite，含 doc-tests）**，其中 `note_ink` 16 项全部通过；提交 `499dfde` 仅新增测试。
+- 人工未验项：真实 Tauri 窗口中的便签放置/输入/拖动/缩放手感与连续手绘手感；Preview、Adobe Acrobat Reader、Chrome 的保存结果矩阵及混合模式透明度表现。另观察到 `PageTextLayer` 的 `.annotation-note-mark` 在原生便签图标之上再填一层同色矩形，会遮住 `/AP` 的折角并对半透明便签重复叠加 opacity；自动化像素已证明 PDFium 会绘制该图标，因此这是视觉打磨项，本票未改代码。
+- 带入 ticket 25（图章）：注释模型已统一为 7 种 `AnnotationKind` + `AnnotationSnapshot`/`AnnotationView`，图章只需新增 `Stamp` 分支、`/AP` 生成、面板标签/属性与变换，可复用现有作者/时间/权限/统一历史与 `/NM` 身份；仍需新增 vendored `close()` 类型（或经枚举关闭），并在 `list_annotations`/面板中与 note/ink/shape 分支并列。图章资源、旋转/透明度与跨阅读器矩阵是本票未覆盖的新工作。
+- 带入 ticket 34（高级注释，依赖 13）：波浪线可扩展 `TextMarkupKind`/互斥的 `/Squiggly` AP；自由文本需要新的 `/FreeText` 类型、字体/换行/颜色 AP 与移动编辑；标注框可走注释或内容对象；橡皮擦需定义“删整条注释”还是“删单笔”——后者目前没有命令与快照模型，且单笔撤销与 20,000 点上限需重新设计；新注释类型还需 vendored `close()` 与跨阅读器验证。统一历史/权限/`/NM` 模式可直接沿用。
