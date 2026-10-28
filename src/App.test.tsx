@@ -178,6 +178,7 @@ function installDocumentBackend(overrides: Record<string, CommandHandler> = {}) 
     form_fields: () => [],
     missing_required_fields: () => [],
     page_images: () => [],
+    page_line_objects: () => [],
     edit_history: () => idleHistory,
     list_annotations: () => [],
     close_document: () => undefined,

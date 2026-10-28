@@ -47,4 +47,6 @@ spikes/pdf-engine/out/
 # Native PDFium library fetched by scripts/setup-native.sh. The patched
 # pdfium-render crate under src-tauri/vendor/pdfium-render is committed.
 src-tauri/vendor/downloads/
-src-tauri/vendor/pdfium/
+# No trailing slash: setup-native.sh may create this as a symlink, which a
+# directory-only pattern would not match.
+src-tauri/vendor/pdfium
