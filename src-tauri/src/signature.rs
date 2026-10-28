@@ -42,13 +42,19 @@ impl SignatureSummary {
 /// Detects signature structures, returning `None` for ordinary documents.
 ///
 /// `source_bytes` are the bytes the live PDFium document was opened from, so
-/// the structural walk sees exactly the file the user opened.
-pub fn detect(document: &PdfDocument<'_>, source_bytes: &[u8]) -> Option<SignatureSummary> {
+/// the structural walk sees exactly the file the user opened. `password` is the
+/// password that opened an encrypted document; lopdf needs it to read the
+/// decrypted field tree, and it is only used here, never stored or logged.
+pub fn detect(
+    document: &PdfDocument<'_>,
+    source_bytes: &[u8],
+    password: Option<&str>,
+) -> Option<SignatureSummary> {
     // Pdfium's signature collection counts signature *fields*, including empty
     // ones, so it is a presence signal only. Whether a field carries an actual
     // signature comes from its `/V` dictionary in the structural walk.
     let pdfium_signature_fields = document.signatures().len() as u32;
-    let mut summary = match structural_summary(source_bytes) {
+    let mut summary = match structural_summary(source_bytes, password) {
         Some(summary) => summary,
         // A structurally unreadable file still opens in PDFium; count the
         // signature widgets it can see so the warning is not lost.
@@ -66,8 +72,12 @@ pub fn detect(document: &PdfDocument<'_>, source_bytes: &[u8]) -> Option<Signatu
 
 /// Walks the AcroForm field tree. `None` means the bytes could not be parsed
 /// as a PDF at all, which lets the caller fall back to PDFium.
-fn structural_summary(source_bytes: &[u8]) -> Option<SignatureSummary> {
-    let document = lopdf::Document::load_mem(source_bytes).ok()?;
+fn structural_summary(source_bytes: &[u8], password: Option<&str>) -> Option<SignatureSummary> {
+    let options = match password {
+        Some(password) => lopdf::LoadOptions::with_password(password),
+        None => lopdf::LoadOptions::default(),
+    };
+    let document = lopdf::Document::load_mem_with_options(source_bytes, options).ok()?;
     let mut summary = SignatureSummary::default();
     let Ok(fields) = document
         .catalog()

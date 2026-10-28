@@ -352,9 +352,16 @@ fn a_password_protected_save_keeps_the_signature_structures() {
     );
 
     let reopened = open_with_password(&output, password);
+    let reopened_signature = reopened
+        .signature
+        .expect("the protected output still reports a signature");
     assert!(
-        reopened.signature.is_some(),
-        "the protected output still reports a signature"
+        reopened_signature.signed_count >= 1,
+        "the protected output still reports an actual signature: {reopened_signature:?}"
+    );
+    assert!(
+        reopened_signature.field_count >= 2,
+        "both signature fields survive protection: {reopened_signature:?}"
     );
     close_document(reopened.document_id).expect("close reopened");
     close_document(document.document_id).expect("close source");

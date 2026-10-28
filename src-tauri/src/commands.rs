@@ -548,7 +548,7 @@ fn insert_document(
     let permissions = options.permissions.unwrap_or(actual_permissions);
     // Best-effort structural detection: signer details and bytes never leave
     // this module, and an unreadable structure never blocks opening.
-    let signature = crate::signature::detect(&document, &bytes);
+    let signature = crate::signature::detect(&document, &bytes, password.as_deref());
 
     registry.next_id += 1;
     let document_id = format!("doc-{}", registry.next_id);
