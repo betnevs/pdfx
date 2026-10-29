@@ -19,7 +19,7 @@ use crate::pdfium::PdfiumLibraryBindingsAccessor;
 use crate::utils::mem::create_byte_buffer;
 use bitflags::bitflags;
 use std::marker::PhantomData;
-use std::os::raw::{c_char, c_int};
+use std::os::raw::{c_char, c_float, c_int};
 
 #[cfg(doc)]
 use crate::pdf::document::PdfDocument;
@@ -607,6 +607,27 @@ impl<'a> PdfFont<'a> {
                 PdfiumInternalError::Unknown,
             ))
         }
+    }
+
+    /// Returns the advance width of `character` at `font_size`, or `None` if Pdfium cannot
+    /// measure the character.
+    ///
+    /// Pdfium's `FPDFFont_GetGlyphWidth()` resolves its glyph argument as a Unicode
+    /// character rather than a glyph index, so this reports the same advance Pdfium uses
+    /// when it lays out text, including the advance of whitespace characters.
+    pub fn character_advance(&self, character: char, font_size: PdfPoints) -> Option<PdfPoints> {
+        let mut width = 0.0;
+
+        let measured = self.bindings().is_true(unsafe {
+            self.bindings().FPDFFont_GetGlyphWidth(
+                self.handle,
+                character as u32,
+                font_size.value as c_float,
+                &mut width,
+            )
+        });
+
+        (measured && width.is_finite()).then(|| PdfPoints::new(width))
     }
 
     /// Returns a collection of all the [PdfFontGlyphs] defined for this [PdfFont] in the containing
