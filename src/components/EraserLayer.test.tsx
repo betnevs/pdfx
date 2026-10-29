@@ -250,7 +250,7 @@ describe("EraserLayer", () => {
     activate();
     eraseAt(500, 700);
     await waitFor(() =>
-      expect(screen.getByText("此处没有可擦除的标注")).toBeInTheDocument(),
+      expect(screen.getByText("此处没有可擦除的注释")).toBeInTheDocument(),
     );
     expect(eraseMock).not.toHaveBeenCalled();
     expect(deleteMock).not.toHaveBeenCalled();
@@ -259,14 +259,14 @@ describe("EraserLayer", () => {
   it("shows the command error when erasing is refused", async () => {
     eraseMock.mockRejectedValue({
       code: "permission_denied",
-      message: "文档权限不允许修改批注",
+      message: "文档权限不允许修改注释",
     });
     const { onChanged } = renderLayer();
     activate();
     eraseAt(130, 305);
     await waitFor(() =>
       expect(screen.getByRole("alert")).toHaveTextContent(
-        "文档权限不允许修改批注",
+        "文档权限不允许修改注释",
       ),
     );
     expect(onChanged).not.toHaveBeenCalled();

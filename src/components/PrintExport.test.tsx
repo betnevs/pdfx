@@ -272,7 +272,7 @@ describe("PrintExport flattened copy", () => {
     );
     const { user, dialog } = await openFlattenDialog();
 
-    expect(within(dialog).getByText(/视觉标注将绘制为页面内容/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/视觉注释将绘制为页面内容/)).toBeInTheDocument();
     expect(within(dialog).getByText(/链接和表单字段保持可交互/)).toBeInTheDocument();
     expect(within(dialog).getByText(/原文档不会被修改/)).toBeInTheDocument();
 
@@ -291,7 +291,7 @@ describe("PrintExport flattened copy", () => {
     });
     const notice = await screen.findByRole("status");
     expect(notice).toHaveTextContent("已导出 Flatten 副本");
-    expect(notice).toHaveTextContent("flatten 4 个标注");
+    expect(notice).toHaveTextContent("flatten 4 个注释");
     expect(notice).toHaveTextContent("保留 2 个交互项");
     expect(notice).toHaveTextContent("跳过 2 个");
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();

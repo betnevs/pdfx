@@ -420,7 +420,7 @@ fn free_text_saves_as_a_native_freetext_annotation_with_contents_da_q_ap_and_pix
 
     let mutation = create_free_text_with_author(
         document_id.clone(),
-        "标注作者".to_owned(),
+        "注释作者".to_owned(),
         request(
             FreeTextKind::FreeText,
             box_rect,
@@ -446,7 +446,7 @@ fn free_text_saves_as_a_native_freetext_annotation_with_contents_da_q_ap_and_pix
         })
     );
     assert_eq!(created.rects, vec![box_rect]);
-    assert_eq!(created.author.as_deref(), Some("标注作者"));
+    assert_eq!(created.author.as_deref(), Some("注释作者"));
     assert!(mutation.history.dirty);
 
     let listed = list_annotations(document_id.clone()).expect("list annotations");
@@ -460,7 +460,7 @@ fn free_text_saves_as_a_native_freetext_annotation_with_contents_da_q_ap_and_pix
     let parsed = lopdf::Document::load(&output).expect("lopdf parses the output");
     let annotation = find_free_text(&parsed, 1);
     assert_eq!(string_of(&annotation, b"Contents"), "Hello 世界");
-    assert_eq!(string_of(&annotation, b"T"), "标注作者");
+    assert_eq!(string_of(&annotation, b"T"), "注释作者");
     assert_eq!(string_of(&annotation, b"NM"), created.name);
     assert_eq!(integer(&annotation, b"Q"), 2, "/Q right");
     assert_eq!(name_of(&annotation, b"IT"), b"FreeText".to_vec());
@@ -499,7 +499,7 @@ fn free_text_saves_as_a_native_freetext_annotation_with_contents_da_q_ap_and_pix
     assert_eq!(view.text.as_deref(), Some("Hello 世界"));
     assert_eq!(view.color, "#c62828");
     assert_eq!(view.opacity, 70);
-    assert_eq!(view.author.as_deref(), Some("标注作者"));
+    assert_eq!(view.author.as_deref(), Some("注释作者"));
     assert_eq!(view.created_at, created.created_at);
     assert_eq!(
         view.free_text,
@@ -540,7 +540,7 @@ fn callout_is_a_native_freetext_annotation_but_not_a_comment_thread() {
             box_rect,
             "#cc0000",
             100,
-            "标注框",
+            "注释框",
             18.0,
             FreeTextAlign::Left,
         ),
@@ -581,7 +581,7 @@ fn callout_is_a_native_freetext_annotation_but_not_a_comment_thread() {
     let views = list_annotations(reopened.document_id.clone()).expect("list reopened");
     assert_eq!(views.len(), 1);
     assert_eq!(views[0].kind, AnnotationKind::Callout);
-    assert_eq!(views[0].text.as_deref(), Some("标注框"));
+    assert_eq!(views[0].text.as_deref(), Some("注释框"));
 
     let pixels = render_pixels(&reopened.document_id, 0, 2.0);
     // The bottom-right of the box is away from the top-left text and from the
@@ -790,7 +790,7 @@ fn cjk_free_text_renders_vector_glyphs_and_wraps_without_font_resources() {
     let pdf = synthetic::cjk_mixed_pdf();
     let document_id = open_synthetic(&pdf);
     let box_rect = rect(100.0, 200.0, 180.0, 140.0);
-    let text = "中文标注框自由文本自动换行验证";
+    let text = "中文注释框自由文本自动换行验证";
 
     let created = create_free_text_with_author(
         document_id.clone(),

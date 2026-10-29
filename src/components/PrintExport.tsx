@@ -116,10 +116,10 @@ function suggestedFlattenedFileName(documentName: string): string {
 
 /** Chinese success summary for a written flattened copy. */
 function flattenNotice(result: FlattenExportView): string {
-  const detail = `flatten ${result.flattened} 个标注，保留 ${result.preserved} 个交互项`;
+  const detail = `flatten ${result.flattened} 个注释，保留 ${result.preserved} 个交互项`;
   const skipped =
     result.skipped.length > 0
-      ? `，跳过 ${result.skipped.length} 个无页面外观的标注`
+      ? `，跳过 ${result.skipped.length} 个无页面外观的注释`
       : "";
   return `已导出 Flatten 副本：${result.path}（${detail}${skipped}）`;
 }
@@ -824,8 +824,8 @@ export const PrintExport = forwardRef<PrintExportHandle, PrintExportProps>(
                 {document.name} · 共 {document.pageCount} 页
               </p>
               <p className="print-export-hint">
-                视觉标注将绘制为页面内容，在任何阅读器中显示一致；链接和表单字段保持可交互。
-                原文档不会被修改，导出总是生成新文件。没有页面外观的标注（如便笺弹窗）将被省略。
+                视觉注释将绘制为页面内容，在任何阅读器中显示一致；链接和表单字段保持可交互。
+                原文档不会被修改，导出总是生成新文件。没有页面外观的注释（如便笺弹窗）将被省略。
               </p>
 
               {document.encrypted ? (
