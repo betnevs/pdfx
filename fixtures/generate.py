@@ -20,7 +20,6 @@ import hashlib
 import json
 import struct
 import sys
-import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple

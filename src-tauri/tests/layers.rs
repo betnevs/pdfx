@@ -8,6 +8,7 @@
 
 mod support;
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -16,11 +17,15 @@ use support::fixtures;
 use support::synthetic;
 use support::temp::TempDir;
 
-use pdfx_lib::commands::{close_document, open_document, render_page, CommandErrorCode};
+use pdfx_lib::commands::{
+    close_document, open_document, render_page, render_page_region, render_thumbnail,
+    CommandErrorCode,
+};
 use pdfx_lib::layers::{delete_layer, list_layers, rename_layer, set_layer_visible, LayerView};
 use pdfx_lib::page_ops::{copy_page, rotate_page};
+use pdfx_lib::print_export::{export_page, PageImageFormat};
 use pdfx_lib::save::{save_document_with_progress, SaveDocumentRequest};
-use pdfx_lib::text_edit::{redo_text_edit, undo_text_edit};
+use pdfx_lib::text_edit::{edit_history, redo_text_edit, undo_text_edit};
 
 const RED_LAYER: u32 = 0;
 const GREEN_LAYER: u32 = 1;
@@ -71,12 +76,8 @@ impl DecodedPng {
     }
 }
 
-fn render_pixels(document_id: &str, page_index: u32) -> DecodedPng {
-    let image = render_page(document_id.to_owned(), page_index, 1.0).expect("render page");
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(&image.png_base64)
-        .expect("render payload is base64");
-    let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+fn decode_png_bytes(bytes: &[u8]) -> DecodedPng {
+    let decoder = png::Decoder::new(std::io::Cursor::new(bytes.to_vec()));
     let mut reader = decoder.read_info().expect("PNG header");
     let mut buffer = vec![0; reader.output_buffer_size().expect("buffer size")];
     let info = reader.next_frame(&mut buffer).expect("PNG frame");
@@ -86,6 +87,21 @@ fn render_pixels(document_id: &str, page_index: u32) -> DecodedPng {
         height: info.height,
         rgba: buffer,
     }
+}
+
+fn render_pixels(document_id: &str, page_index: u32) -> DecodedPng {
+    let image = render_page(document_id.to_owned(), page_index, 1.0).expect("render page");
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(&image.png_base64)
+        .expect("render payload is base64");
+    decode_png_bytes(&bytes)
+}
+
+fn decode_png_base64(encoded: &str) -> DecodedPng {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .expect("PNG payload is base64");
+    decode_png_bytes(&bytes)
 }
 
 fn count_pixels(pixels: &DecodedPng, matches: impl Fn((u8, u8, u8)) -> bool) -> u32 {
@@ -705,4 +721,612 @@ fn deleting_a_layer_also_removes_its_content_from_a_copied_page() {
     assert_eq!(blue_count(&render_pixels(&reopened_id, 1)), 0);
     assert!(red_count(&render_pixels(&reopened_id, 1)) > 0);
     close_document(reopened_id).expect("close reopened");
+}
+
+// ---------------------------------------------------------------------------
+// Synthetic optional-content structures
+// ---------------------------------------------------------------------------
+
+fn stream_object(extra: &str, data: &[u8]) -> Vec<u8> {
+    let mut body = format!("<< /Length {} {extra} >>\nstream\n", data.len()).into_bytes();
+    body.extend_from_slice(data);
+    body.extend_from_slice(b"\nendstream");
+    body
+}
+
+fn build_test_pdf(objects: &[(u32, Vec<u8>)], root: u32) -> Vec<u8> {
+    let max = objects.iter().map(|(number, _)| *number).max().unwrap_or(0);
+    let mut output = b"%PDF-1.7\n".to_vec();
+    let mut offsets = vec![0usize; max as usize + 1];
+    for number in 1..=max {
+        offsets[number as usize] = output.len();
+        output.extend_from_slice(format!("{number} 0 obj\n").as_bytes());
+        match objects.iter().find(|(candidate, _)| *candidate == number) {
+            Some((_, body)) => output.extend_from_slice(body),
+            None => output.extend_from_slice(b"null"),
+        }
+        output.extend_from_slice(b"\nendobj\n");
+    }
+    let xref = output.len();
+    output.extend_from_slice(format!("xref\n0 {}\n", max + 1).as_bytes());
+    output.extend_from_slice(b"0000000000 65535 f \n");
+    for number in 1..=max {
+        output.extend_from_slice(format!("{:010} 00000 n \n", offsets[number as usize]).as_bytes());
+    }
+    output.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root {root} 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            max + 1
+        )
+        .as_bytes(),
+    );
+    output
+}
+
+fn open_synthetic(temp: &TempDir, name: &str, bytes: Vec<u8>) -> String {
+    let path = temp.path().join(name);
+    fs::write(&path, bytes).expect("write synthetic PDF");
+    open_document(path.to_string_lossy().into_owned(), None)
+        .expect("open synthetic document")
+        .document_id
+}
+
+/// One OCG whose marked content uses an inline OCMD with `/P`.
+fn ocmd_policy_pdf() -> Vec<u8> {
+    let objects = vec![
+        (
+            1,
+            b"<< /Type /Catalog /Pages 2 0 R /OCProperties 7 0 R >>".to_vec(),
+        ),
+        (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+        (
+            3,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /Properties << /MC0 10 0 R >> >> /Contents 4 0 R >>".to_vec(),
+        ),
+        (
+            4,
+            stream_object(
+                "",
+                b"/OC << /Type /OCMD /OCGs [10 0 R] /P /AllOn >> BDC\nq 1 0 0 rg 20 20 100 100 re f Q\nEMC\n",
+            ),
+        ),
+        (7, b"<< /OCGs [10 0 R] /D << /ON [10 0 R] >> >>".to_vec()),
+        (10, b"<< /Type /OCG /Name (Policy) >>".to_vec()),
+    ];
+    build_test_pdf(&objects, 1)
+}
+
+/// A form XObject whose `/OC` names the layer.
+fn xobject_oc_pdf() -> Vec<u8> {
+    let objects = vec![
+        (
+            1,
+            b"<< /Type /Catalog /Pages 2 0 R /OCProperties 7 0 R >>".to_vec(),
+        ),
+        (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+        (
+            3,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /XObject << /Fm1 11 0 R >> >> /Contents 4 0 R >>".to_vec(),
+        ),
+        (4, stream_object("", b"q /Fm1 Do Q\n")),
+        (7, b"<< /OCGs [10 0 R] /D << /ON [10 0 R] >> >>".to_vec()),
+        (10, b"<< /Type /OCG /Name (XObject) >>".to_vec()),
+        (
+            11,
+            stream_object(
+                "/Type /XObject /Subtype /Form /BBox [0 0 200 200] /OC 10 0 R /Resources << >>",
+                b"q 1 0 0 rg 20 20 100 100 re f Q\n",
+            ),
+        ),
+    ];
+    build_test_pdf(&objects, 1)
+}
+
+/// An annotation whose `/OC` references the layer.
+fn annotation_oc_pdf() -> Vec<u8> {
+    let objects = vec![
+        (
+            1,
+            b"<< /Type /Catalog /Pages 2 0 R /OCProperties 7 0 R >>".to_vec(),
+        ),
+        (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+        (
+            3,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /Properties << /MC0 10 0 R >> >> /Annots [12 0 R] /Contents 4 0 R >>".to_vec(),
+        ),
+        (
+            4,
+            stream_object(
+                "",
+                b"/OC /MC0 BDC\nq 1 0 0 rg 20 20 100 100 re f Q\nEMC\n",
+            ),
+        ),
+        (7, b"<< /OCGs [10 0 R] /D << /ON [10 0 R] >> >>".to_vec()),
+        (10, b"<< /Type /OCG /Name (Annotated) >>".to_vec()),
+        (
+            12,
+            b"<< /Type /Annot /Subtype /Text /Rect [0 0 10 10] /Contents (note) /OC 10 0 R >>".to_vec(),
+        ),
+    ];
+    build_test_pdf(&objects, 1)
+}
+
+/// A marked-content block that is opened but never closed.
+fn unbalanced_marked_content_pdf() -> Vec<u8> {
+    let objects = vec![
+        (
+            1,
+            b"<< /Type /Catalog /Pages 2 0 R /OCProperties 7 0 R >>".to_vec(),
+        ),
+        (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+        (
+            3,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /Properties << /MC0 10 0 R >> >> /Contents 4 0 R >>".to_vec(),
+        ),
+        (
+            4,
+            stream_object("", b"/OC /MC0 BDC\nq 1 0 0 rg 20 20 100 100 re f Q\n"),
+        ),
+        (7, b"<< /OCGs [10 0 R] /D << /ON [10 0 R] >> >>".to_vec()),
+        (10, b"<< /Type /OCG /Name (Unbalanced) >>".to_vec()),
+    ];
+    build_test_pdf(&objects, 1)
+}
+
+/// Two layers plus `/Configs`, nested `/Order`, `/RBGroups` and `/AS`.
+fn rbgroups_configs_pdf() -> Vec<u8> {
+    let objects = vec![
+        (
+            1,
+            b"<< /Type /Catalog /Pages 2 0 R /OCProperties 7 0 R >>".to_vec(),
+        ),
+        (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+        (
+            3,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /Properties << /MC0 10 0 R /MC1 11 0 R >> >> /Contents 4 0 R >>".to_vec(),
+        ),
+        (
+            4,
+            stream_object(
+                "",
+                b"/OC /MC0 BDC\nq 1 0 0 rg 20 20 80 80 re f Q\nEMC\n/OC /MC1 BDC\nq 0 0 1 rg 100 100 80 80 re f Q\nEMC\n",
+            ),
+        ),
+        (
+            7,
+            b"<< /OCGs [10 0 R 11 0 R] /D 8 0 R /Configs [9 0 R] >>".to_vec(),
+        ),
+        (
+            8,
+            b"<< /Type /OCProperties /ListMode /AllPages /ON [10 0 R 11 0 R] /Order [10 0 R [11 0 R] 10 0 R] /RBGroups [[10 0 R 11 0 R]] /AS [<< /Event /View /OCGs [10 0 R 11 0 R] >>] >>".to_vec(),
+        ),
+        (
+            9,
+            b"<< /Name (Alt) /ON [10 0 R 11 0 R] /Order [11 0 R 10 0 R] /RBGroups [[10 0 R 11 0 R]] /AS [<< /Event /View /OCGs [11 0 R] >>] >>".to_vec(),
+        ),
+        (10, b"<< /Type /OCG /Name (Red) >>".to_vec()),
+        (11, b"<< /Type /OCG /Name (Blue) >>".to_vec()),
+    ];
+    build_test_pdf(&objects, 1)
+}
+
+/// Every OCG object whose decoded `/Name` equals `name`, reachable or not.
+fn ocgs_named(document: &lopdf::Document, name: &str) -> Vec<lopdf::ObjectId> {
+    document
+        .objects
+        .iter()
+        .filter_map(|(id, object)| {
+            let dictionary = object.as_dict().ok()?;
+            if !dictionary.has_type(b"OCG") {
+                return None;
+            }
+            let object_name = dictionary.get(b"Name").ok()?.as_str().ok()?;
+            (decode_pdf_name(object_name) == name).then_some(*id)
+        })
+        .collect()
+}
+
+fn assert_unreferenced(document: &lopdf::Document, target: lopdf::ObjectId) {
+    fn walk(
+        object: &lopdf::Object,
+        target: lopdf::ObjectId,
+        visited: &mut HashSet<lopdf::ObjectId>,
+        document: &lopdf::Document,
+    ) {
+        match object {
+            lopdf::Object::Reference(id) => {
+                assert_ne!(*id, target, "a reachable object references the retired OCG");
+                if visited.insert(*id) {
+                    if let Ok(next) = document.get_object(*id) {
+                        walk(next, target, visited, document);
+                    }
+                }
+            }
+            lopdf::Object::Array(items) => {
+                for item in items {
+                    walk(item, target, visited, document);
+                }
+            }
+            lopdf::Object::Dictionary(dictionary) => {
+                for (_, value) in dictionary.iter() {
+                    walk(value, target, visited, document);
+                }
+            }
+            lopdf::Object::Stream(stream) => {
+                for (_, value) in stream.dict.iter() {
+                    walk(value, target, visited, document);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut visited = HashSet::new();
+    walk(
+        &lopdf::Object::Dictionary(document.trailer.clone()),
+        target,
+        &mut visited,
+        document,
+    );
+    assert!(
+        !visited.contains(&target),
+        "the retired OCG object is still reachable"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Copied pages saved before a layer edit
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_copied_page_saved_before_a_layer_edit_keeps_hidden_layers_hidden() {
+    let temp = TempDir::new("layers-copy-no-edit");
+    let output = temp.path().join("copy-no-edit.pdf");
+    let document_id = open_layers();
+
+    copy_page(document_id.clone(), 0).expect("copy page 1");
+
+    // No layer command has touched the session yet. The copy still references
+    // PDFium's cloned OCG dictionaries, so this render proves the shadow maps
+    // them back to the canonical layers.
+    let copy_before = render_pixels(&document_id, 1);
+    assert!(red_count(&copy_before) > 0, "the copy paints 红色图层");
+    assert_eq!(
+        blue_count(&copy_before),
+        0,
+        "蓝色图层 is off by default and must stay hidden on the copy"
+    );
+
+    save_as(&document_id, &output);
+    close_document(document_id).expect("close live document");
+
+    let saved = lopdf::Document::load(&output).expect("load output");
+    let ids = ocg_ids(&saved);
+    let copy_id = *saved.get_pages().get(&2).expect("copy is the second page");
+    let copy = saved.get_dictionary(copy_id).expect("copy page dictionary");
+    let properties = copy
+        .get_deref(b"Resources", &saved)
+        .expect("copy resources")
+        .as_dict()
+        .expect("resources dictionary")
+        .get_deref(b"Properties", &saved)
+        .expect("copy properties")
+        .as_dict()
+        .expect("properties dictionary");
+    assert!(!properties.is_empty());
+    for (key, value) in properties.iter() {
+        let id = value
+            .as_reference()
+            .expect("every property names an OCG reference");
+        assert!(
+            ids.contains(&id),
+            "property /{} points at cloned OCG {id:?} instead of a canonical layer",
+            String::from_utf8_lossy(key)
+        );
+    }
+
+    let reopened =
+        open_document(output.to_string_lossy().into_owned(), None).expect("reopen output");
+    let reopened_id = reopened.document_id;
+    let copy_after = render_pixels(&reopened_id, 1);
+    assert_eq!(
+        blue_count(&copy_after),
+        0,
+        "the saved copy keeps 蓝色图层 hidden"
+    );
+    assert!(red_count(&copy_after) > 0);
+    assert_eq!(blue_count(&render_pixels(&reopened_id, 0)), 0);
+    assert_eq!(
+        list_layers(reopened_id.clone()).expect("list").layers.len(),
+        3
+    );
+    close_document(reopened_id).expect("close reopened");
+}
+
+// ---------------------------------------------------------------------------
+// Deleted layers must not remain reachable
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_deleted_layer_is_unreachable_in_the_saved_document() {
+    let temp = TempDir::new("layers-delete-reachability");
+    let output = temp.path().join("delete-reachability.pdf");
+    let document_id = open_layers();
+
+    delete_layer(document_id.clone(), BLUE_LAYER).expect("delete 蓝色图层");
+    save_as(&document_id, &output);
+    close_document(document_id).expect("close live document");
+
+    let saved = lopdf::Document::load(&output).expect("load output");
+    assert_eq!(ocg_names(&saved), ["红色图层", "绿色图层"]);
+    let lingering = ocgs_named(&saved, "蓝色图层");
+    assert!(
+        !lingering.is_empty(),
+        "the incremental revision still carries the retired OCG object"
+    );
+    for id in &lingering {
+        assert_unreferenced(&saved, *id);
+    }
+    assert!(
+        !page_content(&saved, 1).contains("/MC2"),
+        "the retired layer's marked content and property name are gone"
+    );
+
+    let reopened =
+        open_document(output.to_string_lossy().into_owned(), None).expect("reopen output");
+    let reopened_id = reopened.document_id;
+    assert_eq!(
+        list_layers(reopened_id.clone()).expect("list").layers.len(),
+        2
+    );
+    assert_eq!(blue_count(&render_pixels(&reopened_id, 0)), 0);
+    close_document(reopened_id).expect("close reopened");
+}
+
+#[test]
+fn layer_deletion_filters_alternative_configs_nested_order_and_rbgroups() {
+    let temp = TempDir::new("layers-rbgroups-configs");
+    let output = temp.path().join("filtered-config.pdf");
+    let document_id = open_synthetic(&temp, "rbgroups.pdf", rbgroups_configs_pdf());
+    assert_eq!(
+        list_layers(document_id.clone()).expect("list").layers.len(),
+        2
+    );
+
+    delete_layer(document_id.clone(), 1).expect("delete Blue");
+    save_as(&document_id, &output);
+    close_document(document_id).expect("close live document");
+
+    let saved = lopdf::Document::load(&output).expect("load output");
+    assert_eq!(ocg_names(&saved), ["Red"]);
+    let ids = ocg_ids(&saved);
+    let lingering = ocgs_named(&saved, "Blue");
+    assert!(!lingering.is_empty());
+    for id in &lingering {
+        assert_unreferenced(&saved, *id);
+    }
+
+    assert_eq!(
+        config_refs(&saved, b"Order"),
+        vec![ids[0], ids[0]],
+        "nested /Order keeps only the surviving layer"
+    );
+    let configs = oc_properties(&saved)
+        .get_deref(b"Configs", &saved)
+        .expect("alternative configs survive")
+        .as_array()
+        .expect("Configs is an array");
+    assert_eq!(configs.len(), 1);
+    let alternative = match &configs[0] {
+        lopdf::Object::Reference(id) => saved.get_dictionary(*id).expect("config object"),
+        lopdf::Object::Dictionary(dictionary) => dictionary,
+        other => panic!("unexpected config entry: {other:?}"),
+    };
+    assert_eq!(
+        array_refs(&saved, alternative.get(b"Order").expect("config Order")),
+        ids,
+        "the alternative configuration keeps only the surviving layer"
+    );
+
+    let reopened =
+        open_document(output.to_string_lossy().into_owned(), None).expect("reopen output");
+    let reopened_id = reopened.document_id;
+    let layers = list_layers(reopened_id.clone())
+        .expect("list reopened")
+        .layers;
+    assert_eq!(layers.len(), 1);
+    assert_eq!(layers[0].name, "Red");
+    assert!(red_count(&render_pixels(&reopened_id, 0)) > 0);
+    assert_eq!(blue_count(&render_pixels(&reopened_id, 0)), 0);
+    close_document(reopened_id).expect("close reopened");
+}
+
+// ---------------------------------------------------------------------------
+// Refused deletions leave the session untouched
+// ---------------------------------------------------------------------------
+
+#[test]
+fn unsafe_layer_deletions_are_refused_without_history_or_mutation() {
+    let cases: [(&str, fn() -> Vec<u8>); 4] = [
+        ("ocmd-policy", ocmd_policy_pdf),
+        ("xobject-oc", xobject_oc_pdf),
+        ("annotation-oc", annotation_oc_pdf),
+        ("unbalanced", unbalanced_marked_content_pdf),
+    ];
+
+    for (name, build) in cases {
+        let temp = TempDir::new(name);
+        let document_id = open_synthetic(&temp, &format!("{name}.pdf"), build());
+        let before = list_layers(document_id.clone())
+            .expect("list before refusal")
+            .layers;
+        assert_eq!(
+            before.len(),
+            1,
+            "{name}: the synthetic document has one layer"
+        );
+
+        let error = delete_layer(document_id.clone(), 0)
+            .expect_err("this layer's content cannot be removed safely");
+        assert_eq!(
+            error.code,
+            CommandErrorCode::LayerDeleteUnsupported,
+            "{name}"
+        );
+
+        let history = edit_history(document_id.clone()).expect("history");
+        assert_eq!(history.revision, 0, "{name}: a refusal adds no history");
+        assert!(!history.dirty, "{name}");
+        assert_eq!(
+            list_layers(document_id.clone())
+                .expect("list after refusal")
+                .layers,
+            before,
+            "{name}: the panel is unchanged"
+        );
+        assert!(
+            red_count(&render_pixels(&document_id, 0)) > 0,
+            "{name}: the document still renders"
+        );
+
+        close_document(document_id).expect("close document");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Every rendering surface follows the layer state
+// ---------------------------------------------------------------------------
+
+#[test]
+fn hiding_a_layer_updates_thumbnails_region_renders_and_exported_pages() {
+    let temp = TempDir::new("layers-render-surfaces");
+    let document_id = open_layers();
+    set_layer_visible(document_id.clone(), BLUE_LAYER, true).expect("show 蓝色图层");
+    assert!(blue_count(&render_pixels(&document_id, 0)) > 0);
+
+    let thumbnail = render_thumbnail(document_id.clone(), 0, 200).expect("thumbnail");
+    assert!(
+        blue_count(&decode_png_base64(&thumbnail.png_base64)) > 0,
+        "the thumbnail paints the visible layer"
+    );
+    let region =
+        render_page_region(document_id.clone(), 0, 1.0, 280, 170, 240, 140).expect("page region");
+    assert!(
+        blue_count(&decode_png_base64(&region.png_base64)) > 0,
+        "the region covering 蓝色图层 paints it"
+    );
+    let export_path = temp.path().join("page.png");
+    export_page(
+        document_id.clone(),
+        0,
+        PageImageFormat::Png,
+        72,
+        export_path.to_string_lossy().into_owned(),
+    )
+    .expect("export page");
+    assert!(
+        blue_count(&decode_png_bytes(
+            &fs::read(&export_path).expect("read export")
+        )) > 0
+    );
+
+    set_layer_visible(document_id.clone(), BLUE_LAYER, false).expect("hide 蓝色图层");
+
+    let thumbnail = render_thumbnail(document_id.clone(), 0, 200).expect("thumbnail");
+    assert_eq!(
+        blue_count(&decode_png_base64(&thumbnail.png_base64)),
+        0,
+        "the thumbnail drops the hidden layer"
+    );
+    let region =
+        render_page_region(document_id.clone(), 0, 1.0, 280, 170, 240, 140).expect("page region");
+    assert_eq!(
+        blue_count(&decode_png_base64(&region.png_base64)),
+        0,
+        "the region drops the hidden layer"
+    );
+    export_page(
+        document_id.clone(),
+        0,
+        PageImageFormat::Png,
+        72,
+        export_path.to_string_lossy().into_owned(),
+    )
+    .expect("export page");
+    assert_eq!(
+        blue_count(&decode_png_bytes(
+            &fs::read(&export_path).expect("read export")
+        )),
+        0,
+        "the exported page drops the hidden layer"
+    );
+    assert!(red_count(&render_pixels(&document_id, 0)) > 0);
+
+    close_document(document_id).expect("close document");
+}
+
+#[test]
+fn layers_survive_an_encrypted_output_and_an_encrypted_source_edit() {
+    let temp = TempDir::new("layers-encrypted");
+    let encrypted = temp.path().join("encrypted.pdf");
+    let second = temp.path().join("second.pdf");
+    let document_id = open_layers();
+
+    set_layer_visible(document_id.clone(), GREEN_LAYER, false).expect("hide 绿色图层");
+    save_document_with_progress(
+        &document_id,
+        SaveDocumentRequest {
+            save_as_path: Some(encrypted.to_string_lossy().into_owned()),
+            password: Some("secret".to_owned()),
+            confirm_unencrypted_output: false,
+            confirm_signature_invalidation: false,
+        },
+        &mut |_| {},
+    )
+    .expect("save encrypted output");
+    close_document(document_id).expect("close live document");
+
+    assert!(lopdf::Document::load(&encrypted)
+        .expect("parse encrypted output")
+        .is_encrypted());
+    let reopened = open_document(
+        encrypted.to_string_lossy().into_owned(),
+        Some("secret".to_owned()),
+    )
+    .expect("reopen encrypted output");
+    let reopened_id = reopened.document_id;
+    let layers = list_layers(reopened_id.clone())
+        .expect("list encrypted layers")
+        .layers;
+    assert_eq!(layers.len(), 3);
+    assert!(!layers[1].visible);
+    assert_eq!(green_count(&render_pixels(&reopened_id, 1)), 0);
+
+    // Editing and saving from an encrypted Source exercises the decrypted
+    // serialization path with a layer state change.
+    set_layer_visible(reopened_id.clone(), RED_LAYER, false).expect("hide 红色图层 on reopen");
+    save_document_with_progress(
+        &reopened_id,
+        SaveDocumentRequest {
+            save_as_path: Some(second.to_string_lossy().into_owned()),
+            password: None,
+            confirm_unencrypted_output: true,
+            confirm_signature_invalidation: false,
+        },
+        &mut |_| {},
+    )
+    .expect("save unencrypted output from an encrypted source");
+    close_document(reopened_id).expect("close reopened");
+
+    let reopened_second =
+        open_document(second.to_string_lossy().into_owned(), None).expect("reopen second output");
+    let second_id = reopened_second.document_id;
+    let layers = list_layers(second_id.clone())
+        .expect("list second output")
+        .layers;
+    assert!(!layers[0].visible);
+    assert!(!layers[1].visible);
+    assert_eq!(red_count(&render_pixels(&second_id, 0)), 0);
+    assert_eq!(green_count(&render_pixels(&second_id, 1)), 0);
+    close_document(second_id).expect("close second output");
 }

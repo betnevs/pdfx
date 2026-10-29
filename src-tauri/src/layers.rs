@@ -125,6 +125,12 @@ pub(crate) struct LayerStore {
     baseline: Vec<LayerRecord>,
     current: Vec<LayerRecord>,
     shadow: Option<LayerShadow>,
+    /// True while the arrangement includes a copied page. PDFium's importer
+    /// clones the OCG dictionaries the copy's resources point at, so rendering
+    /// must go through the shadow even at the baseline state to map the clones
+    /// back to the canonical layers. Recomputed from the page model on every
+    /// shadow check, so undoing the copy drops it again.
+    force_shadow: bool,
 }
 
 impl LayerStore {
@@ -178,16 +184,22 @@ impl LayerStore {
     }
 
     fn needs_shadow(&self) -> bool {
-        self.current.iter().any(|record| {
-            if record.deleted {
-                return true;
-            }
-            self.baseline
-                .iter()
-                .find(|baseline| baseline.index == record.index)
-                .map(|baseline| baseline.visible != record.visible)
-                .unwrap_or(true)
-        })
+        if self.current.is_empty() {
+            // A document without optional content never needs a shadow, even
+            // when a copied page made `force_shadow` true.
+            return false;
+        }
+        self.force_shadow
+            || self.current.iter().any(|record| {
+                if record.deleted {
+                    return true;
+                }
+                self.baseline
+                    .iter()
+                    .find(|baseline| baseline.index == record.index)
+                    .map(|baseline| baseline.visible != record.visible)
+                    .unwrap_or(true)
+            })
     }
 }
 
@@ -526,6 +538,14 @@ impl OpenDocument {
     }
 
     fn sync_layer_shadow(&mut self) -> Result<(), CommandError> {
+        // A copied page references OCG clones that only the shadow's alias
+        // rewrite maps back to the canonical layers. Keep rendering through
+        // the shadow while such a page is included so copied hidden layers do
+        // not reappear on the canvas.
+        self.layers.force_shadow = self.has_included_copies();
+        if self.layers.force_shadow && !self.layers.loaded {
+            ensure_layers_loaded(self)?;
+        }
         if !self.layers.loaded || !self.layers.needs_shadow() {
             self.layers.shadow = None;
             return Ok(());
@@ -586,10 +606,15 @@ pub(crate) fn apply_layer_edit(
     // point at, so the copy references OCGs that are not in /OCProperties and
     // would ignore every visibility rule. Map those clones back to the layer
     // they mirror before the plan is written and before content is filtered.
-    let aliases = collect_ocg_aliases(incremental.get_prev_documents(), &plan);
+    let aliases = {
+        let canonical_ids: Vec<ObjectId> = plan.ocg_ids.iter().flatten().copied().collect();
+        collect_ocg_aliases(incremental.get_prev_documents(), &canonical_ids)
+    };
     write_layer_plan(incremental, state, &plan)?;
-    if !aliases.is_empty() {
-        remap_ocg_aliases(incremental, &aliases)?;
+    if !aliases.is_empty() || !plan.deleted_ids.is_empty() {
+        // Besides remapping clones, this drops resource entries that pointed
+        // at a deleted layer, so the retired OCG is not reachable from a page.
+        rewrite_resource_ocg_refs(incremental, &aliases, &plan.deleted_ids)?;
     }
     if !plan.deleted_ids.is_empty() {
         let rewrites = ContentFilter::new(
@@ -613,6 +638,9 @@ struct LayerPlan {
     d_dict: Dictionary,
     ocgs: Vec<Object>,
     ocg_ids: Vec<Option<ObjectId>>,
+    /// Alternative configurations (`/OCProperties /Configs`), resolved so a
+    /// deleted layer can be removed from them too.
+    configs: Option<Vec<Object>>,
     order: Option<Vec<Object>>,
     rbgroups: Option<Vec<Object>>,
     original_visible: Vec<bool>,
@@ -690,6 +718,10 @@ impl LayerPlan {
             .get(b"RBGroups")
             .ok()
             .and_then(|entry| resolve_array(document, entry));
+        let configs = ocp_dict
+            .get(b"Configs")
+            .ok()
+            .and_then(|entry| resolve_array(document, entry));
 
         let (base_visible, on, off) = default_visibility(document, &d_dict);
         let original_visible = ocg_ids
@@ -730,6 +762,7 @@ impl LayerPlan {
             d_dict,
             ocgs,
             ocg_ids,
+            configs,
             order,
             rbgroups,
             original_visible,
@@ -896,6 +929,10 @@ fn write_layer_plan(
             Object::Array(filter_deleted_refs(groups, &plan.deleted_ids)),
         );
     }
+    // Unknown /D keys are preserved, but a deleted layer must not stay
+    // reachable through them (for example an `/AS`-style array PDFX does not
+    // model). Only references to deleted OCGs are removed.
+    scrub_config_dictionary(&mut d_dict, &plan.deleted_ids);
     incremental
         .new_document
         .set_object(d_id, Object::Dictionary(d_dict));
@@ -903,10 +940,86 @@ fn write_layer_plan(
     let mut ocp_dict = plan.ocp_dict.clone();
     ocp_dict.set(b"OCGs".to_vec(), Object::Array(new_ocgs));
     ocp_dict.set(b"D".to_vec(), Object::Reference(d_id));
+    // Alternative configurations keep listing the remaining layers, so a
+    // deleted OCG must not linger there either. Direct dictionaries are
+    // filtered in place; an indirect dictionary is cloned so every reference
+    // to it sees the filtered version.
+    if let Some(configs) = &plan.configs {
+        let mut filtered_configs = Vec::with_capacity(configs.len());
+        for entry in configs {
+            match entry {
+                Object::Reference(id) if !plan.deleted_ids.is_empty() => {
+                    let is_dictionary =
+                        incremental.get_prev_documents().get_dictionary(*id).is_ok();
+                    if is_dictionary {
+                        incremental
+                            .opt_clone_object_to_new_document(*id)
+                            .map_err(|error| {
+                                internal_error(format!(
+                                    "could not clone an alternative layer config: {error}"
+                                ))
+                            })?;
+                        if let Ok(dictionary) = incremental.new_document.get_dictionary_mut(*id) {
+                            scrub_config_dictionary(dictionary, &plan.deleted_ids);
+                        }
+                    }
+                    filtered_configs.push(entry.clone());
+                }
+                Object::Dictionary(dictionary) => {
+                    let mut dictionary = dictionary.clone();
+                    scrub_config_dictionary(&mut dictionary, &plan.deleted_ids);
+                    filtered_configs.push(Object::Dictionary(dictionary));
+                }
+                other => filtered_configs.push(other.clone()),
+            }
+        }
+        ocp_dict.set(b"Configs".to_vec(), Object::Array(filtered_configs));
+    }
     incremental
         .new_document
         .set_object(ocp_id, Object::Dictionary(ocp_dict));
     Ok(())
+}
+
+/// Removes references to deleted OCGs from a configuration dictionary.
+///
+/// The known keys are filtered by `filter_deleted_refs`; this covers the
+/// remaining values (including nested arrays and dictionaries) so the deleted
+/// object does not stay reachable from `/OCProperties`.
+fn scrub_config_dictionary(dictionary: &mut Dictionary, deleted: &HashSet<ObjectId>) {
+    if deleted.is_empty() {
+        return;
+    }
+    let keys: Vec<Vec<u8>> = dictionary.iter().map(|(key, _)| key.clone()).collect();
+    for key in keys {
+        let Some(value) = dictionary.get(key.as_slice()).ok().cloned() else {
+            continue;
+        };
+        match filter_deleted_refs_deep(&value, deleted) {
+            Some(value) => dictionary.set(key, value),
+            None => {
+                dictionary.remove(key.as_slice());
+            }
+        }
+    }
+}
+
+fn filter_deleted_refs_deep(value: &Object, deleted: &HashSet<ObjectId>) -> Option<Object> {
+    match value {
+        Object::Reference(id) if deleted.contains(id) => None,
+        Object::Array(items) => Some(Object::Array(
+            items
+                .iter()
+                .filter_map(|item| filter_deleted_refs_deep(item, deleted))
+                .collect(),
+        )),
+        Object::Dictionary(dictionary) => {
+            let mut filtered = dictionary.clone();
+            scrub_config_dictionary(&mut filtered, deleted);
+            Some(Object::Dictionary(filtered))
+        }
+        other => Some(other.clone()),
+    }
 }
 
 fn filter_deleted_refs(items: &[Object], deleted: &HashSet<ObjectId>) -> Vec<Object> {
@@ -935,9 +1048,9 @@ fn filter_deleted_refs(items: &[Object], deleted: &HashSet<ObjectId>) -> Vec<Obj
 /// the same `/Name`) are left alone rather than guessing.
 fn collect_ocg_aliases(
     document: &lopdf::Document,
-    plan: &LayerPlan,
+    canonical_ids: &[ObjectId],
 ) -> HashMap<ObjectId, ObjectId> {
-    let canonical: HashSet<ObjectId> = plan.ocg_ids.iter().flatten().copied().collect();
+    let canonical: HashSet<ObjectId> = canonical_ids.iter().copied().collect();
     let mut canonical_by_name: HashMap<Vec<u8>, Option<ObjectId>> = HashMap::new();
     for id in &canonical {
         let Some(name) = ocg_name(document, *id) else {
@@ -977,6 +1090,54 @@ fn collect_ocg_aliases(
     aliases
 }
 
+/// The OCG references listed by `/OCProperties /OCGs`, tolerating a document
+/// without optional content or with a malformed configuration.
+fn canonical_ocg_ids(document: &lopdf::Document) -> Vec<ObjectId> {
+    let Ok(catalog) = document.catalog() else {
+        return Vec::new();
+    };
+    let Ok(ocp) = catalog.get_deref(b"OCProperties", document) else {
+        return Vec::new();
+    };
+    let Ok(ocp) = ocp.as_dict() else {
+        return Vec::new();
+    };
+    let Ok(ocgs) = ocp.get_deref(b"OCGs", document) else {
+        return Vec::new();
+    };
+    let Ok(ocgs) = ocgs.as_array() else {
+        return Vec::new();
+    };
+    ocgs.iter()
+        .filter_map(|entry| entry.as_reference().ok())
+        .collect()
+}
+
+/// Maps the OCG clones a copied page references back to the canonical layer
+/// objects without changing any visibility state.
+///
+/// The save pipeline normally performs this inside `apply_layer_edit`, which
+/// runs whenever the layer state differs from the baseline. A copy saved
+/// before any layer edit would otherwise keep clones that are absent from
+/// `/OCProperties`, so a layer hidden by the source configuration would show
+/// up visible in the output.
+pub(crate) fn remap_copied_page_aliases(
+    incremental: &mut IncrementalDocument,
+) -> Result<(), CommandError> {
+    let aliases = {
+        let document = incremental.get_prev_documents();
+        let canonical_ids = canonical_ocg_ids(document);
+        if canonical_ids.is_empty() {
+            return Ok(());
+        }
+        collect_ocg_aliases(document, &canonical_ids)
+    };
+    if aliases.is_empty() {
+        return Ok(());
+    }
+    rewrite_resource_ocg_refs(incremental, &aliases, &HashSet::new())
+}
+
 fn ocg_name(document: &lopdf::Document, id: ObjectId) -> Option<Vec<u8>> {
     document
         .get_dictionary(id)
@@ -998,15 +1159,17 @@ enum ResourceHolder {
     Properties,
 }
 
-/// Rewrites resource property references from cloned OCG ids to canonical ids
-/// in the appended revision.
-fn remap_ocg_aliases(
+/// Rewrites resource property references in the appended revision: cloned OCG
+/// ids are mapped to their canonical layer, and references to deleted layers
+/// are removed so the deleted OCG does not stay reachable from a page.
+fn rewrite_resource_ocg_refs(
     incremental: &mut IncrementalDocument,
     aliases: &HashMap<ObjectId, ObjectId>,
+    retired: &HashSet<ObjectId>,
 ) -> Result<(), CommandError> {
     let holders = {
         let document = incremental.get_prev_documents();
-        resource_holders(document, aliases)
+        resource_holders(document, aliases, retired)
     };
     for (id, holder) in holders {
         incremental
@@ -1029,47 +1192,64 @@ fn remap_ocg_aliases(
                 // /Resources; an indirect resources dictionary holds
                 // /Properties directly, so cover both shapes.
                 if let Ok(Object::Dictionary(resources)) = dictionary.get_mut(b"Resources") {
-                    rewrite_properties_entry(resources, aliases);
+                    rewrite_properties_entry(resources, aliases, retired);
                 }
-                rewrite_properties_entry(dictionary, aliases);
+                rewrite_properties_entry(dictionary, aliases, retired);
             }
-            ResourceHolder::Properties => rewrite_property_entries(dictionary, aliases),
+            ResourceHolder::Properties => rewrite_property_entries(dictionary, aliases, retired),
         }
     }
     Ok(())
 }
 
-fn rewrite_properties_entry(resources: &mut Dictionary, aliases: &HashMap<ObjectId, ObjectId>) {
+fn rewrite_properties_entry(
+    resources: &mut Dictionary,
+    aliases: &HashMap<ObjectId, ObjectId>,
+    retired: &HashSet<ObjectId>,
+) {
     if let Ok(Object::Dictionary(properties)) = resources.get_mut(b"Properties") {
-        rewrite_property_entries(properties, aliases);
+        rewrite_property_entries(properties, aliases, retired);
     }
 }
 
-fn rewrite_property_entries(properties: &mut Dictionary, aliases: &HashMap<ObjectId, ObjectId>) {
-    for (_, value) in properties.iter_mut() {
-        if let Ok(id) = value.as_reference() {
-            if let Some(canonical) = aliases.get(&id) {
-                *value = Object::Reference(*canonical);
-            }
+fn rewrite_property_entries(
+    properties: &mut Dictionary,
+    aliases: &HashMap<ObjectId, ObjectId>,
+    retired: &HashSet<ObjectId>,
+) {
+    let keys: Vec<Vec<u8>> = properties.iter().map(|(key, _)| key.clone()).collect();
+    for key in keys {
+        let Some(value) = properties.get(key.as_slice()).ok().cloned() else {
+            continue;
+        };
+        let Ok(id) = value.as_reference() else {
+            continue;
+        };
+        let canonical = aliases.get(&id).copied().unwrap_or(id);
+        if retired.contains(&canonical) {
+            properties.remove(key.as_slice());
+        } else if canonical != id {
+            properties.set(key, Object::Reference(canonical));
         }
     }
 }
 
-fn properties_contain_alias(
+fn properties_need_rewrite(
     properties: &Dictionary,
     aliases: &HashMap<ObjectId, ObjectId>,
+    retired: &HashSet<ObjectId>,
 ) -> bool {
     properties.iter().any(|(_, value)| {
         value
             .as_reference()
-            .map(|id| aliases.contains_key(&id))
+            .map(|id| aliases.contains_key(&id) || retired.contains(&id))
             .unwrap_or(false)
     })
 }
 
 /// Collects the objects whose direct `/Properties` dictionary references a
-/// cloned OCG: pages, form XObjects, indirect resources dictionaries and
-/// indirect properties dictionaries.
+/// cloned or deleted OCG: pages, form XObjects, indirect resources
+/// dictionaries and indirect properties dictionaries.
 ///
 /// Only objects that need a direct edit are returned. A property dictionary
 /// stored as an indirect object is edited in place, so its parent container
@@ -1077,6 +1257,7 @@ fn properties_contain_alias(
 fn resource_holders(
     document: &lopdf::Document,
     aliases: &HashMap<ObjectId, ObjectId>,
+    retired: &HashSet<ObjectId>,
 ) -> Vec<(ObjectId, ResourceHolder)> {
     let page_ids: HashSet<ObjectId> = document.get_pages().values().copied().collect();
     let mut pending: Vec<(ObjectId, ResourceHolder)> = page_ids
@@ -1098,7 +1279,7 @@ fn resource_holders(
             _ => continue,
         };
         if holder == ResourceHolder::Properties {
-            if properties_contain_alias(dictionary, aliases) {
+            if properties_need_rewrite(dictionary, aliases, retired) {
                 holders.push((id, holder));
             }
             continue;
@@ -1136,7 +1317,7 @@ fn resource_holders(
                     pending.push((*properties_id, ResourceHolder::Properties));
                 }
                 Ok(Object::Dictionary(properties))
-                    if properties_contain_alias(properties, aliases) =>
+                    if properties_need_rewrite(properties, aliases, retired) =>
                 {
                     holders.push((owner, ResourceHolder::Container));
                 }
