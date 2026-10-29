@@ -125,6 +125,15 @@ pub enum CommandErrorCode {
     AttachmentTargetIsOutput,
     /// Writing the extracted attachment failed; nothing was overwritten.
     AttachmentSaveFailed,
+    /// The requested optional-content layer no longer exists in the open
+    /// document.
+    LayerNotFound,
+    /// A layer name must be non-blank, control-free and within the length cap.
+    LayerNameInvalid,
+    /// Deleting the layer would require rewriting structures PDFX cannot
+    /// safely change (for example an OCMD policy, an annotation or XObject
+    /// `/OC` entry, or a content stream it cannot parse). Nothing was changed.
+    LayerDeleteUnsupported,
     /// Writing, reading or removing a Recovery File failed.
     RecoveryFailed,
     /// The requested Recovery File no longer exists.
@@ -369,6 +378,10 @@ pub(crate) struct OpenDocument {
     pub(crate) source_security: DocumentSecurity,
     /// Attachments visible in this session and the baseline to diff at save.
     pub(crate) attachments: crate::attachments::AttachmentStore,
+    /// Optional-content layer state, loaded on the first layer command, plus
+    /// the shadow PDFium document used to render it. Declared before
+    /// `document` so the shadow is dropped first.
+    pub(crate) layers: crate::layers::LayerStore,
     /// Signature structures detected when the Document was opened. They are
     /// never modified by PDFX, so this summary stays valid for the session and
     /// gates every save that writes a file.
@@ -589,6 +602,7 @@ fn insert_document(
                 permissions,
             },
             attachments,
+            layers: crate::layers::LayerStore::default(),
             signature,
             document,
             copy_snapshots: Vec::new(),
@@ -596,6 +610,20 @@ fn insert_document(
     );
 
     Ok(view)
+}
+
+/// Opens unencrypted PDF bytes into a detached PDFium document.
+///
+/// The layer shadow is built from the live document's unencrypted
+/// serialization, so there is no password. It shares `OPEN_LOCK` with
+/// `open_document`: PDFium records its load error in process-global state.
+pub(crate) fn open_pdfium_bytes(bytes: Vec<u8>) -> Result<PdfDocument<'static>, CommandError> {
+    let engine = Engine::shared()
+        .map_err(|message| CommandError::new(CommandErrorCode::PdfiumUnavailable, message))?;
+    let _load_guard = OPEN_LOCK.lock().expect("PDFium open lock poisoned");
+    engine
+        .open_bytes(bytes, None)
+        .map_err(|error| map_open_error(&error, false))
 }
 
 /// Reads the effective permissions the PDF security handler grants.
@@ -895,20 +923,21 @@ pub fn render_page(
 ) -> Result<PageImageView, CommandError> {
     validate_scale(scale)?;
 
-    let registry = registry().lock().expect("document registry poisoned");
-    let entry = lookup_document(&registry, &document_id)?;
-    let physical_index = entry.physical_page(page_index)?;
-    let page = load_page(&entry.document, physical_index)?;
-
-    let (pixel_width, pixel_height) = checked_page_pixels(&page, page_index, scale)?;
-    let png = render_full_page_png(&page, page_index, pixel_width, pixel_height)?;
+    let (width, height, png) = with_open_document(&document_id, |entry| {
+        let physical_index = entry.physical_page(page_index)?;
+        let document = entry.render_document()?;
+        let page = load_page(document, physical_index)?;
+        let (pixel_width, pixel_height) = checked_page_pixels(&page, page_index, scale)?;
+        let png = render_full_page_png(&page, page_index, pixel_width, pixel_height)?;
+        Ok((pixel_width, pixel_height, png))
+    })?;
 
     Ok(PageImageView {
         document_id,
         page_index,
         scale,
-        width: pixel_width,
-        height: pixel_height,
+        width,
+        height,
         png_base64: base64::engine::general_purpose::STANDARD.encode(png),
     })
 }
@@ -932,29 +961,31 @@ pub fn render_thumbnail(
         ));
     }
 
-    let registry = registry().lock().expect("document registry poisoned");
-    let entry = lookup_document(&registry, &document_id)?;
-    let physical_index = entry.physical_page(page_index)?;
-    let page = load_page(&entry.document, physical_index)?;
+    let (scale, width, height, png) = with_open_document(&document_id, |entry| {
+        let physical_index = entry.physical_page(page_index)?;
+        let document = entry.render_document()?;
+        let page = load_page(document, physical_index)?;
 
-    let long_edge = page.width().value.max(page.height().value);
-    if !long_edge.is_finite() || long_edge <= 0.0 {
-        return Err(CommandError::new(
-            CommandErrorCode::RenderFailed,
-            format!("page {page_index} has no renderable area"),
-        ));
-    }
+        let long_edge = page.width().value.max(page.height().value);
+        if !long_edge.is_finite() || long_edge <= 0.0 {
+            return Err(CommandError::new(
+                CommandErrorCode::RenderFailed,
+                format!("page {page_index} has no renderable area"),
+            ));
+        }
 
-    let scale = max_edge as f32 / long_edge;
-    let (pixel_width, pixel_height) = checked_page_pixels(&page, page_index, scale)?;
-    let png = render_full_page_png(&page, page_index, pixel_width, pixel_height)?;
+        let scale = max_edge as f32 / long_edge;
+        let (pixel_width, pixel_height) = checked_page_pixels(&page, page_index, scale)?;
+        let png = render_full_page_png(&page, page_index, pixel_width, pixel_height)?;
+        Ok((scale, pixel_width, pixel_height, png))
+    })?;
 
     Ok(PageImageView {
         document_id,
         page_index,
         scale,
-        width: pixel_width,
-        height: pixel_height,
+        width,
+        height,
         png_base64: base64::engine::general_purpose::STANDARD.encode(png),
     })
 }
@@ -982,75 +1013,77 @@ pub fn render_page_region(
         ));
     }
 
-    let registry = registry().lock().expect("document registry poisoned");
-    let entry = lookup_document(&registry, &document_id)?;
-    let physical_index = entry.physical_page(page_index)?;
-    let page = load_page(&entry.document, physical_index)?;
+    let (width, height, png) = with_open_document(&document_id, |entry| {
+        let physical_index = entry.physical_page(page_index)?;
+        let document = entry.render_document()?;
+        let page = load_page(document, physical_index)?;
 
-    let (full_width, full_height) = page_pixel_size(&page, scale);
-    if full_width > i32::MAX as u32 || full_height > i32::MAX as u32 {
-        return Err(CommandError::new(
-            CommandErrorCode::RenderFailed,
-            format!("page {page_index} is too large to render at {scale}x"),
-        ));
-    }
+        let (full_width, full_height) = page_pixel_size(&page, scale);
+        if full_width > i32::MAX as u32 || full_height > i32::MAX as u32 {
+            return Err(CommandError::new(
+                CommandErrorCode::RenderFailed,
+                format!("page {page_index} is too large to render at {scale}x"),
+            ));
+        }
 
-    if x >= full_width || y >= full_height {
-        return Err(CommandError::new(
-            CommandErrorCode::InvalidArgument,
-            format!(
-                "region origin ({x}, {y}) is outside the {full_width}x{full_height} \
+        if x >= full_width || y >= full_height {
+            return Err(CommandError::new(
+                CommandErrorCode::InvalidArgument,
+                format!(
+                    "region origin ({x}, {y}) is outside the {full_width}x{full_height} \
                  page at {scale}x"
-            ),
-        ));
-    }
+                ),
+            ));
+        }
 
-    let width = width.min(full_width - x);
-    let height = height.min(full_height - y);
+        let width = width.min(full_width - x);
+        let height = height.min(full_height - y);
 
-    if width as i64 * height as i64 > MAX_RENDER_PIXELS {
-        return Err(CommandError::new(
-            CommandErrorCode::RenderFailed,
-            format!(
-                "region of {width}x{height} pixels is above the \
+        if width as i64 * height as i64 > MAX_RENDER_PIXELS {
+            return Err(CommandError::new(
+                CommandErrorCode::RenderFailed,
+                format!(
+                    "region of {width}x{height} pixels is above the \
                  {MAX_RENDER_PIXELS}-pixel limit"
-            ),
-        ));
-    }
+                ),
+            ));
+        }
 
-    let config = PdfRenderConfig::new()
-        .set_fixed_size(full_width as i32, full_height as i32)
-        .set_origin(-(x as i32), -(y as i32));
+        let config = PdfRenderConfig::new()
+            .set_fixed_size(full_width as i32, full_height as i32)
+            .set_origin(-(x as i32), -(y as i32));
 
-    let mut bitmap = PdfBitmap::empty(width as i32, height as i32, PdfBitmapFormat::default())
-        .map_err(|error| {
-            CommandError::new(
+        let mut bitmap = PdfBitmap::empty(width as i32, height as i32, PdfBitmapFormat::default())
+            .map_err(|error| {
+                CommandError::new(
+                    CommandErrorCode::RenderFailed,
+                    format!("could not allocate a {width}x{height} bitmap: {error:?}"),
+                )
+            })?;
+
+        page.render_into_bitmap_with_config(&mut bitmap, &config)
+            .map_err(|error| {
+                CommandError::new(
+                    CommandErrorCode::RenderFailed,
+                    format!("PDFium could not render region of page {page_index}: {error:?}"),
+                )
+            })?;
+
+        let rgba = bitmap.as_rgba_bytes();
+        let expected = width as usize * height as usize * 4;
+        if rgba.len() != expected {
+            return Err(CommandError::new(
                 CommandErrorCode::RenderFailed,
-                format!("could not allocate a {width}x{height} bitmap: {error:?}"),
-            )
-        })?;
+                format!(
+                    "rendered region bitmap has {} bytes, expected {expected}",
+                    rgba.len()
+                ),
+            ));
+        }
 
-    page.render_into_bitmap_with_config(&mut bitmap, &config)
-        .map_err(|error| {
-            CommandError::new(
-                CommandErrorCode::RenderFailed,
-                format!("PDFium could not render region of page {page_index}: {error:?}"),
-            )
-        })?;
-
-    let rgba = bitmap.as_rgba_bytes();
-    let expected = width as usize * height as usize * 4;
-    if rgba.len() != expected {
-        return Err(CommandError::new(
-            CommandErrorCode::RenderFailed,
-            format!(
-                "rendered region bitmap has {} bytes, expected {expected}",
-                rgba.len()
-            ),
-        ));
-    }
-
-    let png = encode_png(&rgba, width, height)?;
+        let png = encode_png(&rgba, width, height)?;
+        Ok((width, height, png))
+    })?;
 
     Ok(PageRegionView {
         document_id,
@@ -1186,22 +1219,17 @@ pub fn extract_text(
     document_id: String,
     page_index: u32,
 ) -> Result<ExtractedTextView, CommandError> {
-    let registry = registry().lock().expect("document registry poisoned");
-    let entry = registry.documents.get(&document_id).ok_or_else(|| {
-        CommandError::new(
-            CommandErrorCode::DocumentNotFound,
-            format!("no open document with id {document_id}"),
-        )
+    let text = with_open_document(&document_id, |entry| {
+        let physical_index = entry.physical_page(page_index)?;
+        let document = entry.render_document()?;
+        let page = load_page(document, physical_index)?;
+
+        // A missing text layer is normal for scanned documents.
+        Ok(page
+            .text()
+            .map(|page_text| page_text.all())
+            .unwrap_or_default())
     })?;
-
-    let physical_index = entry.physical_page(page_index)?;
-    let page = load_page(&entry.document, physical_index)?;
-
-    // A missing text layer is normal for scanned documents.
-    let text = page
-        .text()
-        .map(|page_text| page_text.all())
-        .unwrap_or_default();
 
     Ok(ExtractedTextView {
         page_index,
@@ -1221,18 +1249,13 @@ pub fn extract_text_layer(
     document_id: String,
     page_index: u32,
 ) -> Result<TextLayerView, CommandError> {
-    let registry = registry().lock().expect("document registry poisoned");
-    let entry = registry.documents.get(&document_id).ok_or_else(|| {
-        CommandError::new(
-            CommandErrorCode::DocumentNotFound,
-            format!("no open document with id {document_id}"),
-        )
-    })?;
+    with_open_document(&document_id, |entry| {
+        let physical_index = entry.physical_page(page_index)?;
+        let document = entry.render_document()?;
+        let page = load_page(document, physical_index)?;
 
-    let physical_index = entry.physical_page(page_index)?;
-    let page = load_page(&entry.document, physical_index)?;
-
-    build_text_layer(&page, page_index)
+        build_text_layer(&page, page_index)
+    })
 }
 
 /// Display-space transform for one page: the box PDFium renders and the

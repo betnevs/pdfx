@@ -601,6 +601,8 @@ pub(crate) enum EditAction {
     Attachment(crate::attachments::AttachmentEditAction),
     /// Apply, replace or delete the session's watermark.
     Watermark(crate::watermark::WatermarkEditAction),
+    /// Change one optional-content layer's visibility or name, or delete it.
+    Layer(crate::layers::LayerEditAction),
 }
 
 /// The value a field edit restores during undo or redo.
@@ -2383,7 +2385,8 @@ fn undo_for(entry: &mut OpenDocument) -> Result<EditStepView, CommandError> {
         | Some(EditAction::FormStructure(_))
         | Some(EditAction::Page(_))
         | Some(EditAction::Attachment(_))
-        | Some(EditAction::Watermark(_)) => ensure_content_editable(&entry.document)?,
+        | Some(EditAction::Watermark(_))
+        | Some(EditAction::Layer(_)) => ensure_content_editable(&entry.document)?,
         Some(EditAction::Field(_)) => crate::form::ensure_forms_editable(&entry.document)?,
         Some(EditAction::Annotation(_)) | Some(EditAction::Link(_)) => {
             ensure_annotation_editable(&entry.document)?
@@ -2410,6 +2413,7 @@ fn undo_for(entry: &mut OpenDocument) -> Result<EditStepView, CommandError> {
         EditAction::Page(action) => crate::page_ops::undo_page(entry, action),
         EditAction::Attachment(action) => crate::attachments::undo_attachment(entry, action),
         EditAction::Watermark(action) => crate::watermark::undo_watermark(entry, action),
+        EditAction::Layer(action) => crate::layers::undo_layer(entry, action),
     }?;
     // Edit actions address physical pages; report the slot the user sees.
     // Page actions already report a logical slot.
@@ -2515,7 +2519,8 @@ fn redo_for(entry: &mut OpenDocument) -> Result<EditStepView, CommandError> {
         | Some(EditAction::FormStructure(_))
         | Some(EditAction::Page(_))
         | Some(EditAction::Attachment(_))
-        | Some(EditAction::Watermark(_)) => ensure_content_editable(&entry.document)?,
+        | Some(EditAction::Watermark(_))
+        | Some(EditAction::Layer(_)) => ensure_content_editable(&entry.document)?,
         Some(EditAction::Field(_)) => crate::form::ensure_forms_editable(&entry.document)?,
         Some(EditAction::Annotation(_)) | Some(EditAction::Link(_)) => {
             ensure_annotation_editable(&entry.document)?
@@ -2542,6 +2547,7 @@ fn redo_for(entry: &mut OpenDocument) -> Result<EditStepView, CommandError> {
         EditAction::Page(action) => crate::page_ops::redo_page(entry, action),
         EditAction::Attachment(action) => crate::attachments::redo_attachment(entry, action),
         EditAction::Watermark(action) => crate::watermark::redo_watermark(entry, action),
+        EditAction::Layer(action) => crate::layers::redo_layer(entry, action),
     }?;
     // Edit actions address physical pages; report the slot the user sees.
     // Page actions already report a logical slot.
