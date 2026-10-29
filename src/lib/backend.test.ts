@@ -54,6 +54,7 @@ import {
   setFullscreen,
   setMenuState,
   setWindowTitle,
+  sourceImageTargets,
   toCommandError,
   updateFormField,
   updateFormTextField,
@@ -642,6 +643,22 @@ describe("backend command seam", () => {
     expect(invokeMock).toHaveBeenCalledWith("delete_link", {
       documentId: "doc-1",
       linkId: "1:0",
+    });
+  });
+
+  it("reads source image link targets from the current page", async () => {
+    const targets = [
+      {
+        objectIndex: 3,
+        rect: { x: 10, y: 20, width: 300, height: 200 },
+      },
+    ];
+    invokeMock.mockResolvedValue(targets);
+
+    await expect(sourceImageTargets("doc-1", 2)).resolves.toEqual(targets);
+    expect(invokeMock).toHaveBeenCalledWith("source_image_targets", {
+      documentId: "doc-1",
+      pageIndex: 2,
     });
   });
 

@@ -1092,6 +1092,18 @@ export interface CreateLinkRequest {
   target: LinkTarget;
 }
 
+/**
+ * One image already in the page content that can receive a link.
+ *
+ * `objectIndex` is the image's position in the page object list; images
+ * inserted during this session are managed by the image overlay and are not
+ * listed here.
+ */
+export interface SourceImageTargetView {
+  objectIndex: number;
+  rect: TextMarkupRect;
+}
+
 /** Replaces one existing link's target as a single undoable action. */
 export interface UpdateLinkTargetRequest {
   /** The positional id from {@link LinkView}. */
@@ -2146,6 +2158,20 @@ export async function listAnnotations(
 /** Lists every native link in the document, in page order. */
 export async function listLinks(documentId: string): Promise<LinkView[]> {
   return invoke<LinkView[]>("list_links", { documentId });
+}
+
+/**
+ * Lists page image objects that can receive a link. Images inserted in this
+ * session are excluded because the image overlay owns their hit areas.
+ */
+export async function sourceImageTargets(
+  documentId: string,
+  pageIndex: number,
+): Promise<SourceImageTargetView[]> {
+  return invoke<SourceImageTargetView[]>("source_image_targets", {
+    documentId,
+    pageIndex,
+  });
 }
 
 /**

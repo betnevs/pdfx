@@ -22,7 +22,10 @@
 //! [`crate::text_edit::EditAction::Link`], which makes them undoable/redoable
 //! alongside text, image, shape and other annotation edits.
 
-use pdfium_render::prelude::{PdfDocument, PdfPageAnnotationType};
+use pdfium_render::prelude::{
+    PdfDocument, PdfPageAnnotationType, PdfPageObjectCommon, PdfPageObjectType,
+    PdfPageObjectsCommon,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::annotations::{
@@ -30,7 +33,7 @@ use crate::annotations::{
     next_annotation_name, page_geometry, quad_for_rect, TextMarkupRect,
 };
 use crate::commands::{
-    with_open_document, CommandError, CommandErrorCode, DisplayGeometry, OpenDocument,
+    load_page, with_open_document, CommandError, CommandErrorCode, DisplayGeometry, OpenDocument,
 };
 use crate::pdfium_adapter::{
     annotation_author, annotation_bounds, annotation_contents, annotation_creation_date,
@@ -103,6 +106,19 @@ pub struct LinkView {
     pub unsupported: Option<LinkUnsupportedReason>,
     /// Display-space boxes: one per `/QuadPoints` entry, or `/Rect`.
     pub rects: Vec<TextMarkupRect>,
+}
+
+/// One image already present in the page content that can receive a link.
+///
+/// `object_index` is the image's position in the page object list, which is
+/// stable for the lifetime of the session and matches the order in which the
+/// page draws its objects.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceImageTargetView {
+    pub object_index: u32,
+    /// Display-space bounds after page rotation and CropBox handling.
+    pub rect: TextMarkupRect,
 }
 
 /// Request for creating a link over selected text or an image.
@@ -753,6 +769,67 @@ pub fn list_links(document_id: String) -> Result<Vec<LinkView>, CommandError> {
             }
         }
         Ok(views)
+    })
+}
+
+/// Lists the page image objects that can receive a link.
+///
+/// Only images already present in the page content are returned. Images
+/// inserted during this session are managed by the image editing overlay and
+/// are excluded here, so one picture never has two hit areas. Results follow
+/// page-object order (the page's z-order), so later targets render above
+/// earlier ones. Read-only: no history, dirty state or document mutation.
+#[tauri::command]
+pub fn source_image_targets(
+    document_id: String,
+    page_index: u32,
+) -> Result<Vec<SourceImageTargetView>, CommandError> {
+    with_open_document(&document_id, |entry| {
+        let physical = entry.physical_page(page_index)?;
+        let geometry = page_geometry(&entry.document, physical)?;
+        let excluded: Vec<std::ops::Range<usize>> = entry
+            .edit
+            .images
+            .get(&physical)
+            .map(|records| {
+                records
+                    .iter()
+                    .filter(|record| record.count > 0 && !record.deleted)
+                    .map(|record| record.start..record.start + record.count)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let page = load_page(&entry.document, physical)?;
+        let mut targets = Vec::new();
+        for (index, object) in page.objects().iter().enumerate() {
+            if object.object_type() != PdfPageObjectType::Image
+                || excluded.iter().any(|range| range.contains(&index))
+            {
+                continue;
+            }
+            let bounds = object.bounds().map_err(|error| {
+                internal_error(format!("could not read image bounds: {error:?}"))
+            })?;
+            let (x, y, width, height) = geometry.rect(
+                bounds.left().value,
+                bounds.bottom().value,
+                bounds.right().value,
+                bounds.top().value,
+            );
+            if width < 1.0 || height < 1.0 {
+                continue;
+            }
+            targets.push(SourceImageTargetView {
+                object_index: index as u32,
+                rect: TextMarkupRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                },
+            });
+        }
+        Ok(targets)
     })
 }
 

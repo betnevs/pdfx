@@ -3450,6 +3450,13 @@ button {
   background: color-mix(in srgb, var(--pdfx-blue) 10%, transparent);
 }
 
+/* Source page images get a distinct dashed hint so they read as link targets
+   rather than as existing links. */
+.link-layer--active .link-region--image {
+  border-color: var(--pdfx-status-warning);
+  background: color-mix(in srgb, var(--pdfx-status-warning) 8%, transparent);
+}
+
 .link-selection {
   position: absolute;
   z-index: 1;
