@@ -44,7 +44,15 @@
 
 - 打开附件前会再显示一次中文确认。这是超出票 36 所述“仅删除需确认”的有意安全增强，不是规格要求的回退。
 
+## macOS 分发
+
+- macOS 26.4 起会在检测到应用包含 Intel 组件时提示“对 Intel 芯片 App 的支持即将结束”。universal 构建为 Intel Mac 保留了 x86_64 切片，因此在 Apple Silicon 上也可能收到该通知；运行时仍是原生 arm64，不经过 Rosetta。这是 Apple 的弃用提示，不是 PDFX 的崩溃或安装错误。
+- Apple Silicon 用户应使用 `npm run build:macos:arm64` 生成的 `PDFX_0.1.0_arm64.dmg`。脚本会把包内 PDFium 裁剪为 arm64、重新做 ad-hoc 签名，并拒绝任何残留的 x86_64 Mach-O 切片。Intel Mac 继续使用 universal 构建；macOS 27 是 Apple 最后一个支持 Intel Mac 的版本。
+- Tauri 的 bundler 默认写入 `LSRequiresCarbon=true`。PDFX 通过 `src-tauri/Info.plist` 将其覆盖为 `false`，避免 Launch Services 把 Cocoa 应用标记为旧式 Carbon 应用；这与上面的 Intel 通知无关。
+- 已经在通知中心出现的旧提示不会因替换应用而自动消失，需要手动清除。
+
 ## 验证状态
 
 - 以下人工验收未在本环境执行：真实阅读器（Preview、Adobe Acrobat Reader、Chrome）中的打开/编辑/保存/链接点击矩阵；Windows 实机安装、文件关联与打印；较旧 macOS（含 macOS 12 与 Intel 硬件）实机启动；操作系统文件关联注册/取消的端到端流程；原生菜单与快捷键的人工验收；真实打印机输出与 macOS 原生打印面板的 `afterprint` 行为；真实 2000 页文档在桌面 WebView 中的内存曲线；真实磁盘写满时的写入行为（自动化使用注入错误与只读目录模拟）。
+- macOS 26.4+ 的“Intel 芯片 App”通知是否在 arm64 构建上彻底消失，无法通过自动化读取通知中心来确认。已确认包内所有 Mach-O 文件均为 arm64、Launch Services 记录为 `native` / `arm64`、运行进程为 ARM64；通知中心里已经存在的旧提示需要手动清除。
 - 自动化覆盖范围是命令边界、PDFium 适配层、lopdf 结构解析与 React 组件/原型交互，不等同于上述人工验收。

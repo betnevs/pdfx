@@ -14,7 +14,8 @@
     "macOS": {
       "frameworks": ["vendor/pdfium/lib/libpdfium.dylib"],
       "minimumSystemVersion": "12.0",
-      "hardenedRuntime": false
+      "hardenedRuntime": false,
+      "signingIdentity": "-"
     },
     "resources": {
       "../docs/install-macos.md": "INSTALL-macos.md",

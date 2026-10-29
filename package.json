@@ -15,7 +15,9 @@
     "test:e2e": "playwright test",
     "setup:native": "bash scripts/setup-native.sh",
     "build:macos": "bash scripts/build-macos.sh",
+    "build:macos:arm64": "bash scripts/build-macos-arm64.sh",
     "verify:macos": "bash scripts/verify-macos-bundle.sh",
+    "verify:macos:arm64": "PDFX_EXPECTED_ARCH=arm64 bash scripts/verify-macos-bundle.sh",
     "tauri": "tauri"
   },
   "dependencies": {

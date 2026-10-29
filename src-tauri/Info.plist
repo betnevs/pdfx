@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Merged over Tauri's generated Info.plist.
+
+  Tauri's bundler hardcodes LSRequiresCarbon=true for historical reasons. PDFX
+  is a Cocoa/WebKit app and does not use Carbon, so the legacy marker is set to
+  false. Leaving it true makes Launch Services treat the bundle as a legacy
+  Carbon application, which is wrong and needlessly confuses compatibility
+  tooling.
+-->
+<plist version="1.0">
+<dict>
+  <key>LSRequiresCarbon</key>
+  <false/>
+</dict>
+</plist>

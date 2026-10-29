@@ -43,17 +43,24 @@ npx tauri build --no-bundle
 
 ## macOS 打包与安装
 
-macOS 产物是 Apple Silicon 与 Intel 通用的 `.app` / `.dmg`，最低 macOS 12，未签名、未公证：
+macOS 提供两个未签名、未公证的构建，最低 macOS 12：
+
+- `npm run build:macos:arm64`：Apple Silicon 专用。脚本会把应用包内的 PDFium 也裁剪为 arm64，并检查包内每个 Mach-O 文件都不含 x86_64 切片。macOS 26.4+ 不再把 PDFX 报告为依赖 Intel 组件的应用。
+- `npm run build:macos`：Apple Silicon + Intel 的 universal 构建。Intel Mac 必须使用这一版；由于包内保留 x86_64 切片，macOS 26.4+ 在 Apple Silicon 上仍可能显示“对 Intel 芯片 App 的支持即将结束”的系统通知。这是 Apple 的弃用提示，不是 PDFX 依赖 Rosetta。
 
 ```bash
 npm ci
-npm run build:macos
+npm run build:macos:arm64   # Apple Silicon
+# 或
+npm run build:macos         # universal，含 Intel
 ```
 
-`scripts/build-macos.sh` 会先运行原生依赖脚本，检查 `aarch64-apple-darwin` 与 `x86_64-apple-darwin` 两个 Rust 目标和 universal PDFium 动态库（缺任一项都会给出明确的安装命令并退出），随后执行 `tauri build --target universal-apple-darwin --bundles app,dmg`，最后用 `scripts/verify-macos-bundle.sh` 检查可执行文件与 PDFium 的架构、`Contents/Frameworks` 布局、Info.plist 文件关联、许可证与 `.dmg` 内容。只校验已有产物可运行 `npm run verify:macos`。
+`scripts/build-macos-arm64.sh` 会先运行原生依赖脚本，检查 `aarch64-apple-darwin` Rust 目标与 PDFium 的 arm64 切片，随后执行 `tauri build --target aarch64-apple-darwin --bundles app`，把 `Contents/Frameworks/libpdfium.dylib` 裁剪为 arm64，以 ad-hoc 方式重新签名，最后自行生成 `.dmg` 并用 `PDFX_EXPECTED_ARCH=arm64` 运行同一个校验脚本。`scripts/build-macos.sh` 则检查 `aarch64-apple-darwin` 与 `x86_64-apple-darwin` 两个 Rust 目标和 universal PDFium，执行 `tauri build --target universal-apple-darwin --bundles app,dmg`，最后用 `scripts/verify-macos-bundle.sh` 检查可执行文件与 PDFium 的架构、`Contents/Frameworks` 布局、Info.plist 文件关联、许可证与 `.dmg` 内容。两种构建都通过 `src-tauri/Info.plist` 把 Tauri 默认写入的 `LSRequiresCarbon=true` 覆盖为 `false`（PDFX 是 Cocoa 应用，不需要旧式 Carbon 环境），并在 `src-tauri/tauri.macos.conf.json` 中把 `signingIdentity` 设为 `-`，让 Tauri 在打包阶段完成 ad-hoc 签名（不是 Developer ID 签名，也不公证）。只校验已有产物可运行 `npm run verify:macos` 或 `npm run verify:macos:arm64`。
 
 产物位置：
 
+- `src-tauri/target/aarch64-apple-darwin/release/bundle/macos/PDFX.app`
+- `src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/PDFX_0.1.0_arm64.dmg`
 - `src-tauri/target/universal-apple-darwin/release/bundle/macos/PDFX.app`
 - `src-tauri/target/universal-apple-darwin/release/bundle/dmg/PDFX_0.1.0_universal.dmg`
 
@@ -69,7 +76,9 @@ npm run build:macos
 | `npm run build` | 类型检查 + Vite 生产构建 |
 | `npm run setup:native` | 下载并校验固定版本 PDFium 原生库到 `src-tauri/vendor/`（不提交） |
 | `npm run build:macos` | 构建未签名的 universal macOS `.app` 与 `.dmg`，并校验产物 |
+| `npm run build:macos:arm64` | 构建 Apple Silicon 专用、无 x86_64 切片的 `.app` 与 `.dmg`，并校验产物 |
 | `npm run verify:macos` | 校验已构建的 universal `.app` / `.dmg`（架构、框架、Info.plist、许可证） |
+| `npm run verify:macos:arm64` | 校验 Apple Silicon 专用产物，并拒绝任何 x86_64 切片 |
 | `npm run prototype` | 启动开发服务器并在浏览器打开 `/prototype.html` |
 | `cd src-tauri && cargo check` | Rust 编译检查 |
 | `cd src-tauri && cargo test` | 命令层、打开/渲染与 fixture 加载器测试（需先 `npm run setup:native`） |
@@ -134,5 +143,5 @@ M0 原型还有两个独立 seam：
 - 原生 PDFium 库需要本地运行 `npm run setup:native`；仓库不提交二进制。
 - M0 原型（票 02）只验证布局、交互与文案；不打开真实 PDF，后续能力显示为占位状态。
 - fixture 中的“大文件”是 500 页的提交版本；可用 `--large-pages 2000` 生成完整压力样例。
-- 生产构建目前未签名、未公证；macOS 首次启动需按 [`docs/install-macos.md`](docs/install-macos.md) 绕过 Gatekeeper。Intel 硬件与 macOS 12 上的实机启动仍需在发布前用对应机器验证；仓库内的自动化检查只能验证 universal 架构与包结构。
+- 生产构建目前未签名、未公证；macOS 首次启动需按 [`docs/install-macos.md`](docs/install-macos.md) 绕过 Gatekeeper。Intel 硬件与 macOS 12 上的实机启动仍需在发布前用对应机器验证；仓库内的自动化检查只能验证 universal / arm64 架构与包结构。
 - Windows 安装器（`.msi` / `.exe` / portable zip）见 [`docs/install-windows.md`](docs/install-windows.md)；尚未在 Windows 实机验证。
