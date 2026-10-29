@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { DocumentAccess } from "./components/DocumentAccess";
 import { AnnotationPanel } from "./components/AnnotationPanel";
 import { AttachmentPanel, attachmentErrorMessage } from "./components/AttachmentPanel";
+import { LayerPanel } from "./components/LayerPanel";
 import { StampPanel } from "./components/StampPanel";
 import { WatermarkPanel } from "./components/WatermarkPanel";
 import { DocumentToolbar, PageSurface, ThumbnailRail } from "./components/PageViewer";
@@ -608,6 +609,27 @@ export function App() {
       pageIndex: viewerRef.current.pageIndex,
       allPagesChanged: allPages,
       source: "watermark",
+    });
+  }, []);
+
+  /**
+   * Publishes a layer change. Visibility and deletion can alter every page's
+   * pixels, so the page bitmaps and all thumbnail caches are stale; a rename
+   * changes no content and therefore skips the repaint.
+   */
+  const handleLayerChanged = useCallback((repaint: boolean) => {
+    if (!repaint) {
+      return;
+    }
+    const current = editorRef.current;
+    if (current.status !== "open") {
+      return;
+    }
+    notifyDocumentChanged({
+      documentId: current.document.documentId,
+      pageIndex: viewerRef.current.pageIndex,
+      allPagesChanged: true,
+      source: "layer",
     });
   }, []);
 
@@ -1376,6 +1398,13 @@ export function App() {
                   canModifyContent={open.document.permissions.canModifyContent}
                   onHistory={(history) => save.acceptHistory(history)}
                   onApplied={handleWatermarkApplied}
+                />
+                <LayerPanel
+                  documentId={open.document.documentId}
+                  canModifyContent={open.document.permissions.canModifyContent}
+                  readOnly={open.document.readOnly}
+                  onHistory={(history) => save.acceptHistory(history)}
+                  onChanged={handleLayerChanged}
                 />
                 <AnnotationPanel
                   documentId={open.document.documentId}

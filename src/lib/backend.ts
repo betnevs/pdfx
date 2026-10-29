@@ -44,6 +44,9 @@ export type CommandErrorCode =
   | "encrypted_output_confirmation_required"
   | "signature_invalidation_confirmation_required"
   | "read_only_document"
+  | "layer_not_found"
+  | "layer_name_invalid"
+  | "layer_delete_unsupported"
   | "attachment_too_large"
   | "attachment_not_found"
   | "attachment_open_confirmation_required"
@@ -471,6 +474,32 @@ export interface WatermarkImagePreview {
   dataUrl: string;
   width: number;
   height: number;
+}
+
+/**
+ * One optional-content layer (OCG) in the open document.
+ *
+ * `index` is the layer's position in `/OCProperties /OCGs`; it is stable for
+ * the session and is the identity commands take back. Layers are
+ * document-wide: a layer may only paint on some pages, but the panel lists
+ * every OCG in the document, like desktop PDF editors do.
+ */
+export interface LayerView {
+  index: number;
+  name: string;
+  visible: boolean;
+}
+
+/** The document's layer list; `documentId` discards stale responses. */
+export interface LayerListView {
+  documentId: string;
+  layers: LayerView[];
+}
+
+/** The outcome of a visibility, rename or delete action. */
+export interface LayerEditResultView {
+  layers: LayerView[];
+  history: EditHistoryView;
 }
 
 /**
@@ -1170,6 +1199,9 @@ const COMMAND_ERROR_CODES: ReadonlySet<string> = new Set<CommandErrorCode>([
   "unencrypted_output_confirmation_required",
   "signature_invalidation_confirmation_required",
   "read_only_document",
+  "layer_not_found",
+  "layer_name_invalid",
+  "layer_delete_unsupported",
   "attachment_too_large",
   "attachment_not_found",
   "attachment_open_confirmation_required",
@@ -2212,6 +2244,60 @@ export async function eraseInkStroke(
     documentId,
     name,
     strokeIndex,
+  });
+}
+
+/** Lists every optional-content layer in the open document. */
+export async function listLayers(
+  documentId: string,
+): Promise<LayerListView> {
+  return invoke<LayerListView>("list_layers", { documentId });
+}
+
+/**
+ * Shows or hides one layer. The canvas and thumbnails repaint from the
+ * session's layer state; the change is saved with the next save.
+ */
+export async function setLayerVisible(
+  documentId: string,
+  layerIndex: number,
+  visible: boolean,
+): Promise<LayerEditResultView> {
+  return invoke<LayerEditResultView>("set_layer_visible", {
+    documentId,
+    layerIndex,
+    visible,
+  });
+}
+
+/**
+ * Renames one layer. The backend trims the name and rejects blank,
+ * control-containing and over-long names as `layer_name_invalid`.
+ */
+export async function renameLayer(
+  documentId: string,
+  layerIndex: number,
+  name: string,
+): Promise<LayerEditResultView> {
+  return invoke<LayerEditResultView>("rename_layer", {
+    documentId,
+    layerIndex,
+    name,
+  });
+}
+
+/**
+ * Deletes one layer and its content. The UI owns the confirmation prompt.
+ * The backend refuses structures it cannot safely rewrite as
+ * `layer_delete_unsupported`, leaving the document unchanged.
+ */
+export async function deleteLayer(
+  documentId: string,
+  layerIndex: number,
+): Promise<LayerEditResultView> {
+  return invoke<LayerEditResultView>("delete_layer", {
+    documentId,
+    layerIndex,
   });
 }
 

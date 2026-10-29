@@ -2731,6 +2731,132 @@ button {
   line-height: 1.5;
 }
 
+/* Optional-content layer panel: visibility, inline rename and delete. */
+
+.layer-panel {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 244px;
+  max-height: 260px;
+  overflow-y: auto;
+  padding: 10px;
+  box-sizing: border-box;
+  border: 1px solid var(--pdfx-border);
+  border-radius: 9px;
+  background: var(--pdfx-surface);
+  font-size: 12px;
+}
+
+.layer-panel-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.layer-panel-header h2 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.layer-count {
+  color: var(--pdfx-muted);
+}
+
+.layer-items {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.layer-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--pdfx-border);
+}
+
+.layer-item:last-child {
+  padding-bottom: 0;
+  border-bottom: none;
+}
+
+.layer-visibility {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+  cursor: pointer;
+}
+
+.layer-visibility input {
+  flex: none;
+}
+
+.layer-name {
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.layer-actions,
+.layer-rename-actions {
+  display: flex;
+  flex: none;
+  gap: 4px;
+}
+
+.layer-actions button,
+.layer-rename-actions button {
+  padding: 3px 7px;
+  font-size: 11px;
+}
+
+.layer-rename {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+}
+
+.layer-rename-input {
+  min-width: 0;
+  padding: 4px 6px;
+  border: 1px solid var(--pdfx-border-control);
+  border-radius: 5px;
+  background: var(--pdfx-raised);
+  color: inherit;
+  font: inherit;
+}
+
+.layer-empty,
+.layer-loading {
+  margin: 0;
+  color: var(--pdfx-muted);
+  line-height: 1.5;
+}
+
+.layer-readonly {
+  margin: 0;
+  color: var(--pdfx-status-warning);
+  line-height: 1.5;
+}
+
+.layer-error {
+  margin: 0;
+  color: var(--pdfx-status-danger);
+  line-height: 1.5;
+}
+
 /* Annotation column: stamp catalogue above the document-wide list. */
 
 .annotation-column {
@@ -2753,6 +2879,10 @@ button {
 }
 
 .annotation-column .attachment-panel {
+  width: 100%;
+}
+
+.annotation-column .layer-panel {
   width: 100%;
 }
 

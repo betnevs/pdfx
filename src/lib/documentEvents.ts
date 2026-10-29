@@ -43,9 +43,9 @@ export interface DocumentChangedDetail {
    *
    * `"form"` marks a form fill whose overlay already updated from the command
    * result; `"text"`, `"image"`, `"shape"`, `"line"`, `"link"`,
-   * `"annotation"` and `"watermark"` mark the Text Box, Image, Shape,
-   * Line/Arrow, link, text-markup and watermark edits whose command results
-   * returned the new history.
+   * `"annotation"`, `"watermark"` and `"layer"` mark the Text Box, Image,
+   * Shape, Line/Arrow, link, text-markup, watermark and optional-content
+   * layer edits whose command results returned the new history.
    */
   source?:
     | "text"
@@ -55,6 +55,7 @@ export interface DocumentChangedDetail {
     | "link"
     | "annotation"
     | "watermark"
+    | "layer"
     | "form";
 }
 
@@ -104,6 +105,7 @@ export function onDocumentChanged(
         detail.source === "link" ||
         detail.source === "annotation" ||
         detail.source === "watermark" ||
+        detail.source === "layer" ||
         detail.source === "form"
       ) {
         message.source = detail.source;
