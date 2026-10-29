@@ -1350,6 +1350,125 @@ fn two_noto_boxes_on_one_page_do_not_share_a_subset_font() {
 }
 
 #[test]
+fn mixed_styles_keep_the_box_alignment_on_the_line() {
+    let pdf = synthetic::single_line_pdf();
+    let document_id = open_synthetic(&pdf);
+    let mut base = base_style();
+    base.alignment = TextAlignment::Center;
+    let box_id = pdfx_lib::text_edit::create_text_box(
+        document_id.clone(),
+        0,
+        CreateTextBoxRequest {
+            x: 72.0,
+            y: 100.0,
+            width: 200.0,
+            height: 36.0,
+            style: Some(base),
+        },
+    )
+    .expect("create centred Text Box")
+    .target
+    .box_id;
+    apply_text_edit(document_id.clone(), 0, box_id, "ab".to_owned()).expect("type");
+    apply_text_box_selection_style(
+        document_id.clone(),
+        0,
+        box_id,
+        TextRangeView { start: 1, end: 2 },
+        run_style("Times", 24.0, "#c0392b"),
+    )
+    .expect("style the second character");
+
+    let layer = extract_text_layer(document_id.clone(), 0).expect("layer");
+    let index = char_index_of(&layer, "ab");
+    let first = &layer.chars[index];
+    let second = &layer.chars[index + 1];
+    assert!((first.font_size - 16.0).abs() < 0.01);
+    assert!((second.font_size - 24.0).abs() < 0.01);
+    // The mixed-size line is centred as a whole: its advance span is measured
+    // from the first origin to the last origin plus advance.
+    let left = first.origin_x;
+    let right = second.origin_x + second.width;
+    let center = (left + right) / 2.0;
+    assert!(
+        (center - (72.0 + 200.0 / 2.0)).abs() < 0.5,
+        "mixed-style line centre {center} should match the box centre: {first:?} {second:?}"
+    );
+}
+
+#[test]
+fn selecting_the_whole_box_and_emptying_it_resets_runs_without_dangling_ranges() {
+    let pdf = synthetic::single_line_pdf();
+    let document_id = open_synthetic(&pdf);
+    let text = "Whole box";
+    let box_id = styled_text_box(&document_id, text);
+
+    // Selecting every character goes through the same range path as any other
+    // selection; the untouched base text becomes empty, which is the edge the
+    // renderer fills with a space-only subset.
+    let result = apply_text_box_selection_style(
+        document_id.clone(),
+        0,
+        box_id,
+        TextRangeView {
+            start: 0,
+            end: text.chars().count() as u32,
+        },
+        run_style("Times", 22.0, "#c0392b"),
+    )
+    .expect("style all characters");
+    assert_eq!(result.target.text, text);
+    assert_eq!(result.target.runs.len(), 1);
+    assert_eq!(
+        (result.target.runs[0].start, result.target.runs[0].end),
+        (0, text.chars().count() as u32)
+    );
+
+    let layer = extract_text_layer(document_id.clone(), 0).expect("live layer");
+    let index = char_index_of(&layer, text);
+    for character in &layer.chars[index..index + text.chars().count()] {
+        assert!(
+            (character.font_size - 22.0).abs() < 0.01,
+            "every selected character is styled: {character:?}"
+        );
+    }
+    let bytes = save_document_bytes(&document_id).expect("serialize document");
+    let saved = synthetic::pdf_bytes_file("all-text-run", bytes);
+    let reopened = open_synthetic(&saved);
+    let plain = extract_text(reopened.clone(), 0).expect("plain text");
+    assert!(
+        plain.text.ends_with(text),
+        "an all-text run saves and reopens once: {:?}",
+        plain.text
+    );
+
+    // Emptying the box replaces the text, so the run offsets no longer exist
+    // and must be dropped rather than left dangling.
+    apply_text_edit(document_id.clone(), 0, box_id, String::new()).expect("empty the box");
+    assert!(
+        box_runs(&document_id, box_id).is_empty(),
+        "empty text has no runs"
+    );
+    let listed = text_boxes(document_id.clone(), 0)
+        .expect("boxes")
+        .into_iter()
+        .find(|box_view| box_view.box_id == box_id)
+        .expect("box listed");
+    assert!(listed.text.is_empty());
+    // The empty box stays renderable and editable after the runs were reset.
+    let empty_bytes = save_document_bytes(&document_id).expect("serialize empty box");
+    let empty_saved = synthetic::pdf_bytes_file("emptied-run-box", empty_bytes);
+    let empty_reopened = open_synthetic(&empty_saved);
+    assert!(
+        extract_text(empty_reopened, 0)
+            .expect("plain text")
+            .text
+            .ends_with("Original line."),
+        "the empty box adds no text"
+    );
+}
+
+#[test]
 fn undo_and_redo_styled_ranges_reach_past_a_saved_revision() {
     let pdf = synthetic::single_line_pdf();
     let document_id = open_synthetic(&pdf);
