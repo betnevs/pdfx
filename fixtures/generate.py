@@ -88,6 +88,11 @@ def hex_string(value: bytes) -> bytes:
     return b"<" + value.hex().encode("ascii") + b">"
 
 
+def utf16be_hex(text: str) -> bytes:
+    """PDF text string with a UTF-16BE byte-order mark (for non-ASCII names)."""
+    return hex_string(b"\xfe\xff" + text.encode("utf-16-be"))
+
+
 def stream_object(entries: bytes, data: bytes) -> bytes:
     return (
         b"<< " + entries + b" /Length " + str(len(data)).encode("ascii") + b" >>\nstream\n"
@@ -841,6 +846,62 @@ def structure_pdf() -> bytes:
     return build_pdf(objects, root_ref=b"1 0 R", info_ref=b"7 0 R")
 
 
+def layers_pdf() -> bytes:
+    """Two pages with three UTF-16-named optional content groups.
+
+    Page 1 paints a red rectangle for 红色图层, with a blue rectangle for
+    蓝色图层 nested inside the same marked-content block; page 2 paints the
+    red rectangle and a separate green rectangle for 绿色图层. 红色图层 is
+    on by default and spans both pages, 绿色图层 only exists on page 2, and
+    蓝色图层 is off by default.  The marked-content property names are
+    resolved through /Resources /Properties, and both /OCProperties and its
+    /D configuration are indirect objects.
+    """
+    resources = b"<< /Properties << /MC0 10 0 R /MC1 11 0 R /MC2 12 0 R >> >>"
+    page_one_content = (
+        b"/OC /MC0 BDC\n"
+        b"q 1 0 0 rg 72 500 200 100 re f Q\n"
+        b"/OC /MC2 BDC\n"
+        b"q 0 0 1 rg 300 500 200 100 re f Q\n"
+        b"EMC\n"
+        b"EMC\n"
+    )
+    page_two_content = (
+        b"/OC /MC0 BDC\n"
+        b"q 1 0 0 rg 72 500 200 100 re f Q\n"
+        b"EMC\n"
+        b"/OC /MC1 BDC\n"
+        b"q 0 1 0 rg 300 500 200 100 re f Q\n"
+        b"EMC\n"
+    )
+    objects = {
+        1: b"<< /Type /Catalog /Pages 2 0 R /OCProperties 8 0 R >>",
+        2: b"<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>",
+        3: (
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+            b"/Resources " + resources + b" /Contents 4 0 R >>"
+        ),
+        4: stream_object(b"", page_one_content),
+        5: (
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+            b"/Resources " + resources + b" /Contents 6 0 R >>"
+        ),
+        6: stream_object(b"", page_two_content),
+        8: b"<< /OCGs [10 0 R 11 0 R 12 0 R] /D 9 0 R >>",
+        9: (
+            b"<< /Type /OCProperties /ListMode /VisiblePages "
+            b"/Order [10 0 R 11 0 R 12 0 R] /ON [10 0 R 11 0 R] "
+            b"/OFF [12 0 R] /BaseState /OFF "
+            b"/AS [<< /Event /View /Category [/View] /OCGs [10 0 R 11 0 R] >>] >>"
+        ),
+        10: b"<< /Type /OCG /Name " + utf16be_hex("红色图层") + b" >>",
+        11: b"<< /Type /OCG /Name " + utf16be_hex("绿色图层") + b" >>",
+        12: b"<< /Type /OCG /Name " + utf16be_hex("蓝色图层") + b" >>",
+        13: b"<< /Title (PDFX layers fixture) /Author (PDFX QA) >>",
+    }
+    return build_pdf(objects, root_ref=b"1 0 R", info_ref=b"13 0 R")
+
+
 def rotated_pdf() -> bytes:
     pages: List[Tuple[int, int, int]] = [(612, 792, 90), (792, 612, 0), (288, 432, 270)]
     objects: Dict[int, bytes] = {
@@ -973,6 +1034,7 @@ def build_all(large_pages: int) -> Tuple[Dict[str, bytes], List[FixtureSpec]]:
         "signature-field-only.pdf": signature_field_only_pdf(),
         "encrypted-signature-restricted.pdf": encrypted_signature_restricted_pdf(),
         "structure-metadata.pdf": structure_pdf(),
+        "layers.pdf": layers_pdf(),
         f"large-{large_pages}-pages.pdf": large_pdf(large_pages),
         "rotated-mixed-size.pdf": rotated_pdf(),
     }
@@ -1067,6 +1129,14 @@ def build_all(large_pages: int) -> Tuple[Dict[str, bytes], List[FixtureSpec]]:
             "structure",
             "书签、URI 链接、Info/XMP 元数据与内嵌附件。",
             1,
+            True,
+        ),
+        FixtureSpec(
+            "layers.pdf",
+            "layers",
+            "两页三个可选内容组：红色图层跨两页并默认显示，绿色图层仅第二页，"
+            "蓝色图层默认隐藏且嵌套在红色图层的标记内容块中；组名使用 UTF-16 中文。",
+            2,
             True,
         ),
         FixtureSpec(

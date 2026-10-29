@@ -136,6 +136,18 @@
       "description": "书签、URI 链接、Info/XMP 元数据与内嵌附件。"
     },
     {
+      "id": "layers",
+      "category": "layers",
+      "path": "pdfs/layers.pdf",
+      "sha256": "6cea0fde00be514939d2638d2165b6e6e8c80ca2c9b773df290cf88fd2eb4988",
+      "size_bytes": 1672,
+      "page_count": 2,
+      "valid": true,
+      "password": null,
+      "owner_password": null,
+      "description": "两页三个可选内容组：红色图层跨两页并默认显示，绿色图层仅第二页，蓝色图层默认隐藏且嵌套在红色图层的标记内容块中；组名使用 UTF-16 中文。"
+    },
+    {
       "id": "large-500-pages",
       "category": "large",
       "path": "pdfs/large-500-pages.pdf",
