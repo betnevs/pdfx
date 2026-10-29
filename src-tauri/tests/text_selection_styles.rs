@@ -1397,6 +1397,40 @@ fn mixed_styles_keep_the_box_alignment_on_the_line() {
 }
 
 #[test]
+fn a_styled_run_starts_after_the_trailing_space_of_the_previous_run() {
+    let pdf = synthetic::single_line_pdf();
+    let document_id = open_synthetic(&pdf);
+    let box_id = styled_text_box(&document_id, "Selected line.");
+
+    apply_text_box_selection_style(
+        document_id.clone(),
+        0,
+        box_id,
+        TextRangeView { start: 9, end: 13 },
+        run_style("Times", 24.0, "#c0392b"),
+    )
+    .expect("style the second word");
+
+    let layer = extract_text_layer(document_id.clone(), 0).expect("layer");
+    let index = char_index_of(&layer, "Selected line.");
+    let space = &layer.chars[index + 8];
+    let run = &layer.chars[index + 9];
+    assert_eq!(space.text, " ");
+    assert!((run.font_size - 24.0).abs() < 0.01);
+
+    // The styled run is placed at the space's advance, not at the ink edge of
+    // the preceding word. Missing the space's advance makes the space have no
+    // visual effect, so an external extractor such as pdftotext returns
+    // "Selectedline." even though PDFium still reports the space.
+    let space_end = space.origin_x + space.width;
+    assert!(
+        (run.origin_x - space_end).abs() < 0.5,
+        "styled run origin {} should follow the space end {space_end}: {space:?} {run:?}",
+        run.origin_x
+    );
+}
+
+#[test]
 fn selecting_the_whole_box_and_emptying_it_resets_runs_without_dangling_ranges() {
     let pdf = synthetic::single_line_pdf();
     let document_id = open_synthetic(&pdf);
