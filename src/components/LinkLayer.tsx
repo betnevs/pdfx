@@ -323,13 +323,13 @@ export function LinkLayer({
       </div>
 
       {active &&
-        imageTargets.map((target) => (
+        imageTargets.map((target, index) => (
           <button
             key={`image:${target.objectIndex}`}
             type="button"
             className="link-region link-region--image"
             data-testid={`link-image-target-${target.objectIndex}`}
-            aria-label={`页面上第 ${target.objectIndex + 1} 张图片，添加链接`}
+            aria-label={`页面上第 ${index + 1} 张图片，添加链接`}
             title="为这张图片添加链接"
             style={boxStyle(target.rect, pageWidth, pageHeight)}
             onClick={() => openCreate(target)}

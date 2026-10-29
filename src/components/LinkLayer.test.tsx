@@ -281,6 +281,23 @@ describe("LinkLayer", () => {
     expect(sourceImageTargetsMock).toHaveBeenCalledWith("doc-1", 0);
   });
 
+  it("numbers source image targets by image position, not page object index", async () => {
+    sourceImageTargetsMock.mockResolvedValue([
+      { ...scannedImage, objectIndex: 4 },
+      { ...scannedImage, objectIndex: 9 },
+    ]);
+    renderLayer();
+
+    fireEvent.click(screen.getByRole("button", { name: "链接" }));
+
+    expect(await screen.findByTestId("link-image-target-4")).toHaveAccessibleName(
+      "页面上第 1 张图片，添加链接",
+    );
+    expect(screen.getByTestId("link-image-target-9")).toHaveAccessibleName(
+      "页面上第 2 张图片，添加链接",
+    );
+  });
+
   it("creates a link over a source image through the create dialog", async () => {
     sourceImageTargetsMock.mockResolvedValue([scannedImage]);
     createLinkMock.mockResolvedValue({
