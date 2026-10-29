@@ -1,5 +1,3 @@
-import { invoke } from "@tauri-apps/api/core";
-
 /**
  * The JSON manifest published at the user-configured address:
  * `{ "version": "x.y.z", "notes": "...", "downloadUrl": "https://..." }`.
@@ -30,20 +28,10 @@ interface CommandFailure {
 }
 
 /**
- * Performs the only network request in PDFX.
- *
- * Called exclusively from the user's click on "检查更新"; the backend reads
- * the persisted manifest address, makes one GET with a finite timeout and no
- * retries, and returns the parsed result. No document or usage data is sent.
+ * The update commands live in the single Tauri seam, `backend.ts`; they are
+ * re-exported here so the settings panel keeps its updater-focused imports.
  */
-export async function checkForUpdates(): Promise<UpdateCheckResult> {
-  return invoke<UpdateCheckResult>("check_for_updates");
-}
-
-/** Opens the manifest's download page in the system browser. */
-export async function openDownloadPage(url: string): Promise<void> {
-  await invoke<void>("open_download_page", { url });
-}
+export { checkForUpdates, openDownloadPage } from "./backend";
 
 function isCommandFailure(error: unknown): error is CommandFailure {
   return (

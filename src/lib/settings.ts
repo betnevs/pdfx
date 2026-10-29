@@ -1,6 +1,3 @@
-import { invoke } from "@tauri-apps/api/core";
-import { save as saveDialog } from "@tauri-apps/plugin-dialog";
-
 import { applyTheme } from "./theme";
 
 /** Interface language options offered by the settings page. */
@@ -68,30 +65,17 @@ export interface DiagnosticsExport {
   logFiles: number;
 }
 
-/** Reads the persisted settings; missing or corrupt settings return defaults. */
-export async function getSettings(): Promise<Settings> {
-  return invoke<Settings>("get_settings");
-}
-
-/** Persists settings and applies file-association changes on the OS side. */
-export async function updateSettings(settings: Settings): Promise<SettingsUpdateResult> {
-  return invoke<SettingsUpdateResult>("update_settings", { settings });
-}
-
-/** Writes diagnostics to an explicit path chosen by the user. */
-export async function exportDiagnostics(destination: string): Promise<DiagnosticsExport> {
-  return invoke<DiagnosticsExport>("export_diagnostics", { destination });
-}
-
-/** Asks the user where to save the diagnostic bundle. Returns null on cancel. */
-export async function chooseDiagnosticsDestination(): Promise<string | null> {
-  const selection = await saveDialog({
-    title: "导出诊断包",
-    defaultPath: "pdfx-diagnostics.txt",
-    filters: [{ name: "文本", extensions: ["txt"] }],
-  });
-  return typeof selection === "string" ? selection : null;
-}
+/**
+ * The settings commands and dialogs live in the single Tauri seam,
+ * `backend.ts`; they are re-exported here so settings consumers keep importing
+ * one module while the IPC boundary stays centralized.
+ */
+export {
+  chooseDiagnosticsDestination,
+  exportDiagnostics,
+  getSettings,
+  updateSettings,
+} from "./backend";
 
 /**
  * Applies the theme to the document. `system` removes the attribute so the

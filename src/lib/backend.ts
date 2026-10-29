@@ -4,6 +4,13 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 
+import type {
+  DiagnosticsExport,
+  Settings,
+  SettingsUpdateResult,
+} from "./settings";
+import type { UpdateCheckResult } from "./updater";
+
 /** Application identity exposed by the Rust command boundary. */
 export interface AppInfo {
   name: string;
@@ -1266,6 +1273,51 @@ const COMMAND_ERROR_CODES: ReadonlySet<string> = new Set<CommandErrorCode>([
  */
 export async function getAppInfo(): Promise<AppInfo> {
   return invoke<AppInfo>("app_info");
+}
+
+/** Reads the persisted settings; missing or corrupt settings return defaults. */
+export async function getSettings(): Promise<Settings> {
+  return invoke<Settings>("get_settings");
+}
+
+/** Persists settings and applies file-association changes on the OS side. */
+export async function updateSettings(
+  settings: Settings,
+): Promise<SettingsUpdateResult> {
+  return invoke<SettingsUpdateResult>("update_settings", { settings });
+}
+
+/** Writes diagnostics to an explicit path chosen by the user. */
+export async function exportDiagnostics(
+  destination: string,
+): Promise<DiagnosticsExport> {
+  return invoke<DiagnosticsExport>("export_diagnostics", { destination });
+}
+
+/** Asks the user where to save the diagnostic bundle. Returns null on cancel. */
+export async function chooseDiagnosticsDestination(): Promise<string | null> {
+  const selection = await saveDialog({
+    title: "导出诊断包",
+    defaultPath: "pdfx-diagnostics.txt",
+    filters: [{ name: "文本", extensions: ["txt"] }],
+  });
+  return typeof selection === "string" ? selection : null;
+}
+
+/**
+ * Performs the only network request in PDFX.
+ *
+ * Called exclusively from the user's click on "检查更新"; the backend reads
+ * the persisted manifest address, makes one GET with a finite timeout and no
+ * retries, and returns the parsed result. No document or usage data is sent.
+ */
+export async function checkForUpdates(): Promise<UpdateCheckResult> {
+  return invoke<UpdateCheckResult>("check_for_updates");
+}
+
+/** Opens the manifest's download page in the system browser. */
+export async function openDownloadPage(url: string): Promise<void> {
+  await invoke<void>("open_download_page", { url });
 }
 
 /** Opens a native file dialog filtered to PDFs. Returns null when cancelled. */
