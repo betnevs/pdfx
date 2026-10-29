@@ -106,7 +106,7 @@ export function EraserLayer({
       pageIndex,
     });
     if (!hit) {
-      setNotice({ kind: "info", text: "此处没有可擦除的标注" });
+      setNotice({ kind: "info", text: "此处没有可擦除的注释" });
       return;
     }
 
@@ -155,7 +155,7 @@ export function EraserLayer({
           type="button"
           aria-pressed={active}
           disabled={busy}
-          title="单击删除标注；单击墨迹只擦除该笔画，Shift+单击删除整条墨迹"
+          title="单击删除注释；单击墨迹只擦除该笔画，Shift+单击删除整条墨迹"
           onClick={() => {
             setNotice(null);
             setActive((current) => !current);
@@ -183,7 +183,7 @@ export function EraserLayer({
         </label>
         {active && (
           <span className="eraser-toolbar-hint">
-            单击墨迹擦除笔画，Shift+单击删除整条标注
+            单击墨迹擦除笔画，Shift+单击删除整条注释
           </span>
         )}
       </div>
@@ -193,7 +193,7 @@ export function EraserLayer({
           ref={surfaceRef}
           className="eraser-surface"
           data-testid="eraser-surface"
-          aria-label="擦除页面标注"
+          aria-label="擦除页面注释"
           onPointerDown={erase}
           onContextMenu={(event) => event.preventDefault()}
         />

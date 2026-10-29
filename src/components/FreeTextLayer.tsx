@@ -31,7 +31,7 @@ const FONT_SIZE_MAX = 72;
 
 const KIND_LABELS: Record<FreeTextKind, string> = {
   freetext: "自由文本",
-  callout: "标注框",
+  callout: "注释框",
 };
 
 const ALIGN_LABELS: Record<FreeTextAlign, string> = {
@@ -150,7 +150,7 @@ function rectStyle(
 /**
  * Canvas overlay for native free text and callout annotations.
  *
- * Drag with the "自由文本" or "标注框" tool to place a box, then type in the
+ * Drag with the "自由文本" or "注释框" tool to place a box, then type in the
  * inline editor. Double-click (or the toolbar's edit button) reopens the
  * editor; dragging the box moves it and its corner handle resizes it. Every
  * completed gesture and text edit is one unified-history action, and the

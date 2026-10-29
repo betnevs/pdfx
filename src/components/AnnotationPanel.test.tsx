@@ -166,7 +166,7 @@ const callout: AnnotationView = {
   name: "ft-2",
   pageIndex: 1,
   kind: "callout",
-  text: "标注框内容",
+  text: "注释框内容",
   rects: [{ x: 300, y: 100, width: 180, height: 80 }],
   freeText: { kind: "callout", fontSize: 16, align: "center" },
 };
@@ -330,7 +330,7 @@ describe("AnnotationPanel", () => {
     expect(screen.getByText("还没有注释")).toBeInTheDocument();
     expect(
       screen.getByText(
-        "选择页面文字即可添加高亮、下划线、删除线或波浪线；使用页面上的形状工具绘制矩形、椭圆、自由文本或标注框，也可以放置便签、手绘或图章。",
+        "选择页面文字即可添加高亮、下划线、删除线或波浪线；使用页面上的形状工具绘制矩形、椭圆、自由文本或注释框，也可以放置便签、手绘或图章。",
       ),
     ).toBeInTheDocument();
     expect(
@@ -498,10 +498,10 @@ describe("AnnotationPanel", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("Hello · 14 pt · 左对齐")).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "标注框，第 2 页，文本作者" }),
+      screen.getByRole("button", { name: "注释框，第 2 页，文本作者" }),
     ).toBeInTheDocument();
     expect(
-      screen.getByText("标注框内容 · 16 pt · 居中"),
+      screen.getByText("注释框内容 · 16 pt · 居中"),
     ).toBeInTheDocument();
   });
 
@@ -580,7 +580,7 @@ describe("AnnotationPanel", () => {
       if (command === "update_free_text") {
         throw {
           code: "permission_denied",
-          message: "文档权限不允许修改批注",
+          message: "文档权限不允许修改注释",
         };
       }
       throw new Error(`unexpected command: ${command}`);
@@ -597,7 +597,7 @@ describe("AnnotationPanel", () => {
     );
     await waitFor(() =>
       expect(screen.getByRole("alert")).toHaveTextContent(
-        "文档权限不允许修改批注",
+        "文档权限不允许修改注释",
       ),
     );
     expect(onChanged).not.toHaveBeenCalled();

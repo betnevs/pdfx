@@ -5,8 +5,14 @@ import type {
   EditHistoryView,
   LinkMutationView,
   LinkView,
+  SourceImageTargetView,
 } from "../lib/backend";
-import { deleteLink, updateLinkTarget } from "../lib/backend";
+import {
+  createLink,
+  deleteLink,
+  sourceImageTargets,
+  updateLinkTarget,
+} from "../lib/backend";
 import { DOCUMENT_CHANGED_EVENT } from "../lib/documentEvents";
 import { LinkLayer } from "./LinkLayer";
 
@@ -16,11 +22,20 @@ vi.mock("../lib/backend", async (importOriginal) => {
     ...actual,
     updateLinkTarget: vi.fn(),
     deleteLink: vi.fn(),
+    createLink: vi.fn(),
+    sourceImageTargets: vi.fn(),
   };
 });
 
 const updateLinkTargetMock = vi.mocked(updateLinkTarget);
 const deleteLinkMock = vi.mocked(deleteLink);
+const createLinkMock = vi.mocked(createLink);
+const sourceImageTargetsMock = vi.mocked(sourceImageTargets);
+
+const scannedImage: SourceImageTargetView = {
+  objectIndex: 0,
+  rect: { x: 0, y: 0, width: 612, height: 792 },
+};
 
 const dirtyHistory: EditHistoryView = {
   canUndo: true,
@@ -91,6 +106,9 @@ function selectLink(linkId: string) {
 beforeEach(() => {
   updateLinkTargetMock.mockReset();
   deleteLinkMock.mockReset();
+  createLinkMock.mockReset();
+  sourceImageTargetsMock.mockReset();
+  sourceImageTargetsMock.mockResolvedValue([]);
 });
 
 afterEach(() => {
@@ -247,5 +265,107 @@ describe("LinkLayer", () => {
     expect(screen.getByRole("dialog", { name: "编辑链接" })).toBeInTheDocument();
     expect(screen.getByTestId("link-selection")).toBeInTheDocument();
     expect(onLinksChanged).not.toHaveBeenCalled();
+  });
+
+  it("offers source image targets only while the link tool is armed", async () => {
+    sourceImageTargetsMock.mockResolvedValue([scannedImage]);
+    renderLayer();
+
+    expect(
+      screen.queryByTestId("link-image-target-0"),
+    ).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "链接" }));
+
+    const target = await screen.findByTestId("link-image-target-0");
+    expect(target).toHaveAccessibleName("页面上第 1 张图片，添加链接");
+    expect(sourceImageTargetsMock).toHaveBeenCalledWith("doc-1", 0);
+  });
+
+  it("numbers source image targets by image position, not page object index", async () => {
+    sourceImageTargetsMock.mockResolvedValue([
+      { ...scannedImage, objectIndex: 4 },
+      { ...scannedImage, objectIndex: 9 },
+    ]);
+    renderLayer();
+
+    fireEvent.click(screen.getByRole("button", { name: "链接" }));
+
+    expect(await screen.findByTestId("link-image-target-4")).toHaveAccessibleName(
+      "页面上第 1 张图片，添加链接",
+    );
+    expect(screen.getByTestId("link-image-target-9")).toHaveAccessibleName(
+      "页面上第 2 张图片，添加链接",
+    );
+  });
+
+  it("creates a link over a source image through the create dialog", async () => {
+    sourceImageTargetsMock.mockResolvedValue([scannedImage]);
+    createLinkMock.mockResolvedValue({
+      link: { ...urlLink, rects: [scannedImage.rect] },
+      pageIndex: 0,
+      history: dirtyHistory,
+    });
+    const changed = vi.fn();
+    window.addEventListener(DOCUMENT_CHANGED_EVENT, changed);
+    const { onLinksChanged } = renderLayer();
+
+    fireEvent.click(screen.getByRole("button", { name: "链接" }));
+    fireEvent.click(await screen.findByTestId("link-image-target-0"));
+    expect(screen.getByRole("dialog", { name: "添加链接" })).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("链接网址"), {
+      target: { value: "https://example.com/image" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "添加" }));
+
+    await waitFor(() => {
+      expect(createLinkMock).toHaveBeenCalledWith("doc-1", {
+        pageIndex: 0,
+        rects: [scannedImage.rect],
+        target: { kind: "url", url: "https://example.com/image" },
+      });
+    });
+    expect(onLinksChanged).toHaveBeenCalledTimes(1);
+    expect(changed).toHaveBeenCalled();
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+    expect(screen.getByRole("status")).toHaveTextContent("链接已添加");
+    window.removeEventListener(DOCUMENT_CHANGED_EVENT, changed);
+  });
+
+  it("does not fetch source image targets without annotation permission", () => {
+    renderLayer({ canAnnotate: false });
+
+    expect(sourceImageTargetsMock).not.toHaveBeenCalled();
+    expect(
+      screen.queryByTestId("link-image-target-0"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("does not fetch source image targets for a read-only document", () => {
+    renderLayer({ readOnly: true });
+
+    expect(sourceImageTargetsMock).not.toHaveBeenCalled();
+    expect(
+      screen.queryByTestId("link-image-target-0"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("clears source image targets and reports a lookup failure", async () => {
+    sourceImageTargetsMock.mockRejectedValue({
+      code: "internal",
+      message: "boom",
+    });
+    renderLayer();
+
+    fireEvent.click(screen.getByRole("button", { name: "链接" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "无法读取页面图片，请稍后重试。",
+    );
+    expect(
+      screen.queryByTestId("link-image-target-0"),
+    ).not.toBeInTheDocument();
   });
 });

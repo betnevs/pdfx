@@ -7,8 +7,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   addAttachment,
+  checkForUpdates,
   chooseAttachmentDestination,
   chooseAttachmentFile,
+  chooseDiagnosticsDestination,
   choosePageImageDestination,
   choosePdfFile,
   chooseSaveFile,
@@ -21,11 +23,13 @@ import {
   deleteLink,
   deleteAttachment,
   destroyWindow,
+  exportDiagnostics,
   exportFlattenedCopy,
   exportPage,
   extractTextLayer,
   fillFormField,
   formFields,
+  getSettings,
   initialDocumentPath,
   isFullscreen,
   listLinks,
@@ -37,6 +41,7 @@ import {
   onSaveProgress,
   openDocument,
   openDocumentInNewWindow,
+  openDownloadPage,
   openAttachment,
   pageInfo,
   printDocument,
@@ -49,10 +54,12 @@ import {
   setFullscreen,
   setMenuState,
   setWindowTitle,
+  sourceImageTargets,
   toCommandError,
   updateFormField,
   updateFormTextField,
   updateLinkTarget,
+  updateSettings,
 } from "./backend";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -639,6 +646,22 @@ describe("backend command seam", () => {
     });
   });
 
+  it("reads source image link targets from the current page", async () => {
+    const targets = [
+      {
+        objectIndex: 3,
+        rect: { x: 10, y: 20, width: 300, height: 200 },
+      },
+    ];
+    invokeMock.mockResolvedValue(targets);
+
+    await expect(sourceImageTargets("doc-1", 2)).resolves.toEqual(targets);
+    expect(invokeMock).toHaveBeenCalledWith("source_image_targets", {
+      documentId: "doc-1",
+      pageIndex: 2,
+    });
+  });
+
   it("maps form commands to their Tauri command names and camelCase arguments", async () => {
     const field = {
       fieldId: "0:1",
@@ -1020,5 +1043,72 @@ describe("backend command seam", () => {
     ]);
     dispose();
     expect(unlisten).toHaveBeenCalled();
+  });
+});
+
+describe("backend wrappers for settings, diagnostics and updates", () => {
+  beforeEach(() => {
+    invokeMock.mockResolvedValue(undefined);
+  });
+
+  afterEach(() => {
+    invokeMock.mockReset();
+    vi.mocked(saveDialog).mockReset();
+  });
+
+  it("maps settings and diagnostics to their Tauri command names", async () => {
+    const settings = { language: "zh-CN", theme: "system" };
+    invokeMock.mockResolvedValue(settings);
+
+    await expect(getSettings()).resolves.toEqual(settings);
+    expect(invokeMock).toHaveBeenCalledWith("get_settings");
+
+    const updated = { settings, association: null };
+    invokeMock.mockResolvedValue(updated);
+    await expect(updateSettings(settings as never)).resolves.toEqual(updated);
+    expect(invokeMock).toHaveBeenCalledWith("update_settings", { settings });
+
+    const exported = { path: "/tmp/diagnostics.txt", bytes: 1, logFiles: 1 };
+    invokeMock.mockResolvedValue(exported);
+    await expect(exportDiagnostics("/tmp/diagnostics.txt")).resolves.toEqual(
+      exported,
+    );
+    expect(invokeMock).toHaveBeenCalledWith("export_diagnostics", {
+      destination: "/tmp/diagnostics.txt",
+    });
+  });
+
+  it("chooses the diagnostics destination through the save dialog", async () => {
+    vi.mocked(saveDialog).mockResolvedValue("/tmp/pdfx-diagnostics.txt");
+
+    await expect(chooseDiagnosticsDestination()).resolves.toBe(
+      "/tmp/pdfx-diagnostics.txt",
+    );
+    expect(saveDialog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        defaultPath: "pdfx-diagnostics.txt",
+        filters: [{ name: "文本", extensions: ["txt"] }],
+      }),
+    );
+  });
+
+  it("maps update actions to their Tauri command names", async () => {
+    const result = {
+      status: "up_to_date",
+      currentVersion: "0.1.0",
+      version: "0.1.0",
+      notes: null,
+      downloadUrl: "https://example.com/pdfx",
+    };
+    invokeMock.mockResolvedValue(result);
+
+    await expect(checkForUpdates()).resolves.toEqual(result);
+    expect(invokeMock).toHaveBeenCalledWith("check_for_updates");
+
+    invokeMock.mockResolvedValue(undefined);
+    await openDownloadPage("https://example.com/pdfx");
+    expect(invokeMock).toHaveBeenCalledWith("open_download_page", {
+      url: "https://example.com/pdfx",
+    });
   });
 });

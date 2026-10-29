@@ -14,13 +14,32 @@ use pdfx_lib::annotations::TextMarkupRect;
 use pdfx_lib::commands::{
     close_document, extract_text_layer, open_document, CommandErrorCode, TextLayerView,
 };
+use pdfx_lib::image_edit::insert_image;
 use pdfx_lib::links::{
-    create_link, CreateLinkRequest, LinkTarget, LinkView, UpdateLinkTargetRequest,
+    create_link, source_image_targets, CreateLinkRequest, LinkTarget, LinkView,
+    UpdateLinkTargetRequest,
 };
 use pdfx_lib::save::{save_document_with_progress, SaveDocumentRequest};
 use pdfx_lib::text_edit::{redo_text_edit, undo_text_edit};
 use support::synthetic;
 use support::temp::TempDir;
+
+/// A minimal opaque PNG for insertion tests.
+fn solid_png(width: u32, height: u32, color: [u8; 4]) -> Vec<u8> {
+    let mut data = Vec::with_capacity((width * height * 4) as usize);
+    for _ in 0..width * height {
+        data.extend_from_slice(&color);
+    }
+    let mut encoded = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut encoded, width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().expect("PNG header");
+        writer.write_image_data(&data).expect("PNG data");
+    }
+    encoded
+}
 
 fn open_synthetic(pdf: &synthetic::TempPdf) -> String {
     open_document(pdf.path_string(), None)
@@ -1770,5 +1789,104 @@ fn a_url_only_link_save_appends_only_the_pdfium_revision() {
     );
     assert!(!contains(&output_bytes, b"PDFXLinkTarget"));
 
+    close_document(document_id).expect("close source");
+}
+
+#[test]
+fn source_image_targets_cover_a_scanned_page_and_accept_a_saved_link() {
+    let dir = TempDir::new("links-source-image");
+    let document_id = open_document(fixture_path("scanned-image-only"), None)
+        .expect("open the scanned fixture")
+        .document_id;
+
+    let targets = source_image_targets(document_id.clone(), 0).expect("source image targets");
+    assert_eq!(targets.len(), 1, "the scanned page has one image object");
+    assert_eq!(targets[0].object_index, 0);
+    assert_rect_close(
+        &targets[0].rect,
+        &TextMarkupRect {
+            x: 0.0,
+            y: 0.0,
+            width: 612.0,
+            height: 792.0,
+        },
+        "scanned page image",
+    );
+
+    let created = create_link(
+        document_id.clone(),
+        CreateLinkRequest {
+            page_index: 0,
+            rects: vec![targets[0].rect],
+            target: LinkTarget::Url {
+                url: "https://example.com/scan".to_owned(),
+            },
+        },
+    )
+    .expect("link the source image");
+    let created_link = created.link.expect("created link view");
+    assert_eq!(
+        created_link.target,
+        Some(LinkTarget::Url {
+            url: "https://example.com/scan".to_owned(),
+        })
+    );
+
+    let listed = pdfx_lib::links::list_links(document_id.clone()).expect("list links");
+    assert_eq!(listed.len(), 1);
+    assert_rect_close(&listed[0].rects[0], &targets[0].rect, "in-session link");
+
+    let output = dir.path().join("scanned-link.pdf");
+    save_as(&document_id, &output);
+    close_document(document_id).expect("close source");
+
+    let parsed = lopdf::Document::load(&output).expect("lopdf parses the output");
+    let saved = link_annotations(&parsed, 1);
+    assert_eq!(saved.len(), 1, "the image link saves as a /Link annotation");
+
+    let reopened = open_document(output.to_string_lossy().into_owned(), None)
+        .expect("reopen the saved output");
+    let listed = pdfx_lib::links::list_links(reopened.document_id.clone()).expect("list links");
+    assert_eq!(listed.len(), 1, "the saved image link reopens");
+    assert_eq!(
+        listed[0].target,
+        Some(LinkTarget::Url {
+            url: "https://example.com/scan".to_owned(),
+        })
+    );
+    assert_rect_close(&listed[0].rects[0], &targets[0].rect, "reopened link");
+    let targets_after =
+        source_image_targets(reopened.document_id.clone(), 0).expect("source targets after reopen");
+    assert_eq!(targets_after.len(), 1, "the linked image stays selectable");
+    close_document(reopened.document_id).expect("close reopened");
+}
+
+#[test]
+fn images_inserted_in_this_session_are_not_source_image_targets() {
+    let dir = TempDir::new("links-source-image-insert");
+    let document_id = open_document(fixture_path("scanned-image-only"), None)
+        .expect("open the scanned fixture")
+        .document_id;
+    let before = source_image_targets(document_id.clone(), 0).expect("targets before insert");
+    assert_eq!(before.len(), 1);
+
+    let image_path = dir.path().join("overlay.png");
+    std::fs::write(&image_path, solid_png(64, 32, [20, 60, 200, 255]))
+        .expect("write inserted image");
+    insert_image(
+        document_id.clone(),
+        0,
+        image_path.to_string_lossy().into_owned(),
+    )
+    .expect("insert an image");
+
+    let after = source_image_targets(document_id.clone(), 0).expect("targets after insert");
+    assert_eq!(
+        after.len(),
+        1,
+        "the session image is excluded from source targets"
+    );
+    assert_eq!(after[0].object_index, 0);
+    assert_rect_close(&after[0].rect, &before[0].rect, "source image after insert");
     close_document(document_id).expect("close source");
 }

@@ -55,7 +55,7 @@ const callout: AnnotationView = {
   ...plain,
   name: "ft-2",
   kind: "callout",
-  text: "标注框",
+  text: "注释框",
   rects: [{ x: 320, y: 100, width: 160, height: 80 }],
   freeText: { kind: "callout", fontSize: 16, align: "center" },
 };
@@ -198,7 +198,7 @@ describe("FreeTextLayer creation", () => {
 
   it("places a callout box and honours size, colour, alignment and opacity", async () => {
     renderLayer();
-    fireEvent.click(screen.getByRole("button", { name: "标注框" }));
+    fireEvent.click(screen.getByRole("button", { name: "注释框" }));
     fireEvent.change(screen.getByLabelText("文本字号"), {
       target: { value: "20" },
     });
@@ -238,14 +238,14 @@ describe("FreeTextLayer creation", () => {
   it("reports the command error when placement is refused", async () => {
     createMock.mockRejectedValue({
       code: "permission_denied",
-      message: "文档权限不允许修改批注",
+      message: "文档权限不允许修改注释",
     });
     renderLayer();
     fireEvent.click(screen.getByRole("button", { name: "自由文本" }));
     draw({ x: 100, y: 200 }, { x: 300, y: 260 });
     await waitFor(() =>
       expect(screen.getByRole("alert")).toHaveTextContent(
-        "文档权限不允许修改批注",
+        "文档权限不允许修改注释",
       ),
     );
   });
@@ -301,7 +301,7 @@ describe("FreeTextLayer editing", () => {
   it("keeps the editor open and shows the error when saving is refused", async () => {
     updateMock.mockRejectedValue({
       code: "permission_denied",
-      message: "文档权限不允许修改批注",
+      message: "文档权限不允许修改注释",
     });
     renderLayer({ annotations: [plain], selectedAnnotation: plain });
     fireEvent.click(screen.getByRole("button", { name: "编辑文本" }));
@@ -311,7 +311,7 @@ describe("FreeTextLayer editing", () => {
     fireEvent.click(screen.getByRole("button", { name: "保存文本" }));
     await waitFor(() =>
       expect(screen.getByRole("alert")).toHaveTextContent(
-        "文档权限不允许修改批注",
+        "文档权限不允许修改注释",
       ),
     );
     expect(screen.getByLabelText("自由文本编辑器")).toBeInTheDocument();
@@ -374,7 +374,7 @@ describe("FreeTextLayer transforms", () => {
   it("reports a refused transform and leaves the box unchanged", async () => {
     transformMock.mockRejectedValue({
       code: "permission_denied",
-      message: "文档权限不允许修改批注",
+      message: "文档权限不允许修改注释",
     });
     renderLayer({ annotations: [plain], selectedAnnotation: plain });
     const hit = screen.getByTestId("free-text-hit-ft-1");
@@ -383,7 +383,7 @@ describe("FreeTextLayer transforms", () => {
     fireEvent.pointerUp(hit, { clientX: 200, clientY: 250 });
     await waitFor(() =>
       expect(screen.getByRole("alert")).toHaveTextContent(
-        "文档权限不允许修改批注",
+        "文档权限不允许修改注释",
       ),
     );
   });

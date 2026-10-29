@@ -1,11 +1,14 @@
-import { useState, type CSSProperties } from "react";
+import { useEffect, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 
 import {
+  createLink,
   deleteLink,
+  sourceImageTargets,
   updateLinkTarget,
   type LinkTarget,
   type LinkView,
+  type SourceImageTargetView,
 } from "../lib/backend";
 import { notifyDocumentChanged } from "../lib/documentEvents";
 import {
@@ -87,6 +90,10 @@ export function LinkLayer({
   const [busy, setBusy] = useState(false);
   const [dialogError, setDialogError] = useState<string | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
+  const [imageTargets, setImageTargets] = useState<SourceImageTargetView[]>([]);
+  const [createTarget, setCreateTarget] = useState<SourceImageTargetView | null>(
+    null,
+  );
 
   const editable = canAnnotate && !readOnly;
   const pageLinks = links.filter((link) => link.pageIndex === pageIndex);
@@ -97,6 +104,35 @@ export function LinkLayer({
   const unsupportedText = selected?.unsupported
     ? linkUnsupportedText(selected.unsupported)
     : null;
+
+  useEffect(() => {
+    if (!active || !editable) {
+      setImageTargets([]);
+      setCreateTarget(null);
+      return;
+    }
+    let cancelled = false;
+    setImageTargets([]);
+    setCreateTarget(null);
+    sourceImageTargets(documentId, pageIndex)
+      .then((targets) => {
+        if (!cancelled) {
+          setImageTargets(targets);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setImageTargets([]);
+          setNotice({
+            kind: "error",
+            text: "无法读取页面图片，请稍后重试。",
+          });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [active, editable, documentId, pageIndex]);
 
   if (!editable) {
     return (
@@ -130,11 +166,19 @@ export function LinkLayer({
       setSelectedId(null);
       setDialogOpen(false);
       setDialogError(null);
+      setImageTargets([]);
+      setCreateTarget(null);
     }
   }
 
   function select(link: LinkView) {
     setSelectedId(link.id);
+    setNotice(null);
+    setDialogError(null);
+  }
+
+  function openCreate(target: SourceImageTargetView) {
+    setCreateTarget(target);
     setNotice(null);
     setDialogError(null);
   }
@@ -175,6 +219,30 @@ export function LinkLayer({
       setSelectedId(result.link?.id ?? null);
       setDialogOpen(false);
       setNotice({ kind: "info", text: "链接已更新" });
+      onLinksChanged();
+      notifyDocumentChanged({ documentId, pageIndex, source: "link" });
+    } catch (error) {
+      setDialogError(linkErrorText(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function submitNewTarget(target: LinkTarget) {
+    if (!createTarget || busy) {
+      return;
+    }
+    setBusy(true);
+    setDialogError(null);
+    setNotice(null);
+    try {
+      await createLink(documentId, {
+        pageIndex,
+        rects: [createTarget.rect],
+        target,
+      });
+      setCreateTarget(null);
+      setNotice({ kind: "info", text: "链接已添加" });
       onLinksChanged();
       notifyDocumentChanged({ documentId, pageIndex, source: "link" });
     } catch (error) {
@@ -255,6 +323,20 @@ export function LinkLayer({
       </div>
 
       {active &&
+        imageTargets.map((target, index) => (
+          <button
+            key={`image:${target.objectIndex}`}
+            type="button"
+            className="link-region link-region--image"
+            data-testid={`link-image-target-${target.objectIndex}`}
+            aria-label={`页面上第 ${index + 1} 张图片，添加链接`}
+            title="为这张图片添加链接"
+            style={boxStyle(target.rect, pageWidth, pageHeight)}
+            onClick={() => openCreate(target)}
+          />
+        ))}
+
+      {active &&
         pageLinks.map((link) =>
           link.rects.map((rect, index) => (
             <button
@@ -283,6 +365,25 @@ export function LinkLayer({
             style={boxStyle(rect, pageWidth, pageHeight)}
           />
         ))}
+
+      {createTarget &&
+        createPortal(
+          <LinkTargetDialog
+            mode="create"
+            pageCount={pageCount}
+            initialTarget={null}
+            busy={busy}
+            error={dialogError}
+            onCancel={() => {
+              if (!busy) {
+                setCreateTarget(null);
+                setDialogError(null);
+              }
+            }}
+            onSubmit={(target) => void submitNewTarget(target)}
+          />,
+          document.body,
+        )}
 
       {dialogOpen &&
         selected &&

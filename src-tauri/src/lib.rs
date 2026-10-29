@@ -135,6 +135,7 @@ pub fn run() {
             annotations::delete_annotation,
             annotations::erase_ink_stroke,
             links::list_links,
+            links::source_image_targets,
             links::create_link,
             links::update_link_target,
             links::delete_link,

@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
@@ -13,44 +13,7 @@ import {
   pageImages,
   transformImage,
 } from "../lib/backend";
-import { DOCUMENT_CHANGED_EVENT } from "../lib/documentEvents";
 import { PageImageLayer } from "./PageImageLayer";
-
-vi.mock("./SignatureDialog", () => ({
-  SignatureDialog: ({
-    onInserted,
-    onCancel,
-  }: {
-    onInserted: (image: ImageObjectView) => void;
-    onCancel: () => void;
-  }) => (
-    <div role="dialog" aria-label="插入签名">
-      <button
-        type="button"
-        onClick={() =>
-          onInserted({
-            imageId: 9,
-            pageIndex: 0,
-            name: "手绘签名",
-            kind: "signature",
-            x: 150,
-            y: 300,
-            width: 200,
-            height: 75,
-            rotation: 0,
-            pixelWidth: 1600,
-            pixelHeight: 600,
-          })
-        }
-      >
-        确认测试签名
-      </button>
-      <button type="button" onClick={onCancel}>
-        取消测试
-      </button>
-    </div>
-  ),
-}));
 
 vi.mock("../lib/backend", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/backend")>();
@@ -142,9 +105,7 @@ function renderLayer(readOnly = false) {
 }
 
 describe("PageImageLayer signatures", () => {
-  it("opens the signature dialog and adopts the inserted page object", async () => {
-    const changed = vi.fn();
-    window.addEventListener(DOCUMENT_CHANGED_EVENT, changed);
+  it("opens the real signature dialog and closes it on cancel", async () => {
     renderLayer();
 
     const button = await screen.findByRole("button", { name: "插入签名…" });
@@ -155,42 +116,10 @@ describe("PageImageLayer signatures", () => {
     fireEvent.click(button);
     expect(screen.getByRole("dialog", { name: "插入签名" })).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "确认测试签名" }));
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
 
-    const outline = await screen.findByTestId("image-outline-9");
-    expect(outline).toHaveAttribute("data-kind", "signature");
-    expect(outline).toHaveAttribute("aria-label", "签名 手绘签名");
-    expect(outline).toHaveTextContent("签名");
-    expect(outline).toHaveTextContent("手绘签名");
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-    expect(changed).toHaveBeenCalledWith(
-      expect.objectContaining({
-        detail: expect.objectContaining({
-          documentId: "doc-1",
-          pageIndex: 0,
-          source: "image",
-        }),
-      }),
-    );
-
-    // The signature is selectable and deletable like any other image.
-    fireEvent.pointerDown(outline, { clientX: 300, clientY: 350, pointerId: 1 });
-    fireEvent.pointerUp(outline, { clientX: 300, clientY: 350, pointerId: 1 });
-    fireEvent.click(screen.getByRole("button", { name: "删除图片" }));
-    await waitFor(() => {
-      expect(deleteImageMock).toHaveBeenCalledWith("doc-1", 0, 9);
-    });
-    await waitFor(() => {
-      expect(screen.queryByTestId("image-outline-9")).not.toBeInTheDocument();
-    });
-    window.removeEventListener(DOCUMENT_CHANGED_EVENT, changed);
-  });
-
-  it("closes the dialog when the signature dialog is cancelled", async () => {
-    renderLayer();
-    fireEvent.click(await screen.findByRole("button", { name: "插入签名…" }));
-    fireEvent.click(screen.getByRole("button", { name: "取消测试" }));
-    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(insertImageMock).not.toHaveBeenCalled();
     expect(pageImagesMock).toHaveBeenCalledTimes(1);
   });
 

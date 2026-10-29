@@ -50,6 +50,6 @@ export function annotationLabel(annotation: AnnotationView): string {
     case "freetext":
       return "自由文本";
     case "callout":
-      return "标注框";
+      return "注释框";
   }
 }

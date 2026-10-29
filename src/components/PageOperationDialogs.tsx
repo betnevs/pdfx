@@ -156,7 +156,7 @@ export function DeletePageDialog({
       >
         <h2 id="delete-page-title">删除页面</h2>
         <p className="password-hint">
-          确定删除第 {pageNumber} 页（共 {pageCount} 页）吗？删除后可以用撤销恢复该页及其批注和表单。
+          确定删除第 {pageNumber} 页（共 {pageCount} 页）吗？删除后可以用撤销恢复该页及其注释和表单。
         </p>
         <div className="password-actions">
           <button
