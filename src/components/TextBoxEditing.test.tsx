@@ -6,9 +6,11 @@ import { DOCUMENT_CHANGED_EVENT } from "../lib/documentEvents";
 import type {
   EditHistoryView,
   TextBoxFontView,
+  TextBoxStyleView,
   TextBoxTargetView,
   TextCharView,
   TextLayerView,
+  TextRangeView,
 } from "../lib/backend";
 import { PageTextLayer } from "./PageTextLayer";
 
@@ -121,6 +123,7 @@ function makeBox(overrides: Partial<TextBoxTargetView> = {}): TextBoxTargetView 
     rotation: 0,
     autoHeight: true,
     created: true,
+    runs: [],
     ...overrides,
   };
 }
@@ -1038,5 +1041,330 @@ describe("PageTextLayer text boxes", () => {
       boxId: 7,
       style: { fontFamily: "Helvetica", bold: true },
     });
+  });
+});
+
+async function openFirstBoxEditor(): Promise<HTMLTextAreaElement> {
+  await renderLayer();
+  await enterBoxMode();
+  const outline = await screen.findByRole("group", { name: "文本框 1" });
+  fireEvent.doubleClick(outline);
+  const textarea = await screen.findByRole("textbox", { name: "文字内容" });
+  return textarea as HTMLTextAreaElement;
+}
+
+function selectText(textarea: HTMLTextAreaElement, start: number, end: number) {
+  textarea.setSelectionRange(start, end);
+  fireEvent.select(textarea);
+}
+
+describe("PageTextLayer selection text styles", () => {
+  it("styles only the selected characters and keeps the selection", async () => {
+    const store = [makeBox({ boxId: 5, text: "Hello world" })];
+    const selectionCalls: Record<string, unknown>[] = [];
+    const wholeCalls: Record<string, unknown>[] = [];
+
+    mockCommands({
+      text_boxes: () => [...store],
+      apply_text_box_style: (args) => {
+        wholeCalls.push(args);
+        return {
+          pageIndex: 2,
+          target: store[0],
+          font: null,
+          history: editedHistory,
+        };
+      },
+      apply_text_box_selection_style: (args) => {
+        selectionCalls.push(args);
+        const style = args.style as TextBoxStyleView;
+        const range = args.range as TextRangeView;
+        store[0] = {
+          ...store[0],
+          runs: [
+            {
+              start: range.start,
+              end: range.end,
+              fontFamily: style.fontFamily,
+              fontSize: style.fontSize,
+              bold: style.bold,
+              italic: style.italic,
+              underline: style.underline,
+              color: style.color,
+            },
+          ],
+        };
+        return {
+          pageIndex: 2,
+          target: store[0],
+          font: {
+            originalFamily: "Times",
+            family: "Noto Sans SC",
+            fallback: true,
+            reason: "缺少所需字形",
+          },
+          history: editedHistory,
+        };
+      },
+    });
+
+    const textarea = await openFirstBoxEditor();
+    selectText(textarea, 6, 11);
+
+    expect(
+      await screen.findByText("已选择 5 个字符，样式更改只应用到所选范围。"),
+    ).toBeInTheDocument();
+    // Alignment and deletion stay whole-box actions, so they are not offered
+    // for a selected range.
+    expect(screen.queryByRole("button", { name: "居中" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "删除文本框" }),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "粗体" }));
+    await waitFor(() => expect(selectionCalls).toHaveLength(1));
+    expect(wholeCalls).toHaveLength(0);
+    expect(selectionCalls[0]).toEqual({
+      documentId: "doc-1",
+      pageIndex: 2,
+      boxId: 5,
+      range: { start: 6, end: 11 },
+      style: {
+        fontFamily: "Helvetica",
+        fontSize: 16,
+        bold: true,
+        italic: false,
+        underline: false,
+        color: "#000000",
+        alignment: "left",
+      },
+    });
+    expect(
+      await screen.findByText("Times 无法用于新文字，已改用 Noto Sans SC：缺少所需字形"),
+    ).toBeInTheDocument();
+    expect(textarea.selectionStart).toBe(6);
+    expect(textarea.selectionEnd).toBe(11);
+
+    // The panel now reads the new run, and a second change still targets the
+    // same range because the selection survived the control click.
+    fireEvent.click(screen.getByRole("button", { name: "斜体" }));
+    await waitFor(() => expect(selectionCalls).toHaveLength(2));
+    expect(selectionCalls[1]).toMatchObject({
+      range: { start: 6, end: 11 },
+      style: { bold: true, italic: true },
+    });
+  });
+
+  it("styles the whole box when the open editor has no selection", async () => {
+    const store = [makeBox({ boxId: 5, text: "Hello world" })];
+    const wholeCalls: Record<string, unknown>[] = [];
+    const selectionCalls: Record<string, unknown>[] = [];
+
+    mockCommands({
+      text_boxes: () => [...store],
+      apply_text_box_style: (args) => {
+        wholeCalls.push(args);
+        const style = args.style as TextBoxStyleView;
+        store[0] = {
+          ...store[0],
+          fontFamily: style.fontFamily,
+          fontSize: style.fontSize,
+          bold: style.bold,
+          italic: style.italic,
+          underline: style.underline,
+          color: style.color,
+          alignment: style.alignment,
+        };
+        return {
+          pageIndex: 2,
+          target: store[0],
+          font: null,
+          history: editedHistory,
+        };
+      },
+      apply_text_box_selection_style: (args) => {
+        selectionCalls.push(args);
+        return {
+          pageIndex: 2,
+          target: store[0],
+          font: null,
+          history: editedHistory,
+        };
+      },
+    });
+
+    await openFirstBoxEditor();
+
+    expect(
+      screen.getByText("未选择文字；样式更改将应用到整个文本框。"),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "居中" })).toBeInTheDocument();
+
+    fireEvent.change(screen.getByRole("combobox", { name: "字体" }), {
+      target: { value: "Times" },
+    });
+    await waitFor(() => expect(wholeCalls).toHaveLength(1));
+    expect(selectionCalls).toHaveLength(0);
+    expect(wholeCalls[0]).toMatchObject({
+      documentId: "doc-1",
+      pageIndex: 2,
+      boxId: 5,
+      style: { fontFamily: "Times", fontSize: 16, alignment: "left" },
+    });
+    expect(await screen.findByTestId("text-box-editor")).toBeInTheDocument();
+  });
+
+  it("shows the run's own style where a selection starts inside it", async () => {
+    const store = [
+      makeBox({
+        boxId: 5,
+        text: "Mixed styles",
+        runs: [
+          {
+            start: 0,
+            end: 5,
+            fontFamily: "Times",
+            fontSize: 24,
+            bold: true,
+            italic: false,
+            underline: false,
+            color: "#c0392b",
+          },
+        ],
+      }),
+    ];
+    const selectionCalls: Record<string, unknown>[] = [];
+
+    mockCommands({
+      text_boxes: () => [...store],
+      apply_text_box_selection_style: (args) => {
+        selectionCalls.push(args);
+        return {
+          pageIndex: 2,
+          target: store[0],
+          font: null,
+          history: editedHistory,
+        };
+      },
+    });
+
+    const textarea = await openFirstBoxEditor();
+    // Starts in the 24pt run and continues into the base style.
+    selectText(textarea, 0, 7);
+
+    expect(screen.getByRole("combobox", { name: "字体" })).toHaveValue("Times");
+    expect(screen.getByRole("spinbutton", { name: "字号" })).toHaveValue(24);
+    expect(screen.getByRole("button", { name: "粗体" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(
+      screen.getByText("所选范围包含多种样式；控件显示起始字符的样式。"),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "斜体" }));
+    await waitFor(() => expect(selectionCalls).toHaveLength(1));
+    expect(selectionCalls[0]).toMatchObject({
+      range: { start: 0, end: 7 },
+      style: {
+        fontFamily: "Times",
+        fontSize: 24,
+        bold: true,
+        italic: true,
+        color: "#c0392b",
+      },
+    });
+  });
+
+  it("converts a multi-line textarea selection to code points", async () => {
+    const store = [makeBox({ boxId: 5, text: "A😀B\nC" })];
+    const selectionCalls: Record<string, unknown>[] = [];
+
+    mockCommands({
+      text_boxes: () => [...store],
+      apply_text_box_selection_style: (args) => {
+        selectionCalls.push(args);
+        return {
+          pageIndex: 2,
+          target: store[0],
+          font: null,
+          history: editedHistory,
+        };
+      },
+    });
+
+    const textarea = await openFirstBoxEditor();
+    // UTF-16 offsets: the emoji occupies two units, so "B\nC" starts at 3.
+    selectText(textarea, 3, 6);
+    expect(
+      screen.getByText("已选择 3 个字符，样式更改只应用到所选范围。"),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "下划线" }));
+    await waitFor(() => expect(selectionCalls).toHaveLength(1));
+    expect(selectionCalls[0]).toMatchObject({
+      range: { start: 2, end: 5 },
+      style: { underline: true },
+    });
+  });
+
+  it("disables the panel while a selection style is pending", async () => {
+    const store = [makeBox({ boxId: 5, text: "Hello world" })];
+    let resolveStyle: (value: unknown) => void = () => {};
+
+    mockCommands({
+      text_boxes: () => [...store],
+      apply_text_box_selection_style: () =>
+        new Promise((resolve) => {
+          resolveStyle = resolve;
+        }),
+    });
+
+    const textarea = await openFirstBoxEditor();
+    selectText(textarea, 0, 5);
+    fireEvent.click(screen.getByRole("button", { name: "粗体" }));
+
+    await waitFor(() =>
+      expect(screen.getByRole("spinbutton", { name: "字号" })).toBeDisabled(),
+    );
+    expect(screen.getByRole("button", { name: "应用" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "取消" })).toBeDisabled();
+
+    await act(async () => {
+      resolveStyle({
+        pageIndex: 2,
+        target: store[0],
+        font: null,
+        history: editedHistory,
+      });
+    });
+    await waitFor(() =>
+      expect(screen.getByRole("spinbutton", { name: "字号" })).not.toBeDisabled(),
+    );
+    expect(screen.getByRole("button", { name: "应用" })).not.toBeDisabled();
+  });
+
+  it("reports a rejected selection style without closing the editor", async () => {
+    const store = [makeBox({ boxId: 5, text: "Hello world" })];
+    const selectionCalls: Record<string, unknown>[] = [];
+
+    mockCommands({
+      text_boxes: () => [...store],
+      apply_text_box_selection_style: (args) => {
+        selectionCalls.push(args);
+        return Promise.reject(new Error("选区无效"));
+      },
+    });
+
+    const textarea = await openFirstBoxEditor();
+    selectText(textarea, 0, 5);
+    fireEvent.click(screen.getByRole("button", { name: "粗体" }));
+
+    await waitFor(() => expect(selectionCalls).toHaveLength(1));
+    expect(await screen.findByRole("alert")).toHaveTextContent("选区无效");
+    expect(screen.getByTestId("text-box-editor")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "粗体" })).not.toBeDisabled(),
+    );
   });
 });

@@ -209,6 +209,36 @@ export interface TextLayerView {
 }
 
 /**
+ * A half-open character range inside a Text Box.
+ *
+ * Offsets count Unicode code points, not UTF-16 code units. The textarea
+ * reports UTF-16 offsets, so the canvas converts before calling the command.
+ */
+export interface TextRangeView {
+  start: number;
+  end: number;
+}
+
+/**
+ * One styled range inside a Text Box.
+ *
+ * The style values are the effective ones after font resolution: a range that
+ * could not keep its requested family is reported with the bundled family it
+ * actually renders with. `alignment` stays a box-level property.
+ */
+export interface TextBoxRunView {
+  start: number;
+  end: number;
+  fontFamily: string;
+  fontSize: number;
+  bold: boolean;
+  italic: boolean;
+  underline: boolean;
+  /** Fill colour as `#rrggbb`. */
+  color: string;
+}
+
+/**
  * Initial state of a Text Box when the user clicks existing text.
  *
  * Content and style come from the original Text Object; geometry is in
@@ -237,6 +267,13 @@ export interface TextBoxTargetView {
   autoHeight: boolean;
   /** Created by the Text Box tool rather than being an original Text Object. */
   created: boolean;
+  /**
+   * Styled character ranges, sorted and non-overlapping.
+   *
+   * The base style fields above apply to every character outside these runs;
+   * an empty array means the whole box uses the base style.
+   */
+  runs: TextBoxRunView[];
 }
 
 /** Horizontal alignment of the lines inside a Text Box. */
@@ -1594,6 +1631,29 @@ export async function applyTextBoxStyle(
     documentId,
     pageIndex,
     boxId,
+    style,
+  });
+}
+
+/**
+ * Styles only `range` inside a Text Box; the rest keeps the box's base style.
+ *
+ * `range` is in Unicode code points. The backend validates it, renders the
+ * selected characters with their own font, size and colour, and records the
+ * change as one undoable document action.
+ */
+export async function applyTextBoxSelectionStyle(
+  documentId: string,
+  pageIndex: number,
+  boxId: number,
+  range: TextRangeView,
+  style: TextBoxStyleView,
+): Promise<TextBoxEditResultView> {
+  return invoke<TextBoxEditResultView>("apply_text_box_selection_style", {
+    documentId,
+    pageIndex,
+    boxId,
+    range,
     style,
   });
 }

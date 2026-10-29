@@ -83,6 +83,7 @@ pub fn run() {
             text_edit::create_text_box,
             text_edit::text_boxes,
             text_edit::apply_text_box_style,
+            text_edit::apply_text_box_selection_style,
             text_edit::transform_text_box,
             text_edit::edit_history,
             text_edit::undo_text_edit,

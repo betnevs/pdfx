@@ -90,6 +90,7 @@ const target: TextBoxTargetView = {
   rotation: 0,
   autoHeight: false,
   created: false,
+  runs: [],
 };
 
 type CommandHandler = (args: Record<string, unknown>) => unknown;
