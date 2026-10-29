@@ -200,6 +200,11 @@ impl BundledFont {
             }
         }
         let bytes = inject_cmap(&bytes, &char_to_gid);
+        // PDFium's content generator deduplicates fonts by BaseFont name, so
+        // every subset needs its own name or the second subset on a page would
+        // be rendered through the first subset's CID map.
+        let tag = subset_tag(weight, &bytes, &cid_to_gid, &unicode_by_cid);
+        let bytes = rename_font(&bytes, &tag);
 
         Ok(FontSubset {
             bytes,
@@ -379,64 +384,120 @@ impl BundledFontCache {
 /// Both a Windows BMP format 4 subtable and a Windows UCS-4 format 12 subtable
 /// are written so supplementary-plane characters stay reachable too.
 fn inject_cmap(font: &[u8], mapping: &BTreeMap<char, u16>) -> Vec<u8> {
-    if mapping.is_empty() || font.len() < 12 {
+    if mapping.is_empty() {
         return font.to_vec();
+    }
+    let Some(records) = table_records(font) else {
+        return font.to_vec();
+    };
+    if records.iter().any(|record| record.tag == *b"cmap") {
+        return font.to_vec();
+    }
+    let cmap = build_cmap(mapping);
+    rebuild_font(font, &[(b"cmap", cmap)]).unwrap_or_else(|| font.to_vec())
+}
+
+/// One table directory entry of an sfnt program.
+struct TableRecord {
+    tag: [u8; 4],
+    /// Read by the checksum regression test; the rewriter computes fresh
+    /// checksums for the tables it writes.
+    #[allow(dead_code)]
+    checksum: u32,
+    offset: usize,
+    length: usize,
+}
+
+/// The table directory of an sfnt program.
+fn table_records(font: &[u8]) -> Option<Vec<TableRecord>> {
+    if font.len() < 12 {
+        return None;
     }
     let num_tables = u16::from_be_bytes([font[4], font[5]]) as usize;
     if font.len() < 12 + num_tables * 16 {
-        return font.to_vec();
+        return None;
     }
-    let mut records = Vec::with_capacity(num_tables + 1);
+    let mut records = Vec::with_capacity(num_tables);
     for index in 0..num_tables {
         let base = 12 + index * 16;
-        let tag = font[base..base + 4].to_vec();
+        let mut tag = [0u8; 4];
+        tag.copy_from_slice(&font[base..base + 4]);
         let checksum = u32::from_be_bytes(font[base + 4..base + 8].try_into().expect("4 bytes"));
         let offset =
             u32::from_be_bytes(font[base + 8..base + 12].try_into().expect("4 bytes")) as usize;
         let length =
             u32::from_be_bytes(font[base + 12..base + 16].try_into().expect("4 bytes")) as usize;
-        if offset + length > font.len() {
-            return font.to_vec();
+        if offset.checked_add(length)? > font.len() {
+            return None;
         }
-        records.push((tag, checksum, offset, length));
+        records.push(TableRecord {
+            tag,
+            checksum,
+            offset,
+            length,
+        });
     }
-    if records.iter().any(|(tag, ..)| tag.as_slice() == b"cmap") {
-        return font.to_vec();
+    Some(records)
+}
+
+/// Rewrites an sfnt program with the given tables replaced or added.
+///
+/// Existing table data is copied byte for byte; the directory checksums and
+/// `head.checkSumAdjustment` are recomputed so the program stays internally
+/// consistent. Returns `None` if the input is not a well-formed sfnt program.
+fn rebuild_font(font: &[u8], replacements: &[(&[u8; 4], Vec<u8>)]) -> Option<Vec<u8>> {
+    let records = table_records(font)?;
+    let mut tables: Vec<([u8; 4], Vec<u8>)> = records
+        .into_iter()
+        .map(|record| {
+            (
+                record.tag,
+                font[record.offset..record.offset + record.length].to_vec(),
+            )
+        })
+        .collect();
+    for (tag, data) in replacements {
+        match tables.iter_mut().find(|(existing, _)| existing == *tag) {
+            Some((_, slot)) => *slot = data.clone(),
+            None => tables.push((**tag, data.clone())),
+        }
     }
+    tables.sort_by_key(|table| table.0);
 
-    let cmap = build_cmap(mapping);
-    records.push((b"cmap".to_vec(), table_checksum(&cmap), 0, cmap.len()));
-    records.sort_by(|left, right| left.0.cmp(&right.0));
-
-    let count = records.len();
+    let count = tables.len();
+    let count_u16 = u16::try_from(count).ok()?;
     let power = (count as f64).log2().floor() as u16;
     let search_range = 16 * (1u16 << power);
     let header_len = 12 + 16 * count;
 
     let mut out = Vec::new();
     out.extend_from_slice(&font[0..4]);
-    out.extend_from_slice(&(count as u16).to_be_bytes());
+    out.extend_from_slice(&count_u16.to_be_bytes());
     out.extend_from_slice(&search_range.to_be_bytes());
     out.extend_from_slice(&power.to_be_bytes());
-    out.extend_from_slice(&(16 * count as u16 - search_range).to_be_bytes());
+    out.extend_from_slice(&(16 * count_u16 - search_range).to_be_bytes());
 
-    let mut layout: Vec<(&[u8], usize, usize, u32)> = Vec::with_capacity(count);
+    let mut layout: Vec<(&[u8; 4], usize, usize, u32)> = Vec::with_capacity(count);
     let mut data = Vec::new();
-    for (tag, checksum, offset, length) in &records {
+    for (tag, table) in &tables {
         let start = header_len + data.len();
-        if tag.as_slice() == b"cmap" {
-            data.extend_from_slice(&cmap);
+        let checksum = if tag == b"head" && table.len() >= 12 {
+            // The head directory checksum is defined with this field zeroed.
+            let mut head = table.clone();
+            head[8..12].fill(0);
+            table_checksum(&head)
         } else {
-            data.extend_from_slice(&font[*offset..*offset + *length]);
-        }
-        layout.push((tag, start, *length, *checksum));
+            table_checksum(table)
+        };
+        data.extend_from_slice(table);
+        layout.push((tag, start, table.len(), checksum));
         while data.len() % 4 != 0 {
             data.push(0);
         }
     }
     let mut head_offset = None;
     for (tag, offset, length, checksum) in &layout {
-        out.extend_from_slice(tag);
+        out.extend_from_slice(*tag);
         out.extend_from_slice(&checksum.to_be_bytes());
         out.extend_from_slice(&(*offset as u32).to_be_bytes());
         out.extend_from_slice(&(*length as u32).to_be_bytes());
@@ -446,7 +507,7 @@ fn inject_cmap(font: &[u8], mapping: &BTreeMap<char, u16>) -> Vec<u8> {
     }
     out.extend_from_slice(&data);
 
-    // Adding a table changes the whole-font checksum, so update
+    // Changing a table changes the whole-font checksum, so update
     // head.checkSumAdjustment (the directory checksum for `head` is defined
     // with that field zeroed, so it stays valid).
     if let Some(head) = head_offset {
@@ -456,7 +517,157 @@ fn inject_cmap(font: &[u8], mapping: &BTreeMap<char, u16>) -> Vec<u8> {
             out[head + 8..head + 12].copy_from_slice(&adjustment.to_be_bytes());
         }
     }
-    out
+    Some(out)
+}
+
+/// Appends a per-subset suffix to the font's PostScript name.
+///
+/// PDFium's page content generator deduplicates fonts by `(BaseFont, type)`,
+/// not by font handle (`CPDF_PageObjectHolder::FontData`). Every subset PDFX
+/// embeds from Noto Sans SC would otherwise share `/BaseFont
+/// (NotoSansSC-Thin)`, so the second subset on a page would be written with the
+/// first subset's resource name and its characters would be read through the
+/// wrong CID map. A unique PostScript name keeps each subset its own resource.
+fn rename_font(font: &[u8], suffix: &str) -> Vec<u8> {
+    let Some(records) = table_records(font) else {
+        return font.to_vec();
+    };
+    let Some(record) = records.iter().find(|record| record.tag == *b"name") else {
+        return font.to_vec();
+    };
+    let Some(table) =
+        rewrite_name_table(&font[record.offset..record.offset + record.length], suffix)
+    else {
+        return font.to_vec();
+    };
+    rebuild_font(font, &[(b"name", table)]).unwrap_or_else(|| font.to_vec())
+}
+
+/// Rewrites every PostScript-name (name ID 6) record with `suffix` appended.
+fn rewrite_name_table(table: &[u8], suffix: &str) -> Option<Vec<u8>> {
+    if table.len() < 6 {
+        return None;
+    }
+    let count = u16::from_be_bytes([table[2], table[3]]) as usize;
+    let storage = u16::from_be_bytes([table[4], table[5]]) as usize;
+    if 6 + count.checked_mul(12)? > table.len() || storage > table.len() {
+        return None;
+    }
+
+    struct Record {
+        platform: u16,
+        encoding: u16,
+        language: u16,
+        name_id: u16,
+        text: Vec<u8>,
+    }
+    let mut records = Vec::with_capacity(count);
+    for index in 0..count {
+        let base = 6 + index * 12;
+        let platform = u16::from_be_bytes([table[base], table[base + 1]]);
+        let encoding = u16::from_be_bytes([table[base + 2], table[base + 3]]);
+        let language = u16::from_be_bytes([table[base + 4], table[base + 5]]);
+        let name_id = u16::from_be_bytes([table[base + 6], table[base + 7]]);
+        let length = u16::from_be_bytes([table[base + 8], table[base + 9]]) as usize;
+        let offset = u16::from_be_bytes([table[base + 10], table[base + 11]]) as usize;
+        let start = storage.checked_add(offset)?;
+        let text = table.get(start..start.checked_add(length)?)?.to_vec();
+        let text = if name_id == 6 {
+            append_name_suffix(&text, platform, suffix)?
+        } else {
+            text
+        };
+        records.push(Record {
+            platform,
+            encoding,
+            language,
+            name_id,
+            text,
+        });
+    }
+
+    let string_offset = 6 + records.len() * 12;
+    let mut directory = Vec::with_capacity(records.len() * 12);
+    let mut strings: Vec<u8> = Vec::new();
+    let mut offsets: BTreeMap<Vec<u8>, u16> = BTreeMap::new();
+    for record in &records {
+        let offset = match offsets.get(&record.text) {
+            Some(offset) => *offset,
+            None => {
+                let offset = u16::try_from(strings.len()).ok()?;
+                strings.extend_from_slice(&record.text);
+                offsets.insert(record.text.clone(), offset);
+                offset
+            }
+        };
+        let length = u16::try_from(record.text.len()).ok()?;
+        directory.extend_from_slice(&record.platform.to_be_bytes());
+        directory.extend_from_slice(&record.encoding.to_be_bytes());
+        directory.extend_from_slice(&record.language.to_be_bytes());
+        directory.extend_from_slice(&record.name_id.to_be_bytes());
+        directory.extend_from_slice(&length.to_be_bytes());
+        directory.extend_from_slice(&offset.to_be_bytes());
+    }
+
+    let mut out = Vec::with_capacity(string_offset + strings.len());
+    out.extend_from_slice(&0u16.to_be_bytes());
+    out.extend_from_slice(&u16::try_from(records.len()).ok()?.to_be_bytes());
+    out.extend_from_slice(&u16::try_from(string_offset).ok()?.to_be_bytes());
+    out.extend_from_slice(&directory);
+    out.extend_from_slice(&strings);
+    Some(out)
+}
+
+/// Returns `text` with `-{suffix}` appended in the record's own encoding.
+fn append_name_suffix(text: &[u8], platform: u16, suffix: &str) -> Option<Vec<u8>> {
+    let suffix = format!("-{suffix}");
+    if platform == 0 || platform == 3 {
+        if !text.len().is_multiple_of(2) {
+            return None;
+        }
+        let units: Vec<u16> = text
+            .chunks_exact(2)
+            .map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]))
+            .collect();
+        let mut name = String::from_utf16(&units).ok()?;
+        name.push_str(&suffix);
+        Some(
+            name.encode_utf16()
+                .flat_map(u16::to_be_bytes)
+                .collect::<Vec<u8>>(),
+        )
+    } else {
+        let mut name = text.to_vec();
+        name.extend_from_slice(suffix.as_bytes());
+        Some(name)
+    }
+}
+
+/// A stable tag that differs whenever the subset's font data or CID mapping
+/// differs, so distinct subsets never share a BaseFont name.
+fn subset_tag(
+    weight: u16,
+    font: &[u8],
+    cid_to_gid: &[u16],
+    unicode_by_cid: &BTreeMap<u16, char>,
+) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut eat = |bytes: &[u8]| {
+        for byte in bytes {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    };
+    eat(&weight.to_be_bytes());
+    eat(font);
+    for gid in cid_to_gid {
+        eat(&gid.to_be_bytes());
+    }
+    for (cid, character) in unicode_by_cid {
+        eat(&cid.to_be_bytes());
+        eat(&u32::from(*character).to_be_bytes());
+    }
+    format!("{hash:016x}")
 }
 
 fn build_cmap(mapping: &BTreeMap<char, u16>) -> Vec<u8> {
@@ -546,4 +757,68 @@ fn table_checksum(data: &[u8]) -> u32 {
         sum = sum.wrapping_add(u32::from_be_bytes(word));
     }
     sum
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn postscript_name(bytes: &[u8]) -> String {
+        let face = ttf_parser::Face::parse(bytes, 0).expect("subset parses");
+        face.names()
+            .into_iter()
+            .find(|name| name.name_id == 6 && name.is_unicode())
+            .and_then(|name| name.to_string())
+            .expect("subset has a Unicode PostScript name")
+    }
+
+    #[test]
+    fn bundled_subsets_get_unique_stable_postscript_names() {
+        let font = noto_sans_sc();
+        let first = font.subset("中文", WEIGHT_REGULAR).expect("subset first");
+        let second = font.subset("文字", WEIGHT_REGULAR).expect("subset second");
+        let first_name = postscript_name(&first.bytes);
+        let second_name = postscript_name(&second.bytes);
+        assert!(
+            first_name.starts_with("NotoSansSC-Thin-"),
+            "name keeps the stem: {first_name}"
+        );
+        assert_ne!(
+            first_name, second_name,
+            "distinct subsets must not share a BaseFont"
+        );
+        assert_eq!(
+            first_name,
+            postscript_name(&font.subset("中文", WEIGHT_REGULAR).expect("repeat").bytes),
+            "the same subset always gets the same name"
+        );
+    }
+
+    #[test]
+    fn renamed_subsets_keep_a_valid_sfnt_checksum() {
+        let subset = noto_sans_sc()
+            .subset("中文", WEIGHT_REGULAR)
+            .expect("subset");
+        let records = table_records(&subset.bytes).expect("subset is an sfnt program");
+        for record in records {
+            let data = &subset.bytes[record.offset..record.offset + record.length];
+            let computed = if record.tag == *b"head" {
+                let mut head = data.to_vec();
+                head[8..12].fill(0);
+                table_checksum(&head)
+            } else {
+                table_checksum(data)
+            };
+            assert_eq!(
+                computed, record.checksum,
+                "checksum for table {:?}",
+                record.tag
+            );
+        }
+        assert_eq!(
+            table_checksum(&subset.bytes),
+            0xB1B0_AFBA,
+            "whole-font checksum matches head.checkSumAdjustment"
+        );
+    }
 }

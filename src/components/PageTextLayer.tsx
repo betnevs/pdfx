@@ -10,6 +10,7 @@ import {
 import { createPortal } from "react-dom";
 
 import {
+  applyTextBoxSelectionStyle,
   applyTextBoxStyle,
   applyTextEdit,
   createInkAnnotation,
@@ -31,6 +32,7 @@ import {
   type AnnotationView,
   type CommandError,
   type EditHistoryView,
+  type FontUsageView,
   type InkPoint,
   type LinkTarget,
   type TextBoxFontView,
@@ -39,6 +41,7 @@ import {
   type TextLayerView,
   type TextMarkupKind,
   type TextMarkupRect,
+  type TextRangeView,
 } from "../lib/backend";
 import { notifyDocumentChanged, onDocumentChanged } from "../lib/documentEvents";
 import { linkErrorText } from "../lib/linkTarget";
@@ -128,6 +131,40 @@ const MIN_NOTE_SIZE = 12;
 const DEFAULT_INK_COLOR = "#c62828";
 const DEFAULT_INK_OPACITY = 80;
 const DEFAULT_INK_LINE_WIDTH = 3;
+
+/** The one Chinese hint the canvas shows when a font falls back. */
+function fontFallbackNotice(font: FontUsageView | null): Notice | null {
+  if (!font?.fallback) {
+    return null;
+  }
+  return {
+    kind: "info",
+    text: `${font.originalFamily} 无法用于新文字，已改用 ${font.family}${font.reason ? `：${font.reason}` : ""}`,
+  };
+}
+
+/**
+ * Converts a textarea selection to the code-point range runs use.
+ *
+ * The DOM counts UTF-16 code units while the backend counts Unicode scalar
+ * values, so a run after an emoji would be off by one without this conversion.
+ * A collapsed selection returns `null`, which means "style the whole box".
+ */
+function codePointRange(
+  text: string,
+  start: number,
+  end: number,
+): TextRangeView | null {
+  const unitStart = Math.max(0, Math.min(start, end, text.length));
+  const unitEnd = Math.min(text.length, Math.max(start, end));
+  if (unitStart === unitEnd) {
+    return null;
+  }
+  return {
+    start: [...text.slice(0, unitStart)].length,
+    end: [...text.slice(0, unitEnd)].length,
+  };
+}
 
 export interface PageTextLayerProps {
   documentId: string;
@@ -408,6 +445,12 @@ export function PageTextLayer({
   );
   const [boxBusy, setBoxBusy] = useState(false);
   const [editor, setEditor] = useState<EditorState | null>(null);
+  // Textarea selection offsets in UTF-16 units, or null when the caret is
+  // collapsed. They are converted to code points at the command boundary.
+  const [editorSelection, setEditorSelection] = useState<{
+    start: number;
+    end: number;
+  } | null>(null);
   const [history, setHistory] = useState<EditHistoryView | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
@@ -577,11 +620,21 @@ export function PageTextLayer({
     textarea.style.height = `${textarea.scrollHeight}px`;
   }, [editor]);
 
+  // A selection belongs to one editor session: closing the editor or opening
+  // another box must not carry its offsets into a different text.
+  useEffect(() => {
+    setEditorSelection(null);
+  }, [editor?.status === "editing" ? editor.target.boxId : null]);
+
   const layer = state.status === "ready" ? state.layer : null;
   const structure = useMemo(() => (layer ? buildTextLayer(layer.chars) : null), [layer]);
   const selectedBox =
     boxMode && selectedBoxId !== null
       ? (boxes.find((box) => box.boxId === selectedBoxId) ?? null)
+      : null;
+  const editorRange =
+    editor?.status === "editing" && editorSelection
+      ? codePointRange(editor.draft, editorSelection.start, editorSelection.end)
       : null;
 
   if (state.status === "loading") {
@@ -739,14 +792,7 @@ export function PageTextLayer({
         busy: false,
         error: null,
       });
-      setNotice(
-        result.font?.fallback
-          ? {
-              kind: "info",
-              text: `${result.font.originalFamily} 无法用于新文字，已改用 ${result.font.family}${result.font.reason ? `：${result.font.reason}` : ""}`,
-            }
-          : null,
-      );
+      setNotice(fontFallbackNotice(result.font));
       notifyDocumentChanged({ documentId, pageIndex, source: "text" });
     } catch (error) {
       setNotice({ kind: "error", text: toCommandError(error).message });
@@ -811,12 +857,80 @@ export function PageTextLayer({
           item.boxId === result.target.boxId ? result.target : item,
         ),
       );
+      setNotice(fontFallbackNotice(result.font));
       notifyDocumentChanged({ documentId, pageIndex, source: "text" });
     } catch (error) {
       setNotice({ kind: "error", text: toCommandError(error).message });
     } finally {
       setBoxBusy(false);
     }
+  }
+
+  // Styles the open editor: a selected range keeps its own run style while an
+  // empty selection restyles the whole box. Both are one undoable action.
+  async function applyEditorStyle(
+    style: TextBoxStyleView,
+    range: TextRangeView | null,
+  ) {
+    if (!editor || editor.status !== "editing" || editor.busy) {
+      return;
+    }
+    const current = editor;
+    const rawSelection = editorSelection;
+    setEditor({ ...current, busy: true, error: null });
+    setNotice(null);
+    try {
+      const result = range
+        ? await applyTextBoxSelectionStyle(
+            documentId,
+            pageIndex,
+            current.target.boxId,
+            range,
+            style,
+          )
+        : await applyTextBoxStyle(
+            documentId,
+            pageIndex,
+            current.target.boxId,
+            style,
+          );
+      setHistory(result.history);
+      setSelectedBoxId(result.target.boxId);
+      setBoxes((currentBoxes) =>
+        currentBoxes.map((item) =>
+          item.boxId === result.target.boxId ? result.target : item,
+        ),
+      );
+      setEditor((open) =>
+        open?.status === "editing"
+          ? { ...open, target: result.target, busy: false, error: null }
+          : open,
+      );
+      if (range && rawSelection) {
+        // A control may have taken focus; the text did not change, so the
+        // textarea's offsets still address the characters just styled.
+        textareaRef.current?.setSelectionRange(
+          rawSelection.start,
+          rawSelection.end,
+        );
+      }
+      setNotice(fontFallbackNotice(result.font));
+      notifyDocumentChanged({ documentId, pageIndex, source: "text" });
+    } catch (error) {
+      setEditor((open) =>
+        open?.status === "editing"
+          ? { ...open, busy: false, error: toCommandError(error).message }
+          : open,
+      );
+    }
+  }
+
+  function trackEditorSelection(textarea: HTMLTextAreaElement) {
+    setEditorSelection(
+      textarea.selectionStart === textarea.selectionEnd
+        ? null
+        : { start: textarea.selectionStart, end: textarea.selectionEnd },
+    );
   }
 
   async function deleteSelectedBox() {
@@ -943,14 +1057,7 @@ export function PageTextLayer({
       if (boxMode) {
         setSelectedBoxId(current.target.boxId);
       }
-      setNotice(
-        result.font?.fallback
-          ? {
-              kind: "info",
-              text: `${result.font.originalFamily} 无法用于新文字，已改用 ${result.font.family}${result.font.reason ? `：${result.font.reason}` : ""}`,
-            }
-          : null,
-      );
+      setNotice(fontFallbackNotice(result.font));
       notifyDocumentChanged({ documentId, pageIndex, source: "text" });
     } catch (error) {
       setEditor({
@@ -2025,7 +2132,19 @@ export function PageTextLayer({
         </div>
       )}
 
-      {boxMode && selectedBox && editor?.status !== "editing" && (
+      {boxMode && editor?.status === "editing" && (
+        <TextBoxStylePanel
+          target={editor.target}
+          fonts={fonts}
+          busy={editor.busy}
+          editing
+          selection={editorRange}
+          onChange={(style, range) => void applyEditorStyle(style, range)}
+          onDelete={() => void removeEditor()}
+        />
+      )}
+
+      {boxMode && editor?.status !== "editing" && selectedBox && (
         <TextBoxStylePanel
           target={selectedBox}
           fonts={fonts}
@@ -2075,9 +2194,15 @@ export function PageTextLayer({
               lineHeight: 1.2,
               color: editor.target.color,
             }}
-            onChange={(event) =>
-              setEditor({ ...editor, draft: event.target.value, error: null })
-            }
+            onChange={(event) => {
+              setEditor({
+                ...editor,
+                draft: event.currentTarget.value,
+                error: null,
+              });
+              trackEditorSelection(event.currentTarget);
+            }}
+            onSelect={(event) => trackEditorSelection(event.currentTarget)}
             onKeyDown={(event) => {
               if (event.key === "Escape") {
                 event.preventDefault();

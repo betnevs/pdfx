@@ -266,6 +266,45 @@ pub(crate) struct TextBoxStyle {
     pub(crate) alignment: TextAlignment,
 }
 
+/// One styled character range inside a Text Box.
+///
+/// Offsets are Unicode scalar values into the box text, the same unit the
+/// frontend converts its textarea selection to. Runs are kept sorted,
+/// non-overlapping and merged when adjacent ranges share a style; text not
+/// covered by a run uses the box's base style.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct TextBoxRun {
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+    pub(crate) style: TextBoxStyle,
+}
+
+/// A character range in a Text Box, as the selection style command receives it.
+///
+/// Offsets count Unicode scalar values, not UTF-16 code units: a selection that
+/// spans an emoji or other astral character counts it once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextRangeView {
+    pub start: u32,
+    pub end: u32,
+}
+
+/// A styled range as the frontend sees it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextBoxRunView {
+    pub start: u32,
+    pub end: u32,
+    pub font_family: String,
+    pub font_size: f32,
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+    /// Fill colour as `#rrggbb`.
+    pub color: String,
+}
+
 impl TextBoxStyle {
     fn default_box() -> Self {
         Self {
@@ -383,6 +422,10 @@ pub struct TextBoxTargetView {
     /// True when this Text Box was created by the Text Box tool rather than
     /// being an original Text Object. Created boxes may be empty.
     pub created: bool,
+    /// Styled character ranges inside `text`, sorted by start offset. Empty
+    /// when the whole box uses the base style above.
+    #[serde(default)]
+    pub runs: Vec<TextBoxRunView>,
 }
 
 /// A request to create an empty Text Box on a page.
@@ -506,6 +549,7 @@ pub(crate) struct RecordSnapshot {
     pub(crate) text: String,
     pub(crate) layout: Option<BoxLayout>,
     pub(crate) style: Option<TextBoxStyle>,
+    pub(crate) runs: Vec<TextBoxRun>,
     pub(crate) created: bool,
     pub(crate) deleted: bool,
     /// Position in the page's record vector, so redo can re-insert a box that
@@ -706,6 +750,9 @@ pub(crate) struct TextBoxRecord {
     /// Some when the box uses a chosen built-in style. `None` means a legacy
     /// Text Object keeps its original font token.
     pub(crate) style: Option<TextBoxStyle>,
+    /// Styled character ranges on top of the base style. Stored sorted and
+    /// non-overlapping; only styled boxes (with `layout` and `style`) use them.
+    pub(crate) runs: Vec<TextBoxRun>,
     /// Created by the Text Box tool rather than resolved from existing text.
     pub(crate) created: bool,
     /// Deleted boxes stay in the record list as tombstones so undo can
@@ -727,6 +774,7 @@ impl TextBoxRecord {
             text: self.text.clone(),
             layout: self.layout.clone(),
             style: self.style.clone(),
+            runs: self.runs.clone(),
             created: self.created,
             deleted: self.deleted,
             record_index,
@@ -741,6 +789,7 @@ impl TextBoxRecord {
         self.text = snapshot.text.clone();
         self.layout = snapshot.layout.clone();
         self.style = snapshot.style.clone();
+        self.runs = snapshot.runs.clone();
         self.created = snapshot.created;
         self.deleted = snapshot.deleted;
     }
@@ -754,6 +803,7 @@ impl TextBoxRecord {
             text: snapshot.text.clone(),
             layout: snapshot.layout.clone(),
             style: snapshot.style.clone(),
+            runs: snapshot.runs.clone(),
             created: snapshot.created,
             deleted: snapshot.deleted,
         }
@@ -996,6 +1046,23 @@ fn first_text_metadata(
     Ok((font_family, font_size, color))
 }
 
+fn run_views(record: &TextBoxRecord) -> Vec<TextBoxRunView> {
+    record
+        .runs
+        .iter()
+        .map(|run| TextBoxRunView {
+            start: run.start as u32,
+            end: run.end as u32,
+            font_family: run.style.font_family.clone(),
+            font_size: run.style.font_size,
+            bold: run.style.bold,
+            italic: run.style.italic,
+            underline: run.style.underline,
+            color: run.style.color_hex(),
+        })
+        .collect()
+}
+
 fn target_from_record(
     layer: &crate::commands::TextLayerView,
     layer_raw_indices: &[usize],
@@ -1055,6 +1122,7 @@ fn target_from_record(
             rotation: layout.rotation,
             auto_height: layout.auto_height,
             created: record.created,
+            runs: run_views(record),
         });
     }
 
@@ -1125,6 +1193,7 @@ fn target_from_record(
         // text-layer height.
         auto_height: true,
         created: record.created,
+        runs: run_views(record),
     })
 }
 
@@ -1228,6 +1297,7 @@ fn target_for(
         text,
         layout: None,
         style: None,
+        runs: Vec::new(),
         created: false,
         deleted: false,
     };
@@ -1655,6 +1725,341 @@ struct BoxRenderStyle {
     render_mode: PdfPageTextRenderMode,
     underline: bool,
     alignment: TextAlignment,
+}
+
+/// The concrete rendering attributes of one style segment.
+#[derive(Clone, Copy)]
+struct SegmentStyle {
+    token: PdfFontToken,
+    font_size: f32,
+    color: PdfColor,
+    underline: bool,
+}
+
+/// One wrapped line as (character, style index) pairs, where index 0 is the
+/// box's base style and `index + 1` is the corresponding run.
+type StyledLine = Vec<(char, usize)>;
+
+/// Width of a span measured piece by piece with each character's own font.
+fn span_width(
+    document: &PdfDocument<'static>,
+    span: &[(char, usize)],
+    styles: &[SegmentStyle],
+) -> Option<f32> {
+    let mut total = 0.0;
+    let mut index = 0;
+    while index < span.len() {
+        let style_index = span[index].1;
+        let mut text = String::new();
+        while index < span.len() && span[index].1 == style_index {
+            text.push(span[index].0);
+            index += 1;
+        }
+        total += measure_with_token(
+            document,
+            styles[style_index].token,
+            styles[style_index].font_size,
+            &text,
+        )?;
+    }
+    Some(total)
+}
+
+fn span_fits(
+    document: &PdfDocument<'static>,
+    span: &[(char, usize)],
+    width: f32,
+    styles: &[SegmentStyle],
+) -> bool {
+    span_width(document, span, styles)
+        .map(|measured| measured <= width + 0.01)
+        .unwrap_or(true)
+}
+
+fn break_long_styled_word(
+    document: &PdfDocument<'static>,
+    lines: &mut Vec<StyledLine>,
+    current: &mut StyledLine,
+    word: &[(char, usize)],
+    width: f32,
+    styles: &[SegmentStyle],
+) {
+    for character in word {
+        let mut candidate = current.clone();
+        candidate.push(*character);
+        if !current.is_empty() && !span_fits(document, &candidate, width, styles) {
+            lines.push(std::mem::take(current));
+        }
+        current.push(*character);
+    }
+}
+
+fn styled_line_or_space(line: StyledLine) -> StyledLine {
+    // PDFium text objects cannot hold an empty string; a single space
+    // preserves a blank line.
+    if line.is_empty() {
+        vec![(' ', 0)]
+    } else {
+        line
+    }
+}
+
+/// Greedy word wrap over styled characters.
+///
+/// The word and character-break rules mirror [`wrap_text`], but every width is
+/// measured with the font and size of the character being measured, so a run
+/// with a larger font occupies its real advance and the line still wraps at the
+/// box width.
+fn wrap_styled(
+    document: &PdfDocument<'static>,
+    text: &str,
+    char_styles: &[usize],
+    width: f32,
+    styles: &[SegmentStyle],
+) -> Vec<StyledLine> {
+    let mut paragraphs: Vec<StyledLine> = Vec::new();
+    let mut paragraph: StyledLine = Vec::new();
+    for (index, character) in text.chars().enumerate() {
+        if character == '\n' {
+            paragraphs.push(std::mem::take(&mut paragraph));
+        } else {
+            paragraph.push((character, char_styles[index]));
+        }
+    }
+    paragraphs.push(paragraph);
+
+    let mut lines: Vec<StyledLine> = Vec::new();
+    for paragraph in paragraphs {
+        if paragraph.is_empty() {
+            lines.push(vec![(' ', 0)]);
+            continue;
+        }
+
+        // Split on spaces exactly like `str::split(' ')`: empty words between
+        // consecutive spaces are kept, and the separator keeps its own style.
+        let mut words: Vec<StyledLine> = Vec::new();
+        let mut separators: Vec<(char, usize)> = Vec::new();
+        let mut word: StyledLine = Vec::new();
+        for (character, style_index) in paragraph {
+            if character == ' ' {
+                words.push(std::mem::take(&mut word));
+                separators.push((character, style_index));
+            } else {
+                word.push((character, style_index));
+            }
+        }
+        words.push(word);
+
+        let mut current: StyledLine = Vec::new();
+        for (word_index, word) in words.iter().enumerate() {
+            let candidate = if current.is_empty() {
+                word.clone()
+            } else {
+                let mut candidate = current.clone();
+                candidate.push(separators[word_index - 1]);
+                candidate.extend(word.iter().copied());
+                candidate
+            };
+            if span_fits(document, &candidate, width, styles)
+                || (current.is_empty() && word.is_empty())
+            {
+                current = candidate;
+                continue;
+            }
+            if !current.is_empty() {
+                lines.push(std::mem::take(&mut current));
+            }
+            if span_fits(document, word, width, styles) {
+                current = word.clone();
+            } else {
+                break_long_styled_word(document, &mut lines, &mut current, word, width, styles);
+            }
+        }
+        lines.push(styled_line_or_space(current));
+    }
+
+    while lines.len() > 1
+        && lines
+            .last()
+            .is_some_and(|line| line.iter().all(|(character, _)| character.is_whitespace()))
+    {
+        lines.pop();
+    }
+    if lines.is_empty() {
+        lines.push(vec![(' ', 0)]);
+    }
+    lines
+}
+
+/// Emits the page objects for one box whose lines contain styled segments.
+///
+/// The line rules extend the uniform renderer: a line's height is 1.2 times
+/// its largest font size and its baseline sits 0.8 times that size below the
+/// line top, so mixed sizes never overlap the next line. Each segment is its
+/// own text object (plus its own underline path) placed at its measured
+/// advance; text extraction therefore returns the original character order.
+fn build_styled_box_objects(
+    document: &mut PdfDocument<'static>,
+    geometry: &DisplayGeometry,
+    layout: &BoxLayout,
+    alignment: TextAlignment,
+    styles: &[SegmentStyle],
+    lines: &[StyledLine],
+    height: f32,
+) -> Result<Vec<PdfPageObject<'static>>, CommandError> {
+    let theta = layout.rotation.to_radians();
+    let alpha = (geometry.rotation() as f32 - layout.rotation).to_radians();
+    let (sin_alpha, cos_alpha) = alpha.sin_cos();
+    let mut objects = Vec::new();
+    let mut line_top = 0.0;
+
+    for line in lines {
+        let mut segments: Vec<(usize, String)> = Vec::new();
+        for (character, style_index) in line {
+            match segments.last_mut() {
+                Some((index, text)) if index == style_index => text.push(*character),
+                _ => segments.push((*style_index, character.to_string())),
+            }
+        }
+        if segments.is_empty() {
+            continue;
+        }
+
+        // PDFium drops whitespace-only text objects from text extraction. A
+        // space can become its own segment when two differently styled ranges
+        // meet, so attach such segments to the next text object (or the
+        // previous one at end of line) to keep copy/extract output identical
+        // to the box content.
+        let mut merged: Vec<(usize, String)> = Vec::with_capacity(segments.len());
+        let mut pending = String::new();
+        for (style_index, text) in segments {
+            if text.chars().all(char::is_whitespace) {
+                pending.push_str(&text);
+                continue;
+            }
+            let text = if pending.is_empty() {
+                text
+            } else {
+                let mut combined = std::mem::take(&mut pending);
+                combined.push_str(&text);
+                combined
+            };
+            merged.push((style_index, text));
+        }
+        if !pending.is_empty() {
+            match merged.last_mut() {
+                Some((_, text)) => text.push_str(&pending),
+                None => merged.push((0, pending)),
+            }
+        }
+        let segments = merged;
+
+        let widths: Vec<f32> = segments
+            .iter()
+            .map(|(index, text)| {
+                measure_with_token(
+                    document,
+                    styles[*index].token,
+                    styles[*index].font_size,
+                    text,
+                )
+                .unwrap_or(0.0)
+                .max(0.0)
+            })
+            .collect();
+        let line_width: f32 = widths.iter().sum();
+        let line_size = segments
+            .iter()
+            .map(|(index, _)| styles[*index].font_size)
+            .fold(0.0, f32::max);
+        let line_height = line_size * 1.2;
+        let offset = match alignment {
+            TextAlignment::Left => 0.0,
+            TextAlignment::Center => ((layout.width - line_width) / 2.0).max(0.0),
+            TextAlignment::Right => (layout.width - line_width).max(0.0),
+        };
+        let local_y = line_top + line_size * 0.8;
+        let visible = line_top + line_height <= height + 0.01;
+        let mut cursor = 0.0;
+
+        for ((style_index, text), width) in segments.iter().zip(widths.iter()) {
+            let style = styles[*style_index];
+            let (local_x, local_y_rotated) = rotate_local(offset + cursor, local_y, theta);
+            let (user_x, user_y) =
+                geometry.point_inverse(layout.x + local_x, layout.y + local_y_rotated);
+
+            let mut object = PdfPageTextObject::new(
+                document,
+                text,
+                style.token,
+                PdfPoints::new(style.font_size),
+            )
+            .map_err(|error| {
+                CommandError::new(
+                    CommandErrorCode::Internal,
+                    format!("could not create Text Box text: {error:?}"),
+                )
+            })?;
+            object.set_fill_color(style.color).map_err(|error| {
+                CommandError::new(
+                    CommandErrorCode::Internal,
+                    format!("could not set the Text Box colour: {error:?}"),
+                )
+            })?;
+            let render_mode = if visible {
+                PdfPageTextRenderMode::FilledUnstroked
+            } else {
+                PdfPageTextRenderMode::Invisible
+            };
+            object.set_render_mode(render_mode).map_err(|error| {
+                CommandError::new(
+                    CommandErrorCode::Internal,
+                    format!("could not set the Text Box render mode: {error:?}"),
+                )
+            })?;
+            object
+                .apply_matrix(PdfMatrix::new(
+                    cos_alpha, sin_alpha, -sin_alpha, cos_alpha, user_x, user_y,
+                ))
+                .map_err(|error| {
+                    CommandError::new(
+                        CommandErrorCode::Internal,
+                        format!("could not place Text Box text: {error:?}"),
+                    )
+                })?;
+            objects.push(PdfPageObject::from(object));
+
+            if visible && style.underline && *width > 0.0 {
+                let underline_y = local_y + style.font_size * 0.12;
+                let (start_x, start_y) = rotate_local(offset + cursor, underline_y, theta);
+                let (end_x, end_y) = rotate_local(offset + cursor + width, underline_y, theta);
+                let (user_start_x, user_start_y) =
+                    geometry.point_inverse(layout.x + start_x, layout.y + start_y);
+                let (user_end_x, user_end_y) =
+                    geometry.point_inverse(layout.x + end_x, layout.y + end_y);
+                let path = PdfPagePathObject::new_line(
+                    document,
+                    PdfPoints::new(user_start_x),
+                    PdfPoints::new(user_start_y),
+                    PdfPoints::new(user_end_x),
+                    PdfPoints::new(user_end_y),
+                    style.color,
+                    PdfPoints::new((style.font_size * 0.06).max(0.4)),
+                )
+                .map_err(|error| {
+                    CommandError::new(
+                        CommandErrorCode::Internal,
+                        format!("could not create the Text Box underline: {error:?}"),
+                    )
+                })?;
+                objects.push(PdfPageObject::from(path));
+            }
+            cursor += width;
+        }
+        line_top += line_height;
+    }
+
+    Ok(objects)
 }
 
 fn rotate_local(x: f32, y: f32, radians: f32) -> (f32, f32) {
@@ -2627,9 +3032,9 @@ fn apply_for(
     let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
 
     let record_index = find_record(&entry.edit, page_index, box_id)?;
-    let (deleted, uses_style) = {
+    let (deleted, uses_style, old_text) = {
         let record = &entry.edit.records[&page_index][record_index];
-        (record.deleted, record.style.is_some())
+        (record.deleted, record.style.is_some(), record.text.clone())
     };
     if deleted {
         return Err(CommandError::new(
@@ -2639,8 +3044,11 @@ fn apply_for(
     }
     if uses_style {
         // Created boxes and legacy boxes converted to a built-in style use the
-        // canonical layout path, which also permits clearing the text.
-        return apply_to_styled_box(entry, page_index, record_index, normalized);
+        // canonical layout path, which also permits clearing the text. Styled
+        // ranges are tied to character offsets: an unchanged text keeps them,
+        // any replacement resets them to the base style.
+        let keep_runs = normalized == old_text;
+        return apply_to_styled_box(entry, page_index, record_index, normalized, keep_runs);
     }
     if normalized.trim().is_empty() {
         return Err(CommandError::new(
@@ -2995,33 +3403,107 @@ fn resolve_box_font(
     })
 }
 
-/// Applies text to a box with a canonical layout and a chosen built-in style.
-fn apply_to_styled_box(
+/// A slice of the box text with character offsets.
+fn text_slice(text: &str, start: usize, end: usize) -> String {
+    text.chars().skip(start).take(end - start).collect()
+}
+
+fn validate_runs(text: &str, runs: &[TextBoxRun]) -> Result<(), CommandError> {
+    let char_count = text.chars().count();
+    let mut previous_end = 0;
+    for run in runs {
+        if run.start < previous_end || run.start >= run.end || run.end > char_count {
+            return Err(CommandError::new(
+                CommandErrorCode::Internal,
+                format!(
+                    "Text Box run {}..{} is invalid for {} characters",
+                    run.start, run.end, char_count
+                ),
+            ));
+        }
+        previous_end = run.end;
+    }
+    Ok(())
+}
+
+/// Keeps runs sorted and merges neighbours that render identically.
+fn merge_runs(runs: Vec<TextBoxRun>) -> Vec<TextBoxRun> {
+    let mut merged: Vec<TextBoxRun> = Vec::with_capacity(runs.len());
+    for run in runs {
+        if let Some(last) = merged.last_mut() {
+            if last.end == run.start && last.style == run.style {
+                last.end = run.end;
+                continue;
+            }
+        }
+        merged.push(run);
+    }
+    merged
+}
+
+/// Replaces the style of one range, splitting runs that straddle its edges.
+/// The parts outside the selection keep their previous run style.
+fn with_run_style(
+    runs: &[TextBoxRun],
+    start: usize,
+    end: usize,
+    style: TextBoxStyle,
+) -> Vec<TextBoxRun> {
+    let mut result: Vec<TextBoxRun> = Vec::with_capacity(runs.len() + 1);
+    for run in runs {
+        if run.end <= start || run.start >= end {
+            result.push(run.clone());
+            continue;
+        }
+        if run.start < start {
+            result.push(TextBoxRun {
+                start: run.start,
+                end: start,
+                style: run.style.clone(),
+            });
+        }
+        if run.end > end {
+            result.push(TextBoxRun {
+                start: end,
+                end: run.end,
+                style: run.style.clone(),
+            });
+        }
+    }
+    result.push(TextBoxRun { start, end, style });
+    result.sort_by_key(|run| run.start);
+    merge_runs(result)
+}
+
+/// A box rendered with its base style and styled runs.
+struct RenderedBox {
+    objects: Vec<PdfPageObject<'static>>,
+    height: f32,
+    /// The base style actually used (family changed on a fallback).
+    style: TextBoxStyle,
+    /// The runs after font resolution, merging and clipping.
+    runs: Vec<TextBoxRun>,
+    /// The first font fallback encountered, for the canvas notice.
+    fallback: Option<FontUsageView>,
+}
+
+/// Renders `text` with `style` as the base and `runs` as overrides.
+///
+/// Every run is resolved against only its own characters, so a font fallback
+/// inside one run does not change the family of the untouched text. The
+/// returned runs are the effective styles (including fallbacks) that callers
+/// persist.
+fn render_styled_box(
     entry: &mut OpenDocument,
     page_index: u32,
-    record_index: usize,
-    normalized: String,
-) -> Result<TextEditResultView, CommandError> {
-    let (box_id, start, old_count, style, layout) = {
-        let record = &entry.edit.records[&page_index][record_index];
-        (
-            record.box_id,
-            record.start,
-            record.count,
-            record.style.clone().ok_or_else(|| {
-                CommandError::new(CommandErrorCode::Internal, "the Text Box lost its style")
-            })?,
-            record.layout.clone().ok_or_else(|| {
-                CommandError::new(CommandErrorCode::Internal, "the Text Box lost its layout")
-            })?,
-        )
-    };
+    layout: &BoxLayout,
+    style: &TextBoxStyle,
+    text: &str,
+    runs: &[TextBoxRun],
+) -> Result<RenderedBox, CommandError> {
+    validate_runs(text, runs)?;
 
     let page = load_page(&entry.document, page_index)?;
-    {
-        let objects = page.objects();
-        validate_box_range(objects, start, old_count)?;
-    }
     let rotation = page
         .rotation()
         .map_err(|error| {
@@ -3034,42 +3516,158 @@ fn apply_to_styled_box(
     let geometry = DisplayGeometry::new(&page, rotation)?;
     drop(page);
 
-    let resolved = resolve_box_font(entry, &style, &normalized)?;
-    let render = BoxRenderStyle {
-        token: resolved.token,
-        font_size: resolved.style.font_size,
-        color: resolved.style.pdf_color(),
-        render_mode: PdfPageTextRenderMode::FilledUnstroked,
-        underline: resolved.style.underline,
-        alignment: resolved.style.alignment,
-    };
-    let lines = if normalized.is_empty() {
-        Vec::new()
+    let chars: Vec<char> = text.chars().collect();
+    let mut base_text = String::new();
+    let mut cursor = 0;
+    for run in runs {
+        base_text.extend(&chars[cursor..run.start]);
+        cursor = run.end;
+    }
+    base_text.extend(&chars[cursor..]);
+
+    // PDFium cannot build a subset for an empty string; resolving the base
+    // style with a space keeps an entirely styled box renderable without
+    // adding any glyph outside its own text.
+    let base_probe = if base_text.is_empty() {
+        " "
     } else {
-        wrap_text(&normalized, layout.width, &|candidate| {
-            measure_with_token(
-                &entry.document,
-                resolved.token,
-                resolved.style.font_size,
-                candidate,
-            )
-        })
+        base_text.as_str()
     };
-    let height = effective_height(
-        &layout,
-        content_height(lines.len(), resolved.style.font_size),
-    );
-    let replacements = build_box_objects(
+    let base = resolve_box_font(entry, style, base_probe)?;
+    let mut fallback = base.fallback.clone();
+    // A run keeps the token resolved for its own characters: bundled subsets
+    // cover only the text they were built from, so runs must not be merged
+    // after resolution.
+    let mut resolved_runs: Vec<(TextBoxRun, PdfFontToken)> = Vec::with_capacity(runs.len());
+    for run in runs {
+        let run_text = text_slice(text, run.start, run.end);
+        let resolved = resolve_box_font(entry, &run.style, &run_text)?;
+        if fallback.is_none() {
+            fallback = resolved.fallback.clone();
+        }
+        let mut effective = resolved.style;
+        // Alignment is a box property, not a run property.
+        effective.alignment = base.style.alignment;
+        resolved_runs.push((
+            TextBoxRun {
+                start: run.start,
+                end: run.end,
+                style: effective,
+            },
+            resolved.token,
+        ));
+    }
+
+    let mut styles = Vec::with_capacity(resolved_runs.len() + 1);
+    styles.push(SegmentStyle {
+        token: base.token,
+        font_size: base.style.font_size,
+        color: base.style.pdf_color(),
+        underline: base.style.underline,
+    });
+    for (run, token) in &resolved_runs {
+        styles.push(SegmentStyle {
+            token: *token,
+            font_size: run.style.font_size,
+            color: run.style.pdf_color(),
+            underline: run.style.underline,
+        });
+    }
+    let runs: Vec<TextBoxRun> = resolved_runs.into_iter().map(|(run, _)| run).collect();
+
+    let mut char_styles = vec![0usize; chars.len()];
+    for (index, run) in runs.iter().enumerate() {
+        for slot in &mut char_styles[run.start..run.end] {
+            *slot = index + 1;
+        }
+    }
+
+    let (lines, content_height) = if text.is_empty() {
+        (Vec::new(), 0.0)
+    } else {
+        let lines = wrap_styled(&entry.document, text, &char_styles, layout.width, &styles);
+        let content_height = if styles.len() == 1 {
+            content_height(lines.len(), styles[0].font_size)
+        } else {
+            lines
+                .iter()
+                .map(|line| {
+                    let size = line
+                        .iter()
+                        .map(|(_, index)| styles[*index].font_size)
+                        .fold(0.0, f32::max);
+                    size * 1.2
+                })
+                .sum()
+        };
+        (lines, content_height)
+    };
+    let height = effective_height(layout, content_height);
+    let objects = build_styled_box_objects(
         &mut entry.document,
         &geometry,
-        &layout,
-        render,
+        layout,
+        base.style.alignment,
+        &styles,
         &lines,
         height,
     )?;
-    let new_count = replacements.len();
+
+    Ok(RenderedBox {
+        objects,
+        height,
+        style: base.style,
+        runs,
+        fallback,
+    })
+}
+
+/// Applies text to a box with a canonical layout and a chosen built-in style.
+///
+/// `keep_runs` is true only when the text did not change: styling ranges are
+/// tied to character offsets, so a changed text resets them to the base style.
+fn apply_to_styled_box(
+    entry: &mut OpenDocument,
+    page_index: u32,
+    record_index: usize,
+    normalized: String,
+    keep_runs: bool,
+) -> Result<TextEditResultView, CommandError> {
+    let (box_id, start, old_count, style, layout, runs) = {
+        let record = &entry.edit.records[&page_index][record_index];
+        (
+            record.box_id,
+            record.start,
+            record.count,
+            record.style.clone().ok_or_else(|| {
+                CommandError::new(CommandErrorCode::Internal, "the Text Box lost its style")
+            })?,
+            record.layout.clone().ok_or_else(|| {
+                CommandError::new(CommandErrorCode::Internal, "the Text Box lost its layout")
+            })?,
+            record.runs.clone(),
+        )
+    };
+
+    let page = load_page(&entry.document, page_index)?;
+    {
+        let objects = page.objects();
+        validate_box_range(objects, start, old_count)?;
+    }
+    drop(page);
+
+    let runs = if keep_runs { runs } else { Vec::new() };
+    let rendered = render_styled_box(entry, page_index, &layout, &style, &normalized, &runs)?;
+    let RenderedBox {
+        objects,
+        height,
+        style: effective_style,
+        runs: effective_runs,
+        fallback,
+    } = rendered;
+    let new_count = objects.len();
     let before_snapshot = entry.edit.records[&page_index][record_index].snapshot(record_index);
-    let removed = detach_and_insert(&entry.document, page_index, start, old_count, replacements)?;
+    let removed = detach_and_insert(&entry.document, page_index, start, old_count, objects)?;
 
     {
         let records = entry
@@ -3081,7 +3679,8 @@ fn apply_to_styled_box(
         record.text = normalized.clone();
         record.count = new_count;
         record.width = layout.width;
-        record.style = Some(resolved.style.clone());
+        record.style = Some(effective_style);
+        record.runs = effective_runs;
         if layout.auto_height {
             record.layout = Some(BoxLayout { height, ..layout });
         }
@@ -3108,7 +3707,7 @@ fn apply_to_styled_box(
         page_index,
         box_id,
         text: normalized,
-        font: resolved.fallback,
+        font: fallback,
         history: entry.edit.history_view(),
     })
 }
@@ -3161,6 +3760,7 @@ fn create_for(
         text: String::new(),
         layout: Some(layout),
         style: Some(style),
+        runs: Vec::new(),
         created: true,
         deleted: false,
     };
@@ -3247,54 +3847,21 @@ fn style_for(
         let objects = page.objects();
         validate_box_range(objects, start, old_count)?;
     }
-    let rotation = page
-        .rotation()
-        .map_err(|error| {
-            CommandError::new(
-                CommandErrorCode::RenderFailed,
-                format!("could not read page {page_index} rotation: {error:?}"),
-            )
-        })?
-        .as_degrees() as u16;
-    let geometry = DisplayGeometry::new(&page, rotation)?;
     drop(page);
 
-    let resolved = resolve_box_font(entry, &new_style, &text)?;
-    let render = BoxRenderStyle {
-        token: resolved.token,
-        font_size: resolved.style.font_size,
-        color: resolved.style.pdf_color(),
-        render_mode: PdfPageTextRenderMode::FilledUnstroked,
-        underline: resolved.style.underline,
-        alignment: resolved.style.alignment,
-    };
-    let lines = if text.is_empty() {
-        Vec::new()
-    } else {
-        wrap_text(&text, layout.width, &|candidate| {
-            measure_with_token(
-                &entry.document,
-                resolved.token,
-                resolved.style.font_size,
-                candidate,
-            )
-        })
-    };
-    let height = effective_height(
-        &layout,
-        content_height(lines.len(), resolved.style.font_size),
-    );
-    let replacements = build_box_objects(
-        &mut entry.document,
-        &geometry,
-        &layout,
-        render,
-        &lines,
+    // A whole-box style change replaces every styled range with the new base
+    // style: the user asked for one look for the whole box.
+    let rendered = render_styled_box(entry, page_index, &layout, &new_style, &text, &[])?;
+    let RenderedBox {
+        objects,
         height,
-    )?;
-    let new_count = replacements.len();
+        style: effective_style,
+        fallback,
+        ..
+    } = rendered;
+    let new_count = objects.len();
     let before_snapshot = entry.edit.records[&page_index][record_index].snapshot(record_index);
-    let removed = detach_and_insert(&entry.document, page_index, start, old_count, replacements)?;
+    let removed = detach_and_insert(&entry.document, page_index, start, old_count, objects)?;
 
     {
         let records = entry
@@ -3303,7 +3870,8 @@ fn style_for(
             .get_mut(&page_index)
             .expect("Text Box page disappeared");
         let record = &mut records[record_index];
-        record.style = Some(resolved.style.clone());
+        record.style = Some(effective_style);
+        record.runs.clear();
         record.layout = Some(BoxLayout { height, ..layout });
         record.width = layout.width;
         record.count = new_count;
@@ -3330,7 +3898,210 @@ fn style_for(
     Ok(TextBoxEditResultView {
         page_index,
         target,
-        font: resolved.fallback,
+        font: fallback,
+        history: entry.edit.history_view(),
+    })
+}
+
+/// Reads a legacy Text Object's look as a built-in style.
+///
+/// Selection styling needs a canonical base style to describe the text outside
+/// the selected range. Only the project's registry fonts have a faithful style
+/// representation; an arbitrary embedded font cannot be recreated through the
+/// style panel, so it is refused with a message asking for a whole-box style
+/// change first.
+fn legacy_base_style(
+    entry: &OpenDocument,
+    page_index: u32,
+    record_index: usize,
+) -> Result<TextBoxStyle, CommandError> {
+    let record = &entry.edit.records[&page_index][record_index];
+    let page = load_page(&entry.document, page_index)?;
+    let object = page.objects().get(record.start).map_err(|error| {
+        CommandError::new(
+            CommandErrorCode::Internal,
+            format!("could not read the Text Box: {error:?}"),
+        )
+    })?;
+    let text_object = object.as_text_object().ok_or_else(|| {
+        CommandError::new(
+            CommandErrorCode::Internal,
+            "the Text Box does not start with a text object",
+        )
+    })?;
+    let font_name = text_object.font().name();
+    let font_size = text_object.unscaled_font_size().value;
+    if !font_size.is_finite() || !(4.0..=400.0).contains(&font_size) {
+        return Err(CommandError::new(
+            CommandErrorCode::UnsupportedFont,
+            format!("the Text Box font size {font_size} cannot be styled"),
+        ));
+    }
+
+    let (font_family, bold, italic) = if fonts::is_bundled_family(&font_name) {
+        let (bold, italic) = style_flags_from_font_name(&font_name);
+        (fonts::NOTO_SANS_SC_FAMILY.to_owned(), bold, italic)
+    } else {
+        let name = base_font_name(&font_name);
+        let font = BASE14_FONTS
+            .iter()
+            .find(|font| font.postscript_name == name)
+            .ok_or_else(|| {
+                CommandError::new(
+                    CommandErrorCode::UnsupportedFont,
+                    format!(
+                        "the original font {font_name} has no built-in variant; apply a whole-box \
+                         style before styling a selection"
+                    ),
+                )
+            })?;
+        (font.family.to_owned(), font.bold, font.italic)
+    };
+    if italic && fonts::is_bundled_family(&font_family) {
+        return Err(CommandError::new(
+            CommandErrorCode::UnsupportedFont,
+            format!(
+                "the bundled font {} has no italic variant",
+                fonts::NOTO_SANS_SC_FAMILY
+            ),
+        ));
+    }
+
+    let color = text_object
+        .fill_color()
+        .map(|color| (color.red(), color.green(), color.blue()))
+        .unwrap_or((0, 0, 0));
+    Ok(TextBoxStyle {
+        font_family,
+        font_size,
+        bold,
+        italic,
+        underline: false,
+        color,
+        alignment: TextAlignment::Left,
+    })
+}
+
+/// Applies a style to one character range of a box.
+///
+/// The box is first given a canonical base style and layout when it is still a
+/// legacy Text Object; the selected range becomes (or joins) a run, and only
+/// that run's text objects are emitted with the new look.
+fn selection_style_for(
+    entry: &mut OpenDocument,
+    page_index: u32,
+    box_id: u64,
+    range: TextRangeView,
+    style_view: TextBoxStyleView,
+) -> Result<TextBoxEditResultView, CommandError> {
+    ensure_content_editable(&entry.document)?;
+    let new_style = TextBoxStyle::from_view(&style_view)?;
+    let record_index = find_record(&entry.edit, page_index, box_id)?;
+    let (start, old_count, text, deleted, style, runs) = {
+        let record = &entry.edit.records[&page_index][record_index];
+        (
+            record.start,
+            record.count,
+            record.text.clone(),
+            record.deleted,
+            record.style.clone(),
+            record.runs.clone(),
+        )
+    };
+    if deleted {
+        return Err(CommandError::new(
+            CommandErrorCode::InvalidArgument,
+            "this Text Box has been deleted",
+        ));
+    }
+
+    let range_start = range.start as usize;
+    let range_end = range.end as usize;
+    let char_count = text.chars().count();
+    if range_start >= range_end || range_end > char_count {
+        return Err(CommandError::new(
+            CommandErrorCode::InvalidArgument,
+            format!(
+                "selection {}..{} is invalid for the {} characters in Text Box {box_id}",
+                range.start, range.end, char_count
+            ),
+        ));
+    }
+
+    let (base_style, layout) = match style {
+        Some(style) => {
+            let layout = entry.edit.records[&page_index][record_index]
+                .layout
+                .clone()
+                .ok_or_else(|| {
+                    CommandError::new(CommandErrorCode::Internal, "the Text Box lost its layout")
+                })?;
+            (style, layout)
+        }
+        None => {
+            let base = legacy_base_style(entry, page_index, record_index)?;
+            let layout = style_change_layout(entry, page_index, record_index, base.font_size)?;
+            (base, layout)
+        }
+    };
+    check_layout(&layout)?;
+
+    let page = load_page(&entry.document, page_index)?;
+    {
+        let objects = page.objects();
+        validate_box_range(objects, start, old_count)?;
+    }
+    drop(page);
+
+    let runs = with_run_style(&runs, range_start, range_end, new_style);
+    let rendered = render_styled_box(entry, page_index, &layout, &base_style, &text, &runs)?;
+    let RenderedBox {
+        objects,
+        height,
+        style: effective_style,
+        runs: effective_runs,
+        fallback,
+    } = rendered;
+    let new_count = objects.len();
+    let before_snapshot = entry.edit.records[&page_index][record_index].snapshot(record_index);
+    let removed = detach_and_insert(&entry.document, page_index, start, old_count, objects)?;
+
+    {
+        let records = entry
+            .edit
+            .records
+            .get_mut(&page_index)
+            .expect("Text Box page disappeared");
+        let record = &mut records[record_index];
+        record.style = Some(effective_style);
+        record.runs = effective_runs;
+        record.layout = Some(BoxLayout { height, ..layout });
+        record.width = layout.width;
+        record.count = new_count;
+    }
+    let after_snapshot = entry.edit.records[&page_index][record_index].snapshot(record_index);
+    shift_object_indexes(
+        &mut entry.edit,
+        page_index,
+        start,
+        new_count as isize - old_count as isize,
+        ObjectRef::TextBox(box_id),
+    );
+    push_action(
+        entry,
+        page_index,
+        box_id,
+        start,
+        Some(before_snapshot),
+        removed,
+        after_snapshot,
+    );
+
+    let target = read_target(entry, page_index, box_id)?;
+    Ok(TextBoxEditResultView {
+        page_index,
+        target,
+        font: fallback,
         history: entry.edit.history_view(),
     })
 }
@@ -3353,7 +4124,7 @@ fn transform_for(
     check_layout(&layout)?;
 
     let record_index = find_record(&entry.edit, page_index, box_id)?;
-    let (start, old_count, text, deleted, style) = {
+    let (start, old_count, text, deleted, style, runs) = {
         let record = &entry.edit.records[&page_index][record_index];
         (
             record.start,
@@ -3361,6 +4132,7 @@ fn transform_for(
             record.text.clone(),
             record.deleted,
             record.style.clone(),
+            record.runs.clone(),
         )
     };
     if deleted {
@@ -3392,49 +4164,52 @@ fn transform_for(
     };
     drop(page);
 
-    let (render, effective_style, fallback) = match &style {
+    // A transform keeps every styled range: the text and its offsets do not
+    // change, only the frame it is laid out in.
+    let (replacements, height, effective_style, effective_runs, fallback) = match &style {
         Some(style) => {
-            let resolved = resolve_box_font(entry, style, &text)?;
+            let rendered = render_styled_box(entry, page_index, &layout, style, &text, &runs)?;
+            let RenderedBox {
+                objects,
+                height,
+                style: effective_style,
+                runs: effective_runs,
+                fallback,
+            } = rendered;
             (
-                BoxRenderStyle {
-                    token: resolved.token,
-                    font_size: resolved.style.font_size,
-                    color: resolved.style.pdf_color(),
-                    render_mode: PdfPageTextRenderMode::FilledUnstroked,
-                    underline: resolved.style.underline,
-                    alignment: resolved.style.alignment,
-                },
-                Some(resolved.style),
-                resolved.fallback,
+                objects,
+                height,
+                Some(effective_style),
+                effective_runs,
+                fallback,
             )
         }
-        None => (
-            legacy_render.ok_or_else(|| {
+        None => {
+            let render = legacy_render.ok_or_else(|| {
                 CommandError::new(
                     CommandErrorCode::Internal,
                     "the Text Box lost its font while being transformed",
                 )
-            })?,
-            None,
-            None,
-        ),
+            })?;
+            let lines = if text.is_empty() {
+                Vec::new()
+            } else {
+                wrap_text(&text, layout.width, &|candidate| {
+                    measure_with_token(&entry.document, render.token, render.font_size, candidate)
+                })
+            };
+            let height = effective_height(&layout, content_height(lines.len(), render.font_size));
+            let objects = build_box_objects(
+                &mut entry.document,
+                &geometry,
+                &layout,
+                render,
+                &lines,
+                height,
+            )?;
+            (objects, height, None, Vec::new(), None)
+        }
     };
-    let lines = if text.is_empty() {
-        Vec::new()
-    } else {
-        wrap_text(&text, layout.width, &|candidate| {
-            measure_with_token(&entry.document, render.token, render.font_size, candidate)
-        })
-    };
-    let height = effective_height(&layout, content_height(lines.len(), render.font_size));
-    let replacements = build_box_objects(
-        &mut entry.document,
-        &geometry,
-        &layout,
-        render,
-        &lines,
-        height,
-    )?;
     let new_count = replacements.len();
     let before_snapshot = entry.edit.records[&page_index][record_index].snapshot(record_index);
     let removed = detach_and_insert(&entry.document, page_index, start, old_count, replacements)?;
@@ -3448,6 +4223,7 @@ fn transform_for(
         let record = &mut records[record_index];
         if let Some(style) = effective_style {
             record.style = Some(style);
+            record.runs = effective_runs;
         }
         record.layout = Some(BoxLayout { height, ..layout });
         record.width = layout.width;
@@ -3483,6 +4259,10 @@ fn transform_for(
 /// The `apply_text_edit` command: replaces a Text Box's content, wrapping at
 /// its width and keeping the original baseline, font, size and colour when
 /// possible.
+///
+/// Styled ranges are tied to character offsets: unchanged normalized text keeps
+/// the existing runs, while any replacement resets the box to its base style so
+/// a run never silently points at different characters.
 #[tauri::command]
 pub fn apply_text_edit(
     document_id: String,
@@ -3563,6 +4343,26 @@ pub fn apply_text_box_style(
     with_open_document(&document_id, |entry| {
         let physical = entry.physical_page(page_index)?;
         let mut view = style_for(entry, physical, box_id, style)?;
+        let logical = entry.logical_page(physical).unwrap_or(0);
+        view.page_index = logical;
+        view.target.page_index = logical;
+        Ok(view)
+    })
+}
+
+/// The `apply_text_box_selection_style` command: styles only the characters in
+/// `range`, leaving the rest of the Text Box at its base style.
+#[tauri::command]
+pub fn apply_text_box_selection_style(
+    document_id: String,
+    page_index: u32,
+    box_id: u64,
+    range: TextRangeView,
+    style: TextBoxStyleView,
+) -> Result<TextBoxEditResultView, CommandError> {
+    with_open_document(&document_id, |entry| {
+        let physical = entry.physical_page(page_index)?;
+        let mut view = selection_style_for(entry, physical, box_id, range, style)?;
         let logical = entry.logical_page(physical).unwrap_or(0);
         view.page_index = logical;
         view.target.page_index = logical;
