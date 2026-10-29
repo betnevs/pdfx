@@ -1152,6 +1152,203 @@ fn overlapping_selections_split_straddling_runs_and_merge_equal_neighbours() {
     }
 }
 
+/// The Noto subsets in a saved page's font resources, named by the BaseFont
+/// PDFium wrote for each embedded subset.
+fn noto_base_fonts(bytes: &[u8]) -> Vec<String> {
+    let parsed = lopdf::Document::load_mem(bytes).expect("lopdf parses the saved PDF");
+    let page_id = *parsed.get_pages().get(&1).expect("page 1");
+    page_font_names(&parsed, page_id)
+        .into_iter()
+        .filter(|name| name.contains("NotoSansSC"))
+        .collect()
+}
+
+/// PDFium's content generator deduplicates fonts by BaseFont name, so two
+/// subsets on one page need distinct PostScript names or the later one's
+/// characters are decoded through the first one's CID map.
+fn assert_distinct_noto_subsets(bytes: &[u8], expected: usize) -> Vec<String> {
+    let names = noto_base_fonts(bytes);
+    let distinct: std::collections::BTreeSet<&String> = names.iter().collect();
+    assert!(
+        distinct.len() >= expected,
+        "every Noto subset needs its own BaseFont: {names:?}"
+    );
+    for name in &distinct {
+        let suffix = name
+            .strip_prefix("NotoSansSC-Thin-")
+            .or_else(|| name.strip_prefix("NotoSansSC-Bold-"))
+            .unwrap_or_else(|| panic!("subset keeps the Noto PostScript stem: {name:?}"));
+        assert_eq!(suffix.len(), 16, "subset tag is 16 hex digits: {name:?}");
+        assert!(
+            suffix
+                .chars()
+                .all(|character| character.is_ascii_hexdigit()),
+            "subset tag is hexadecimal: {name:?}"
+        );
+    }
+    names
+}
+
+/// A Text Box whose base text falls back to Noto because Helvetica cannot
+/// render the CJK (or mark-only) characters.
+fn fallback_text_box(document_id: &str, x: f32, y: f32, text: &str) -> u64 {
+    let box_id = pdfx_lib::text_edit::create_text_box(
+        document_id.to_owned(),
+        0,
+        CreateTextBoxRequest {
+            x,
+            y,
+            width: 220.0,
+            height: 36.0,
+            style: Some(base_style()),
+        },
+    )
+    .expect("create Text Box")
+    .target
+    .box_id;
+    apply_text_edit(document_id.to_owned(), 0, box_id, text.to_owned()).expect("type into box");
+    box_id
+}
+
+#[test]
+fn two_noto_subsets_in_one_box_keep_distinct_pdf_fonts() {
+    let pdf = synthetic::single_line_pdf();
+    let document_id = open_synthetic(&pdf);
+    let box_id = fallback_text_box(&document_id, 72.0, 100.0, "中文");
+
+    // The second character at a larger size is rendered from a different
+    // subset than the first; before the font names were made unique PDFium
+    // collapsed both subsets into one resource and extraction returned the
+    // first character twice.
+    let result = apply_text_box_selection_style(
+        document_id.clone(),
+        0,
+        box_id,
+        TextRangeView { start: 1, end: 2 },
+        run_style("Noto Sans SC", 20.0, "#c0392b"),
+    )
+    .expect("style the second character");
+    assert_eq!(result.target.text, "中文");
+    assert_eq!(result.target.runs.len(), 1);
+    assert_eq!(result.target.runs[0].font_family, "Noto Sans SC");
+
+    let live_layer = extract_text_layer(document_id.clone(), 0).expect("live layer");
+    let live_start = char_index_of(&live_layer, "中文");
+    assert_eq!(live_layer.chars[live_start].text, "中");
+    assert_eq!(live_layer.chars[live_start + 1].text, "文");
+    assert!((live_layer.chars[live_start].font_size - 16.0).abs() < 0.01);
+    assert!((live_layer.chars[live_start + 1].font_size - 20.0).abs() < 0.01);
+
+    let bytes = save_document_bytes(&document_id).expect("serialize document");
+    assert_distinct_noto_subsets(&bytes, 2);
+
+    let saved = synthetic::pdf_bytes_file("mixed-noto-subsets", bytes);
+    let reopened = open_synthetic(&saved);
+    let plain = extract_text(reopened.clone(), 0).expect("plain text");
+    assert_eq!(
+        plain.text.split_whitespace().collect::<Vec<_>>().join(" "),
+        "Original line. 中文",
+        "both CJK glyphs survive the save/reopen round trip"
+    );
+    let layer = extract_text_layer(reopened.clone(), 0).expect("reopened layer");
+    let start = char_index_of(&layer, "中文");
+    assert_eq!(layer.chars[start].text, "中");
+    assert_eq!(layer.chars[start + 1].text, "文");
+    assert!((layer.chars[start].font_size - 16.0).abs() < 0.01);
+    assert!((layer.chars[start + 1].font_size - 20.0).abs() < 0.01);
+
+    // The suffixed PostScript name still resolves to the bundled family, so
+    // the style panel keeps offering "Noto Sans SC" after reopening.
+    let target = text_edit_target(reopened.clone(), 0, (start + 1) as u32).expect("run target");
+    assert_eq!(target.font_family, "Noto Sans SC");
+    assert!((target.font_size - 20.0).abs() < 0.01);
+}
+
+#[test]
+fn a_combining_mark_only_run_keeps_its_own_subset_and_reopens_intact() {
+    let pdf = synthetic::single_line_pdf();
+    let document_id = open_synthetic(&pdf);
+    let text = "e\u{0301}x";
+    let box_id = fallback_text_box(&document_id, 72.0, 100.0, text);
+
+    // Times cannot cover U+0301, so styling only the mark falls back to Noto;
+    // the mark-run subset contains one character while the base subset holds
+    // "ex", which is exactly the collision PDFium used to collapse.
+    let result = apply_text_box_selection_style(
+        document_id.clone(),
+        0,
+        box_id,
+        TextRangeView { start: 1, end: 2 },
+        run_style("Times", 20.0, "#c0392b"),
+    )
+    .expect("style the combining mark");
+    assert!(result.font.expect("mark fallback notice").fallback);
+    assert_eq!(result.target.runs.len(), 1);
+    assert_eq!(result.target.runs[0].font_family, "Noto Sans SC");
+    assert!((result.target.runs[0].font_size - 20.0).abs() < 0.01);
+
+    let live_layer = extract_text_layer(document_id.clone(), 0).expect("live layer");
+    assert!(
+        live_layer.text.ends_with(text),
+        "live extraction keeps the combining mark: {:?}",
+        live_layer.text
+    );
+    let live_start = char_index_of_last(&live_layer, text);
+    assert_eq!(live_layer.chars[live_start].text, "e");
+    assert_eq!(live_layer.chars[live_start + 1].text, "\u{0301}");
+    assert_eq!(live_layer.chars[live_start + 2].text, "x");
+    assert!((live_layer.chars[live_start + 1].font_size - 20.0).abs() < 0.01);
+
+    let bytes = save_document_bytes(&document_id).expect("serialize document");
+    assert_distinct_noto_subsets(&bytes, 2);
+
+    let saved = synthetic::pdf_bytes_file("mark-only-noto-subsets", bytes);
+    let reopened = open_synthetic(&saved);
+    let plain = extract_text(reopened.clone(), 0).expect("plain text");
+    assert!(
+        plain.text.ends_with(text),
+        "reopened extraction keeps the combining mark: {:?}",
+        plain.text
+    );
+    let layer = extract_text_layer(reopened.clone(), 0).expect("reopened layer");
+    let start = char_index_of_last(&layer, text);
+    assert_eq!(layer.chars[start].text, "e");
+    assert_eq!(layer.chars[start + 1].text, "\u{0301}");
+    assert_eq!(layer.chars[start + 2].text, "x");
+    assert!((layer.chars[start + 1].font_size - 20.0).abs() < 0.01);
+
+    let target = text_edit_target(reopened, 0, (start + 1) as u32).expect("mark target");
+    assert_eq!(target.font_family, "Noto Sans SC");
+    assert!((target.font_size - 20.0).abs() < 0.01);
+}
+
+#[test]
+fn two_noto_boxes_on_one_page_do_not_share_a_subset_font() {
+    let pdf = synthetic::single_line_pdf();
+    let document_id = open_synthetic(&pdf);
+    // Distinct positions: PDFium drops exactly-overlapping text objects from
+    // extraction, and the point of this test is the font resources instead.
+    fallback_text_box(&document_id, 72.0, 100.0, "中文");
+    fallback_text_box(&document_id, 72.0, 200.0, "文字");
+
+    let bytes = save_document_bytes(&document_id).expect("serialize document");
+    assert_distinct_noto_subsets(&bytes, 2);
+
+    let saved = synthetic::pdf_bytes_file("two-noto-boxes", bytes);
+    let reopened = open_synthetic(&saved);
+    let plain = extract_text(reopened, 0).expect("plain text");
+    assert!(
+        plain.text.contains("中文"),
+        "first box survives: {:?}",
+        plain.text
+    );
+    assert!(
+        plain.text.contains("文字"),
+        "second box survives instead of decoding through the first subset: {:?}",
+        plain.text
+    );
+}
+
 #[test]
 fn undo_and_redo_styled_ranges_reach_past_a_saved_revision() {
     let pdf = synthetic::single_line_pdf();
