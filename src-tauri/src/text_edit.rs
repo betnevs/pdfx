@@ -1652,6 +1652,37 @@ fn measure_with_token(
     width.is_finite().then_some(width)
 }
 
+/// The advance width of `text` in `token`, including leading and trailing
+/// whitespace.
+///
+/// A text object's `bounds()` is ink bounds: it leaves out the advance of a
+/// trailing space and the glyphs' side bearings. Using those bounds to place
+/// the next styled segment puts it on top of the previous segment's trailing
+/// space, so the space has no effect and an external extractor sees the two
+/// words joined. Segment placement therefore sums the font's per-character
+/// advances, which are exactly the advances PDFium uses to lay the text out.
+/// Fonts that cannot report advances fall back to ink bounds.
+fn measure_segment_advance(
+    document: &PdfDocument<'static>,
+    token: PdfFontToken,
+    font_size: f32,
+    text: &str,
+) -> Option<f32> {
+    let advance = document.fonts().get(token).and_then(|font| {
+        let size = PdfPoints::new(font_size);
+        text.chars()
+            .map(|character| {
+                font.character_advance(character, size)
+                    .map(|width| width.value)
+            })
+            .sum::<Option<f32>>()
+    });
+    match advance {
+        Some(width) if width.is_finite() && width >= 0.0 => Some(width),
+        _ => measure_with_token(document, token, font_size, text),
+    }
+}
+
 fn fits(width: Option<f32>, limit: f32) -> bool {
     width.map(|width| width <= limit + 0.01).unwrap_or(true)
 }
@@ -1957,7 +1988,7 @@ fn build_styled_box_objects(
         let widths: Vec<f32> = segments
             .iter()
             .map(|(index, text)| {
-                measure_with_token(
+                measure_segment_advance(
                     document,
                     styles[*index].token,
                     styles[*index].font_size,

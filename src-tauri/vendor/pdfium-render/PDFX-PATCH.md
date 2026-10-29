@@ -50,7 +50,7 @@ safe wrapper lives in `src-tauri/src/pdfium_adapter.rs`.
 
 ## Patch scope
 
-Sixteen files change. Each hunk is additive; the permissions hunk only names
+Seventeen files change. Each hunk is additive; the permissions hunk only names
 security-handler revisions upstream treated as unknown.
 
 ### `src/pdf/document.rs`
@@ -75,6 +75,16 @@ security-handler revisions upstream treated as unknown.
   and a password-only Output Document reopened read-only even though `/P`
   granted every permission. Revision 5 (deprecated Adobe AES-256) uses the
   same bits and is mapped identically; restricted documents stay read-only.
+
+### `src/pdf/font.rs`
+
+- Added `PdfFont::character_advance(character, font_size)` calling
+  `FPDFFont_GetGlyphWidth()`. The API's `glyph` argument is resolved by
+  Pdfium as a Unicode character, so this returns the advance Pdfium itself
+  uses for layout, including trailing-space advances and side bearings that a
+  text object's ink `bounds()` cannot report. PDFX places each styled segment
+  of a mixed-style line at the previous segment's advance with it, keeping
+  spaces between differently styled words effective for external extractors.
 
 ### `src/pdf/document/page/annotations.rs`
 
@@ -236,9 +246,9 @@ cargo test --test cjk_fonts
    sha256 here.
 2. Replace everything in this directory with the new crate contents plus
    `LICENSE.md`, keeping `PDFX-PATCH.md`.
-3. Re-apply the hunks above (sixteen files). `diff -u` against the pristine
+3. Re-apply the hunks above (seventeen files). `diff -u` against the pristine
    crate source (cargo registry unpack directory or a fresh extract of the
-   `.crate`) is the authoritative patch; keep the diff to those sixteen files.
+   `.crate`) is the authoritative patch; keep the diff to those seventeen files.
 4. Update `src-tauri/Cargo.toml` version if the patched range changes, then
    build. `pdfium-render` tracks the PDFium API, so re-run the adapter tests
    against the pinned PDFium build first.
