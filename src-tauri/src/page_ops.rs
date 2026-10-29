@@ -114,6 +114,16 @@ impl OpenDocument {
         self.pages.len()
     }
 
+    /// True when a page created by `copy_page` is still part of the saved
+    /// arrangement. A copied page carries OCG clones that the layer save
+    /// pipeline and the layer shadow must map back to canonical layers.
+    pub(crate) fn has_included_copies(&self) -> bool {
+        self.pages
+            .copies
+            .keys()
+            .any(|physical| self.pages.order.contains(physical))
+    }
+
     /// Maps a logical page index from the command boundary to the PDFium page
     /// index the engines work with.
     pub(crate) fn physical_page(&self, logical: u32) -> Result<u32, CommandError> {

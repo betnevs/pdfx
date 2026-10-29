@@ -45,6 +45,12 @@ func containsASCII(_ data: Data, _ needle: String) -> Bool {
     data.range(of: Data(needle.utf8)) != nil
 }
 
+func utf16BEHex(_ text: String) -> String {
+    var data = Data([0xFE, 0xFF])
+    data.append(text.data(using: .utf16BigEndian)!)
+    return "<" + data.map { String(format: "%02x", $0) }.joined() + ">"
+}
+
 func pageText(_ document: PDFDocument, _ index: Int) -> String {
     document.page(at: index)?.string ?? ""
 }
@@ -185,6 +191,15 @@ do {
             expect(links.contains("https://example.com/pdfx"), "page has the URI link")
             expect(containsASCII(bytes, "/EmbeddedFile"), "file embeds an attachment")
             expect(containsASCII(bytes, "<x:xmpmeta"), "file contains XMP metadata")
+
+        case "layers":
+            expect(containsASCII(bytes, "/OCProperties"), "catalog declares optional content")
+            expect(containsASCII(bytes, "/Type /OCG"), "document declares OCGs")
+            expect(containsASCII(bytes, "/BaseState /OFF"), "default config has a base state")
+            expect(containsASCII(bytes, utf16BEHex("红色图层")), "red layer name is UTF-16")
+            expect(containsASCII(bytes, utf16BEHex("绿色图层")), "green layer name is UTF-16")
+            expect(containsASCII(bytes, utf16BEHex("蓝色图层")), "blue layer name is UTF-16")
+            expect(containsASCII(bytes, "/OC /MC0 BDC"), "page content uses named OC properties")
 
         case "rotated":
             let rotations = (0..<document.pageCount).compactMap { document.page(at: $0)?.rotation }

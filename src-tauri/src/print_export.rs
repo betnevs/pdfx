@@ -113,7 +113,8 @@ fn export_page_impl(
             path,
         )?;
         let physical_index = entry.physical_page(page_index)?;
-        let page = load_page(&entry.document, physical_index)?;
+        let document = entry.render_document()?;
+        let page = load_page(document, physical_index)?;
         let (width, height) = checked_page_pixels(&page, physical_index, scale)?;
         let rgba = render_page_rgba(&page, physical_index, width, height)?;
         let bytes = match format {

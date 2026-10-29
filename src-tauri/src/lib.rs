@@ -9,6 +9,7 @@ mod fonts;
 pub mod form;
 pub mod form_create;
 pub mod image_edit;
+pub mod layers;
 pub mod line_edit;
 pub mod links;
 pub mod logging;
@@ -71,6 +72,10 @@ pub fn run() {
             attachments::save_attachment_as,
             attachments::delete_attachment,
             attachments::open_attachment,
+            layers::list_layers,
+            layers::set_layer_visible,
+            layers::rename_layer,
+            layers::delete_layer,
             page_ops::rotate_page,
             page_ops::delete_page,
             page_ops::move_page,

@@ -202,6 +202,10 @@ function installDocumentBackend(overrides: Record<string, CommandHandler> = {}) 
     page_line_objects: () => [],
     edit_history: () => idleHistory,
     watermark_state: () => null,
+    list_layers: (args) => ({
+      documentId: (args as { documentId: string }).documentId,
+      layers: [],
+    }),
     list_annotations: () => [],
     list_attachments: () => [],
     list_links: () => [],
@@ -4635,5 +4639,136 @@ describe("PDFX attachments", () => {
       expect(state.get("edit.undo")).toBe(false);
       expect(state.get("edit.redo")).toBe(true);
     });
+  });
+});
+
+describe("PDFX layers", () => {
+  const red = { index: 0, name: "红线", visible: true };
+  const blue = { index: 1, name: "蓝线", visible: false };
+
+  it("lists layers, repaints after a toggle and restores them on undo", async () => {
+    let currentLayers = [red, blue];
+    let history = idleHistory;
+    installDocumentBackend({
+      edit_history: () => history,
+      list_layers: (args) => ({
+        documentId: (args as { documentId: string }).documentId,
+        layers: currentLayers,
+      }),
+      set_layer_visible: (args) => {
+        const request = args as {
+          layerIndex: number;
+          visible: boolean;
+        };
+        currentLayers = currentLayers.map((layer) =>
+          layer.index === request.layerIndex
+            ? { ...layer, visible: request.visible }
+            : layer,
+        );
+        history = dirtyHistory;
+        return { layers: currentLayers, history };
+      },
+      undo_text_edit: () => {
+        currentLayers = [red, blue];
+        history = idleHistory;
+        return {
+          pageIndex: 0,
+          pageCount: 3,
+          pageStructureChanged: false,
+          history,
+        };
+      },
+    });
+    openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+
+    expect(await screen.findByText("红线")).toBeInTheDocument();
+    expect(screen.getByText("蓝线")).toBeInTheDocument();
+    expect(screen.getByText("共 2 个")).toBeInTheDocument();
+    await waitFor(() => expect(thumbnailCalls().length).toBeGreaterThan(0));
+    const renderCalls = renderPageCalls().length;
+    const thumbCalls = thumbnailCalls().length;
+
+    await user.click(screen.getByRole("checkbox", { name: "显示 红线" }));
+
+    await waitFor(() =>
+      expect(commandCalls("set_layer_visible")).toEqual([
+        [
+          "set_layer_visible",
+          { documentId: "doc-1", layerIndex: 0, visible: false },
+        ],
+      ]),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("checkbox", { name: "显示 红线" }),
+      ).not.toBeChecked(),
+    );
+    // A layer is document-wide, so the page bitmap and thumbnails repaint.
+    await waitFor(() =>
+      expect(renderPageCalls().length).toBeGreaterThan(renderCalls),
+    );
+    await waitFor(() =>
+      expect(thumbnailCalls().length).toBeGreaterThan(thumbCalls),
+    );
+    expect(await screen.findByText("未保存")).toBeInTheDocument();
+    // The app disables menu undo while a form control owns the keyboard;
+    // move focus off the checkbox before using the menu action.
+    act(() => screen.getByRole("checkbox", { name: "显示 红线" }).blur());
+    await waitFor(() => expect(lastMenuState().get("edit.undo")).toBe(true));
+
+    act(() => menuHandler?.({ payload: "edit.undo" }));
+
+    await waitFor(() => expect(commandCalls("undo_text_edit")).toHaveLength(1));
+    await waitFor(() =>
+      expect(screen.getByRole("checkbox", { name: "显示 红线" })).toBeChecked(),
+    );
+    await waitFor(() =>
+      expect(setTitle).toHaveBeenLastCalledWith("report.pdf — PDFX"),
+    );
+  });
+
+  it("shows the empty state when the document has no layers", async () => {
+    installDocumentBackend();
+    openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+
+    expect(
+      await screen.findByText("此文档没有可编辑图层"),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("disables layer editing on a read-only document", async () => {
+    installDocumentBackend({
+      open_document: () => ({
+        ...documentView,
+        readOnly: true,
+        permissions: { ...allGrantedPermissions, canModifyContent: false },
+      }),
+      list_layers: (args) => ({
+        documentId: (args as { documentId: string }).documentId,
+        layers: [red, blue],
+      }),
+    });
+    openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
+
+    expect(await screen.findByText("红线")).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "显示 红线" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "重命名 红线" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "删除 红线" })).toBeDisabled();
+    expect(
+      screen.getByText("文档为只读，无法修改图层。"),
+    ).toBeInTheDocument();
   });
 });

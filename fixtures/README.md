@@ -29,6 +29,7 @@ Rust 测试通过 `src-tauri/tests/support/fixtures.rs` 读取 `manifest.json`�
 | signature | `signature-field-only.pdf` | 两个空签名字段（终态 widget + 嵌套继承 `/FT`），不含 `/V` | — |
 | signature | `encrypted-signature-restricted.pdf` | 用户密码为空；所有者限制修改、复制与注释；含已签名与空签名字段 | 用户（空）/ 所有者 `pdfx-owner` |
 | structure | `structure-metadata.pdf` | 两级书签、URI 链接、Info/XMP 元数据、内嵌附件 | — |
+| layers | `layers.pdf` | 两页三个可选内容组（`/OCProperties` + UTF-16 中文组名）；红色图层跨两页，绿色仅第二页，蓝色默认隐藏并嵌套在红色标记内容块内 | — |
 | large | `large-500-pages.pdf` | 500 页最小“大文件”样例（约 146KB） | — |
 | rotated | `rotated-mixed-size.pdf` | 旋转 90/0/270，三种页面尺寸 | — |
 | malformed | `malformed-truncated.pdf` | 文件中途截断，缺少 xref/trailer；PDFKit 拒绝打开 | — |

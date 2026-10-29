@@ -1,0 +1,80 @@
+%PDF-1.7
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R /OCProperties 8 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Properties << /MC0 10 0 R /MC1 11 0 R /MC2 12 0 R >> >> /Contents 4 0 R >>
+endobj
+4 0 obj
+<<  /Length 101 >>
+stream
+/OC /MC0 BDC
+q 1 0 0 rg 72 500 200 100 re f Q
+/OC /MC2 BDC
+q 0 0 1 rg 300 500 200 100 re f Q
+EMC
+EMC
+
+endstream
+endobj
+5 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Properties << /MC0 10 0 R /MC1 11 0 R /MC2 12 0 R >> >> /Contents 6 0 R >>
+endobj
+6 0 obj
+<<  /Length 101 >>
+stream
+/OC /MC0 BDC
+q 1 0 0 rg 72 500 200 100 re f Q
+EMC
+/OC /MC1 BDC
+q 0 1 0 rg 300 500 200 100 re f Q
+EMC
+
+endstream
+endobj
+7 0 obj
+null
+endobj
+8 0 obj
+<< /OCGs [10 0 R 11 0 R 12 0 R] /D 9 0 R >>
+endobj
+9 0 obj
+<< /Type /OCProperties /ListMode /VisiblePages /Order [10 0 R 11 0 R 12 0 R] /ON [10 0 R 11 0 R] /OFF [12 0 R] /BaseState /OFF /AS [<< /Event /View /Category [/View] /OCGs [10 0 R 11 0 R] >>] >>
+endobj
+10 0 obj
+<< /Type /OCG /Name <feff7ea2827256fe5c42> >>
+endobj
+11 0 obj
+<< /Type /OCG /Name <feff7eff827256fe5c42> >>
+endobj
+12 0 obj
+<< /Type /OCG /Name <feff84dd827256fe5c42> >>
+endobj
+13 0 obj
+<< /Title (PDFX layers fixture) /Author (PDFX QA) >>
+endobj
+xref
+0 14
+0000000000 65535 f 
+0000000015 00000 n 
+0000000084 00000 n 
+0000000147 00000 n 
+0000000305 00000 n 
+0000000458 00000 n 
+0000000616 00000 n 
+0000000769 00000 n 
+0000000789 00000 n 
+0000000848 00000 n 
+0000001058 00000 n 
+0000001120 00000 n 
+0000001182 00000 n 
+0000001244 00000 n 
+trailer
+<< /Size 14 /Root 1 0 R /Info 13 0 R >>
+startxref
+1313
+%%EOF

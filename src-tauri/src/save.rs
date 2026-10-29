@@ -182,6 +182,21 @@ pub enum ObjectEdit {
         fields: Vec<crate::form_create::FormFieldSpec>,
         appearances: Vec<crate::form_create::ExistingFieldAppearance>,
     },
+    /// Rewrites `/OCProperties` and removes deleted layers' marked content.
+    ///
+    /// The state is derived from the session on every save, so repeated saves
+    /// are idempotent and undo/redo is reflected in the output.
+    Layers(crate::layers::LayerSaveState),
+    /// Maps the OCG clones a copied page references back to the canonical
+    /// layer objects without changing visibility.
+    ///
+    /// `copy_page` imports the page through PDFium, which clones the OCG
+    /// dictionaries the page's resources point at. Those clones are not in
+    /// `/OCProperties`, so without this rewrite a layer hidden by the source
+    /// configuration would render visible in the output even when the session
+    /// never touched the layer panel. `Layers` already performs the rewrite;
+    /// this edit covers saves with an untouched layer state.
+    LayerAliases,
 }
 
 /// Per-document save state, kept next to the PDFium document.
@@ -437,6 +452,17 @@ pub(crate) fn serialize_live_document(
         &entry.pages,
         &entry.document,
     )?);
+    // Layer visibility, names and deletions are re-derived from the session.
+    // The edit is omitted when the layer state equals the source baseline, so
+    // saving a document with untouched layers does not rewrite /OCProperties.
+    if let Some(layers) = entry.layers.save_state() {
+        object_edits.push(ObjectEdit::Layers(layers));
+    } else if entry.has_included_copies() {
+        // A copied page carries OCG clones that would ignore the source
+        // visibility, so they are mapped back to canonical layers even when
+        // the session never touched the layer panel.
+        object_edits.push(ObjectEdit::LayerAliases);
+    }
     // Every lopdf-side change — object edits, deferred annotation dictionary
     // entries, the page arrangement and the attachment name tree — is written
     // in one appended revision after PDFium's incremental one, keeping a
@@ -2013,6 +2039,8 @@ fn apply_object_edit(
             fields,
             appearances,
         } => crate::form_create::apply_created_fields(incremental, fields, appearances),
+        ObjectEdit::Layers(state) => crate::layers::apply_layer_edit(incremental, state),
+        ObjectEdit::LayerAliases => crate::layers::remap_copied_page_aliases(incremental),
     }
 }
 
