@@ -1826,7 +1826,12 @@ fn resizing_original_cjk_and_embedded_text_preserves_font_and_reverses_wrapping(
         )
         .unwrap()
         .target;
-        assert_eq!(narrow.font_family, target.font_family);
+        if narrow.font_family != target.font_family {
+            // The synthetic FangSong PDF has no embedded program. Machines
+            // without that face use the bundled FangSong fallback.
+            assert!(!target.keep_original_font);
+            assert_eq!(narrow.font_family, "Zhuque Fangsong");
+        }
         assert_eq!(narrow.font_size, target.font_size);
         assert!(narrow.height > target.font_size * 1.2);
         let wide = transform_text_box(
@@ -1844,7 +1849,7 @@ fn resizing_original_cjk_and_embedded_text_preserves_font_and_reverses_wrapping(
         )
         .unwrap()
         .target;
-        assert_eq!(wide.font_family, target.font_family);
+        assert_eq!(wide.font_family, narrow.font_family);
         assert_eq!(wide.font_size, target.font_size);
         assert!(wide.height < narrow.height);
         let text = extract_text(id.clone(), 0)

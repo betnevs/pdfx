@@ -809,7 +809,15 @@ struct TableRecord {
 
 /// The table directory of an sfnt program.
 fn table_records(font: &[u8]) -> Option<Vec<TableRecord>> {
-    if font.len() < 12 {
+    if font.len() < 12
+        || !matches!(
+            &font[..4],
+            b"\x00\x01\x00\x00" | b"OTTO" | b"true" | b"typ1"
+        )
+    {
+        // A TTC has a collection directory, not an sfnt table directory.
+        // Interpreting its version/face offsets as tables corrupts installed
+        // Windows collections such as SimSun before face_index is applied.
         return None;
     }
     let num_tables = u16::from_be_bytes([font[4], font[5]]) as usize;
@@ -1161,6 +1169,31 @@ fn table_checksum(data: &[u8]) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn large_ttc_is_not_rewritten_as_a_single_sfnt() {
+        let source = include_bytes!("../tests/fonts/LiberationSans-Regular.ttf");
+        let mut face = source.to_vec();
+        let count = u16::from_be_bytes([face[4], face[5]]) as usize;
+        for index in 0..count {
+            let base = 12 + index * 16 + 8;
+            let offset = u32::from_be_bytes(face[base..base + 4].try_into().unwrap());
+            face[base..base + 4].copy_from_slice(&(offset + 32).to_be_bytes());
+        }
+        let mut collection = b"ttcf".to_vec();
+        for value in [0x0002_0000u32, 2, 32, 32, 0, 0, 0] {
+            collection.extend_from_slice(&value.to_be_bytes());
+        }
+        collection.extend_from_slice(&face);
+        // Large collections made the old sfnt directory parser accidentally
+        // accept TTC offsets as table records, then corrupt the font.
+        collection.resize(8 * 1024 * 1024, 0);
+        assert!(ttf_parser::Face::parse(&collection, 1).is_ok());
+        assert!(table_records(&collection).is_none());
+        let subset = subset_program(&collection, 1, "Collection", false, "PDFX", 400)
+            .expect("a selected collection face can be subset without rewriting its header");
+        assert!(missing_characters_in(&subset.bytes, 0, "PDFX").is_empty());
+    }
 
     #[test]
     fn serif_detection_keeps_hei_and_pingfang_faces_sans() {

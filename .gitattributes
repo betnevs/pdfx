@@ -1,2 +1,8 @@
+# Keep PDF byte offsets and embedded stream lengths unchanged on every OS.
+*.pdf binary
+# Rust include_bytes! fixtures and scripts must not acquire checkout CRLFs.
+*.rs text eol=lf
+*.sh text eol=lf
+
 # Preserve third-party license notices as supplied by their authors.
 src-tauri/fonts/*-OFL.txt -whitespace

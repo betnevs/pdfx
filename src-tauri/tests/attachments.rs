@@ -467,6 +467,9 @@ fn undo_and_redo_cover_adding_an_attachment() {
     close_document(document.document_id).expect("close");
 }
 
+// These source filenames cannot exist on Windows. The sanitizer itself
+// is tested on all platforms in attachments::tests.
+#[cfg(unix)]
 #[test]
 fn opening_an_attachment_requires_confirmation_and_stages_safe_bytes() {
     let dir = TempDir::new("open-confirm");
@@ -520,6 +523,9 @@ fn opening_an_attachment_requires_confirmation_and_stages_safe_bytes() {
     close_document(document.document_id).expect("close");
 }
 
+// These source filenames cannot exist on Windows. The sanitizer itself
+// is tested on all platforms in attachments::tests.
+#[cfg(unix)]
 #[test]
 fn hostile_attachment_names_cannot_escape_or_corrupt_the_saved_pdf() {
     let dir = TempDir::new("hostile-names");

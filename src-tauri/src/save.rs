@@ -2777,7 +2777,12 @@ fn copy_to_backup(output: &Path, backup: &Path) -> Result<(), CommandError> {
 
     fs::copy(output, &temp_path)
         .map_err(|error| save_failure("could not back up the Output Document", output, error))?;
-    let synced = fs::File::open(&temp_path).and_then(|file| file.sync_all());
+    // FlushFileBuffers on Windows requires a handle with write access.
+    // Do not truncate: this is the just-copied previous output.
+    let synced = OpenOptions::new()
+        .write(true)
+        .open(&temp_path)
+        .and_then(|file| file.sync_all());
     if let Err(error) = synced {
         let _ = fs::remove_file(&temp_path);
         return Err(save_failure(

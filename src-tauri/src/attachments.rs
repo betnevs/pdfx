@@ -908,3 +908,20 @@ pub(crate) fn media_type_for_name(name: &str) -> &'static str {
         _ => "application/octet-stream",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_attachment_name;
+
+    #[test]
+    fn hostile_names_are_safe_on_every_platform() {
+        for (raw, safe) in [
+            (r"..\..\escape.txt", "escape.txt"),
+            ("bad\x01name.txt", "bad_name.txt"),
+            ("CON.txt", "_CON.txt"),
+            (r"..\..\owned.txt", "owned.txt"),
+        ] {
+            assert_eq!(sanitize_attachment_name(raw), safe);
+        }
+    }
+}

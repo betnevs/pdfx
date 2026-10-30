@@ -483,7 +483,7 @@ fn the_saved_subset_has_correct_cids_widths_and_unicode() {
 }
 
 #[test]
-fn a_non_embedded_original_font_falls_back_and_reports_the_change() {
+fn a_non_embedded_original_font_uses_installed_copy_or_reports_fallback() {
     let pdf = synthetic::cjk_mixed_pdf();
     let document_id = open_synthetic(&pdf);
     let layer = extract_text_layer(document_id.clone(), 0).expect("text layer");
@@ -498,17 +498,17 @@ fn a_non_embedded_original_font_falls_back_and_reports_the_change() {
         "中文排版测试 PDF".to_owned(),
     )
     .expect("edit a non-embedded CJK font");
-    let font = result.font.expect("the fallback must be reported");
-    assert!(font.fallback);
-    assert_eq!(font.original_family, "SimSun");
-    // SimSun is a Song-style face, so the serif companion preserves the
-    // document's look instead of switching to a sans-serif font.
-    assert_eq!(font.family, "Noto Serif SC");
-    let reason = font.reason.expect("the fallback needs a reason");
-    assert!(
-        reason.contains("SimSun") && reason.contains("not embedded"),
-        "the reason should name the font and why it was replaced: {reason}"
-    );
+    if let Some(font) = result.font {
+        assert!(font.fallback);
+        assert_eq!(font.original_family, "SimSun");
+        assert_eq!(font.family, "Noto Serif SC");
+        let reason = font.reason.expect("the fallback needs a reason");
+        assert!(reason.contains("SimSun") && reason.contains("not embedded"));
+    } else {
+        // Windows can supply an installed SimSun collection. Keeping that
+        // exact family is preferable to substituting the bundled Song face.
+        assert_eq!(result.target.font_family, "SimSun");
+    }
 
     let edited = extract_text_layer(document_id.clone(), 0).expect("edited layer");
     let compact: String = edited.text.chars().filter(|c| !c.is_whitespace()).collect();
