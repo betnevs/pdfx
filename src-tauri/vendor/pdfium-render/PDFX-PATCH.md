@@ -50,8 +50,9 @@ safe wrapper lives in `src-tauri/src/pdfium_adapter.rs`.
 
 ## Patch scope
 
-Seventeen files change. Each hunk is additive; the permissions hunk only names
-security-handler revisions upstream treated as unknown.
+Eighteen files change. Most hunks are additive; permissions extend known
+security-handler revisions, and annotation color fallbacks remove an invalid
+cast between unrelated native handle types.
 
 ### `src/pdf/document.rs`
 
@@ -270,3 +271,13 @@ cargo test --test cjk_fonts
   through the enum, which does close the handle.
 - The patch adds no raw-handle accessor. Any future capability must be added
   here with a typed, safe method rather than exposing `FPDF_*` handles.
+
+### `src/pdf/document/page/annotation/private.rs`
+
+- Removed four fallbacks that cast `FPDF_ANNOTATION` to `FPDF_PAGEOBJECT`
+  when PDFium declines dictionary color access for an appearance stream.
+  Those handles refer to unrelated native objects; passing one to the other
+  API caused Windows access violations. Color access now returns an error in
+  that case. PDFX retains its own color metadata and regenerates appearances.
+- `tests/annotation_lifecycle.rs` exercises color getters and setters after
+  adding an appearance, then saves and reopens the annotation metadata.

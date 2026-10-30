@@ -13,7 +13,7 @@ pub(crate) mod internal {
         FPDF_ANNOT_FLAG_HIDDEN, FPDF_ANNOT_FLAG_INVISIBLE, FPDF_ANNOT_FLAG_LOCKED,
         FPDF_ANNOT_FLAG_NONE, FPDF_ANNOT_FLAG_NOROTATE, FPDF_ANNOT_FLAG_NOVIEW,
         FPDF_ANNOT_FLAG_NOZOOM, FPDF_ANNOT_FLAG_PRINT, FPDF_ANNOT_FLAG_READONLY,
-        FPDF_ANNOT_FLAG_TOGGLENOVIEW, FPDF_OBJECT_STRING, FPDF_PAGEOBJECT, FPDF_WCHAR, FS_RECTF,
+        FPDF_ANNOT_FLAG_TOGGLENOVIEW, FPDF_OBJECT_STRING, FPDF_WCHAR, FS_RECTF,
     };
     use crate::error::{PdfiumError, PdfiumInternalError};
     use crate::pdf::color::PdfColor;
@@ -401,26 +401,14 @@ pub(crate) mod internal {
             }) {
                 Ok(PdfColor::new(r as u8, g as u8, b as u8, a as u8))
             } else {
-                // The FPDFAnnot_GetColor() function returns false if the annotation
-                // is using appearance streams. In this case, the Pdfium documentation
-                // states that we must use FPDFPath_GetFillColor() instead; that function
-                // is deprecated, and says to use FPDFPageObj_GetFillColor().
-
-                if self.bindings().is_true(unsafe {
-                    self.bindings().FPDFPageObj_GetFillColor(
-                        self.handle() as FPDF_PAGEOBJECT,
-                        &mut r,
-                        &mut g,
-                        &mut b,
-                        &mut a,
-                    )
-                }) {
-                    Ok(PdfColor::new(r as u8, g as u8, b as u8, a as u8))
-                } else {
-                    Err(PdfiumError::PdfiumLibraryInternalError(
-                        PdfiumInternalError::Unknown,
-                    ))
-                }
+                // An annotation handle is NOT an FPDF_PAGEOBJECT. In particular,
+                // appearance streams make FPDFAnnot_*Color return false; casting
+                // the annotation to a page object here causes undefined behavior
+                // (an access violation on Windows). Callers must inspect actual
+                // appearance objects or regenerate the appearance explicitly.
+                Err(PdfiumError::PdfiumLibraryInternalError(
+                    PdfiumInternalError::Unknown,
+                ))
             }
         }
 
@@ -439,26 +427,14 @@ pub(crate) mod internal {
             }) {
                 Ok(())
             } else {
-                // The FPDFAnnot_SetColor() function returns false if the annotation
-                // is using appearance streams. In this case, the Pdfium documentation
-                // states that we must use FPDFPath_SetFillColor() instead; that function
-                // is deprecated, and says to use FPDFPageObj_SetFillColor().
-
-                if self.bindings().is_true(unsafe {
-                    self.bindings().FPDFPageObj_SetFillColor(
-                        self.handle() as FPDF_PAGEOBJECT,
-                        fill_color.red() as c_uint,
-                        fill_color.green() as c_uint,
-                        fill_color.blue() as c_uint,
-                        fill_color.alpha() as c_uint,
-                    )
-                }) {
-                    Ok(())
-                } else {
-                    Err(PdfiumError::PdfiumLibraryInternalError(
-                        PdfiumInternalError::Unknown,
-                    ))
-                }
+                // An annotation handle is NOT an FPDF_PAGEOBJECT. In particular,
+                // appearance streams make FPDFAnnot_*Color return false; casting
+                // the annotation to a page object here causes undefined behavior
+                // (an access violation on Windows). Callers must inspect actual
+                // appearance objects or regenerate the appearance explicitly.
+                Err(PdfiumError::PdfiumLibraryInternalError(
+                    PdfiumInternalError::Unknown,
+                ))
             }
         }
 
@@ -485,26 +461,14 @@ pub(crate) mod internal {
             }) {
                 Ok(PdfColor::new(r as u8, g as u8, b as u8, a as u8))
             } else {
-                // The FPDFAnnot_GetColor() function returns false if the annotation
-                // is using appearance streams. In this case, the Pdfium documentation
-                // states that we must use FPDFPath_GetStrokeColor() instead; that function
-                // is deprecated, and says to use FPDFPageObj_GetStrokeColor().
-
-                if self.bindings().is_true(unsafe {
-                    self.bindings().FPDFPageObj_GetStrokeColor(
-                        self.handle() as FPDF_PAGEOBJECT,
-                        &mut r,
-                        &mut g,
-                        &mut b,
-                        &mut a,
-                    )
-                }) {
-                    Ok(PdfColor::new(r as u8, g as u8, b as u8, a as u8))
-                } else {
-                    Err(PdfiumError::PdfiumLibraryInternalError(
-                        PdfiumInternalError::Unknown,
-                    ))
-                }
+                // An annotation handle is NOT an FPDF_PAGEOBJECT. In particular,
+                // appearance streams make FPDFAnnot_*Color return false; casting
+                // the annotation to a page object here causes undefined behavior
+                // (an access violation on Windows). Callers must inspect actual
+                // appearance objects or regenerate the appearance explicitly.
+                Err(PdfiumError::PdfiumLibraryInternalError(
+                    PdfiumInternalError::Unknown,
+                ))
             }
         }
 
@@ -523,26 +487,14 @@ pub(crate) mod internal {
             }) {
                 Ok(())
             } else {
-                // The FPDFAnnot_SetColor() function returns false if the annotation
-                // is using appearance streams. In this case, the Pdfium documentation
-                // states that we must use FPDFPath_SetStrokeColor() instead; that function
-                // is deprecated, and says to use FPDFPageObj_SetStrokeColor().
-
-                if self.bindings().is_true(unsafe {
-                    self.bindings().FPDFPageObj_SetStrokeColor(
-                        self.handle() as FPDF_PAGEOBJECT,
-                        stroke_color.red() as c_uint,
-                        stroke_color.green() as c_uint,
-                        stroke_color.blue() as c_uint,
-                        stroke_color.alpha() as c_uint,
-                    )
-                }) {
-                    Ok(())
-                } else {
-                    Err(PdfiumError::PdfiumLibraryInternalError(
-                        PdfiumInternalError::Unknown,
-                    ))
-                }
+                // An annotation handle is NOT an FPDF_PAGEOBJECT. In particular,
+                // appearance streams make FPDFAnnot_*Color return false; casting
+                // the annotation to a page object here causes undefined behavior
+                // (an access violation on Windows). Callers must inspect actual
+                // appearance objects or regenerate the appearance explicitly.
+                Err(PdfiumError::PdfiumLibraryInternalError(
+                    PdfiumInternalError::Unknown,
+                ))
             }
         }
 
