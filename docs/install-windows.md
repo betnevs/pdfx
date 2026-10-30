@@ -118,3 +118,7 @@ node scripts/verify-windows-config.mjs
 成功后，从运行页面的 **Artifacts → PDFX-windows-x64** 下载构建产物。
 给普通用户分发其中的 `PDFX_0.1.0_x64-setup.exe` 即可；`BUILD-INFO.txt` 记录源提交，`SHA256SUMS-windows.txt` 用于校验。
 Artifacts 保留 14 天，需要长期保存时请下载归档。云端测试不替代 Windows 桌面实际安装与编辑验收。
+
+仅需要安装器时，可运行 **Actions → Prepare Windows installer download**，填入成功的 Windows 构建 run ID。它会验证已有产物并提供 `PDFX-windows-installer`（安装器、校验和、安装说明及来源信息），无需重编译，也无需下载 MSI 和便携版。
+
+首个通过 Windows 云端验证的版本及平台修复见 [Windows 构建记录](releases/2026-10-30-windows.md)。
