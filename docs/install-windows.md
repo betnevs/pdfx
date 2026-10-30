@@ -106,5 +106,7 @@ node scripts/verify-windows-config.mjs
 
 - 安装目录中的 `pdfium.dll`：PDFium 渲染引擎（x64）。
 - 安装目录中的 `pdfium-licenses/`：PDFium 的 BSD-3-Clause 许可证及第三方许可证。
+- 安装目录中的 `font-licenses/`：八款内置字体的 SIL OFL 1.1 许可证与出处清单。
+- PDFX 会自动读取本机已安装的字体，包括 Windows 自带的微软雅黑、宋体与 WPS Office 随版本提供的字体，出现在“WPS 字体”与“本机字体”分组中；这些字体不随安装包分发，WPS Office 的专属字体只在安装了它的机器上出现。
 - 安装目录中的 `INSTALL-windows.md`：本说明的副本。
-- 便携包根目录：`PDFX.exe`、`pdfium.dll`、`pdfium-licenses/`、`INSTALL-windows.md`。
+- 便携包根目录：`PDFX.exe`、`pdfium.dll`、`pdfium-licenses/`、`font-licenses/`、`INSTALL-windows.md`。

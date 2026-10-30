@@ -244,6 +244,7 @@ export interface TextBoxRunView {
   bold: boolean;
   italic: boolean;
   underline: boolean;
+  strikeout?: boolean;
   /** Fill colour as `#rrggbb`. */
   color: string;
 }
@@ -260,6 +261,7 @@ export interface TextBoxTargetView {
   text: string;
   fontFamily: string;
   fontSize: number;
+  lineHeight?: number;
   /** Fill colour as `#rrggbb`. */
   color: string;
   x: number;
@@ -270,6 +272,7 @@ export interface TextBoxTargetView {
   bold: boolean;
   italic: boolean;
   underline: boolean;
+  strikeout?: boolean;
   alignment: TextAlignment;
   /** Clockwise rotation in degrees in display space. */
   rotation: number;
@@ -277,6 +280,13 @@ export interface TextBoxTargetView {
   autoHeight: boolean;
   /** Created by the Text Box tool rather than being an original Text Object. */
   created: boolean;
+  /**
+   * True when the box still paints the PDF's original embedded font, which
+   * PDFX can preserve while only the size or colour changes. The style panel
+   * then offers that font as a choice and disables controls that would need a
+   * replacement font.
+   */
+  keepOriginalFont: boolean;
   /**
    * Styled character ranges, sorted and non-overlapping.
    *
@@ -296,6 +306,7 @@ export interface TextBoxStyleView {
   bold: boolean;
   italic: boolean;
   underline: boolean;
+  strikeout?: boolean;
   /** Fill colour as `#rrggbb`. */
   color: string;
   alignment: TextAlignment;
@@ -304,11 +315,16 @@ export interface TextBoxStyleView {
 /**
  * One font the Text Box editor may use.
  *
- * `source` distinguishes PDF base-14 fonts from embedded font programs;
- * `embedded` says whether a program is written into the saved PDF and
- * `coverage` states which characters the font can render. The registry lists
- * the base-14 families plus the bundled Noto Sans SC CJK family; embedded
- * source fonts in an opened document are reused without appearing here.
+ * `source` distinguishes PDF base-14 fonts, bundled font programs and fonts
+ * installed on this machine; `embedded` says whether a program is written
+ * into the saved PDF and `coverage` states which characters the font can
+ * render. The registry lists the base-14 families, the bundled OFL CJK faces
+ * (Noto Sans/Serif SC, Zhuque Fangsong, LXGW WenKai, Smiley Sans and the
+ * ZCOOL display faces), and then the embeddable fonts installed on the
+ * machine, including the faces WPS Office ships. Installed fonts are read
+ * from their original location; only a subset is embedded in the document.
+ * Embedded source fonts in an opened document are reused without appearing
+ * here.
  */
 export interface TextBoxFontView {
   family: string;
@@ -316,10 +332,10 @@ export interface TextBoxFontView {
   bold: boolean;
   italic: boolean;
   postscriptName: string;
-  source: "base14" | "embedded" | string;
+  source: "base14" | "embedded" | "wps" | "system" | string;
   embedded: boolean;
   embeddable: boolean;
-  coverage: "win_ansi" | "cjk" | "full" | string;
+  coverage: "win_ansi" | "cjk" | "system" | string;
 }
 
 /** Geometry for a new Text Box, in display-space points. */
@@ -2708,4 +2724,34 @@ export function toCommandError(error: unknown): CommandError {
   }
 
   return { code: "internal", message: String(error) };
+}
+
+export interface OutlineEntry { title: string; pageIndex: number | null; depth: number; }
+export async function documentOutline(documentId: string): Promise<OutlineEntry[]> {
+  return invoke<OutlineEntry[]>("document_outline", {documentId});
+}
+
+export interface TextBoxTransformPreview {image:PageImageView;target:TextBoxTargetView;}
+export async function previewTextBoxTransform(documentId:string,pageIndex:number,boxId:number,transform:TextBoxTransformRequest,scale:number):Promise<TextBoxTransformPreview> {
+  return invoke<TextBoxTransformPreview>("preview_text_box_transform",{documentId,pageIndex,boxId,transform,scale});
+}
+
+/** Clears the history index without removing any document from disk. */
+export async function clearRecentFiles(): Promise<RecentFileView[]> {
+  return invoke<RecentFileView[]>("clear_recent_files");
+}
+
+/** Web-font subsets using the same embedded/fallback programs as text commit. */
+export async function textBoxEditorFonts(documentId: string, pageIndex: number, boxId: number, text: string): Promise<string[]> {
+  return invoke<string[]>("text_box_editor_fonts", {documentId, pageIndex, boxId, text});
+}
+
+export interface TextBoxMovePreview {
+  background: PageImageView;
+  foreground: PageRegionView;
+}
+
+/** A reusable native background/glyph pair; null requests the safe full-page path. */
+export async function prepareTextBoxMovePreview(documentId: string, pageIndex: number, boxId: number, scale: number): Promise<TextBoxMovePreview | null> {
+  return invoke<TextBoxMovePreview | null>("prepare_text_box_move_preview", {documentId, pageIndex, boxId, scale});
 }

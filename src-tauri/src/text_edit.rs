@@ -27,6 +27,7 @@ use crate::commands::{
     CommandErrorCode, DisplayGeometry, OpenDocument,
 };
 use crate::fonts;
+use crate::system_fonts;
 
 /// Horizontal alignment of the lines inside a Text Box.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -42,13 +43,15 @@ pub enum TextAlignment {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TextBoxStyleView {
-    /// A family advertised by [`text_box_fonts`]: one of the base-14 families
-    /// (Helvetica, Times, Courier) or the bundled Noto Sans SC.
+    /// A family advertised by [`text_box_fonts`]: one of the base-14
+    /// families, a bundled OFL face, or a font installed on this machine.
     pub font_family: String,
     pub font_size: f32,
     pub bold: bool,
     pub italic: bool,
     pub underline: bool,
+    #[serde(default)]
+    pub strikeout: bool,
     /// Fill colour as `#rrggbb`.
     pub color: String,
     pub alignment: TextAlignment,
@@ -57,25 +60,33 @@ pub struct TextBoxStyleView {
 /// One font the Text Box editor may use.
 ///
 /// The metadata is deliberately explicit so the style panel can describe each
-/// family honestly: `source` distinguishes PDF base-14 fonts from embedded
-/// font programs, `embedded` says whether a program must be written into the
-/// PDF, and `coverage` states which characters the font can render.
+/// family honestly: `source` distinguishes PDF base-14 fonts, bundled font
+/// programs and fonts installed on this machine, `embedded` says whether a
+/// program must be written into the PDF, and `coverage` states which
+/// characters the font can render.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TextBoxFontView {
     pub family: String,
     pub label: String,
+    /// For base-14 entries, this variant's weight; for bundled and installed
+    /// families, whether a bold face or weight axis is available.
     pub bold: bool,
+    /// For base-14 entries, this variant's slant; for installed families,
+    /// whether an italic face is available. Bundled families have none.
     pub italic: bool,
     pub postscript_name: String,
-    /// `base14` for the built-in fonts, `embedded` for the bundled Noto Sans
-    /// SC program that is subset into the saved PDF.
+    /// `base14` for the built-in fonts, `embedded` for the bundled font
+    /// programs, `wps` for fonts shipped by WPS Office and `system` for other
+    /// fonts installed on this machine.
     pub source: String,
     /// True when the font program is embedded in the saved PDF.
     pub embedded: bool,
-    /// True when the project may freely embed the font.
+    /// True when the project may freely embed the font. Installed fonts are
+    /// only offered when their `fsType` permits subsetting.
     pub embeddable: bool,
-    /// `win_ansi` for base-14, `cjk` for the bundled family.
+    /// `win_ansi` for base-14, `cjk` for the bundled family, `system` for
+    /// installed fonts.
     pub coverage: String,
 }
 
@@ -193,10 +204,14 @@ const BASE14_FONTS: [Base14Font; 12] = [
 
 /// The `text_box_fonts` command: every font the Text Box editor may use.
 ///
-/// The base-14 fonts need no program in the document and cover WinAnsi. Noto
-/// Sans SC is bundled with the app (SIL OFL 1.1) and embedded as a per-Text
-/// Box subset, which is what makes Chinese and mixed Chinese/Latin text
-/// editable; `coverage` tells the panel what it can render.
+/// The base-14 fonts need no program in the document and cover WinAnsi. The
+/// bundled CJK faces are SIL OFL 1.1 fonts embedded as per-Text-Box subsets,
+/// which is what makes Chinese and mixed Chinese/Latin text editable. Fonts
+/// installed on this machine (including WPS Office's 汉仪 and 书宋/仿宋 faces)
+/// are listed last when their embedding permission allows a subset, so a
+/// document that names 微软雅黑 or 宋体 can keep its intended typeface without
+/// PDFX redistributing the font. `coverage` tells the panel what each font can
+/// render.
 #[tauri::command]
 pub fn text_box_fonts() -> Vec<TextBoxFontView> {
     let mut fonts: Vec<TextBoxFontView> = BASE14_FONTS
@@ -213,20 +228,41 @@ pub fn text_box_fonts() -> Vec<TextBoxFontView> {
             coverage: "win_ansi".to_owned(),
         })
         .collect();
-    let bundled = crate::fonts::noto_sans_sc();
-    fonts.push(TextBoxFontView {
-        family: bundled.family.to_owned(),
-        label: bundled.label.to_owned(),
-        // The bundled font is a variable TrueType instance: bold is a real
-        // weight, italic has no face and is refused by `TextBoxStyle`.
-        bold: false,
-        italic: false,
-        postscript_name: bundled.postscript_name.to_owned(),
-        source: "embedded".to_owned(),
-        embedded: true,
-        embeddable: true,
-        coverage: "cjk".to_owned(),
-    });
+    for bundled in crate::fonts::bundled_fonts() {
+        fonts.push(TextBoxFontView {
+            family: bundled.family.to_owned(),
+            label: bundled.label.to_owned(),
+            // The bundled fonts have no italic face; the Noto faces are
+            // variable and honour bold, while the static faces keep their
+            // regular outlines for bold text. Refusing italic in
+            // `TextBoxStyle::from_view` is clearer than dropping it.
+            bold: false,
+            italic: false,
+            postscript_name: bundled.postscript_name.to_owned(),
+            source: "embedded".to_owned(),
+            embedded: true,
+            embeddable: true,
+            coverage: "cjk".to_owned(),
+        });
+    }
+    // Fonts already installed on this machine (including the faces WPS Office
+    // ships) are read from their original location and only their subset is
+    // written into the document. This is what lets a document that names
+    // 微软雅黑, 宋体 or a 汉仪 face keep its intended typeface without PDFX
+    // redistributing any proprietary font.
+    for installed in system_fonts::catalog().families() {
+        fonts.push(TextBoxFontView {
+            family: installed.family.clone(),
+            label: installed.label.clone(),
+            bold: installed.bold,
+            italic: installed.italic,
+            postscript_name: installed.postscript_name.clone(),
+            source: installed.source.to_owned(),
+            embedded: false,
+            embeddable: true,
+            coverage: "system".to_owned(),
+        });
+    }
     fonts
 }
 
@@ -238,6 +274,27 @@ fn base14_font(family: &str, bold: bool, italic: bool) -> Option<&'static Base14
 
 fn builtin_for_style(family: &str, bold: bool, italic: bool) -> Option<PdfFontBuiltin> {
     base14_font(family, bold, italic).map(|font| font.builtin)
+}
+
+/// True when PDFX can reproduce `family` from its own registry: a base-14
+/// family or one of the bundled CJK faces. Installed fonts are deliberately
+/// not advertised here: a Text Box painted with a document's embedded program
+/// keeps offering that exact program ("原字体"), even when a macOS or WPS copy
+/// of the same family is installed and could be used for new text. The
+/// installed copy takes over only when the original cannot paint a character,
+/// and the canvas reports that as a fallback.
+fn font_is_advertised(family: &str) -> bool {
+    fonts::is_bundled_family(family) || built_in_for(base_font_name(family)).is_some()
+}
+
+fn validate_font_size(size: f32) -> Result<(), CommandError> {
+    if !size.is_finite() || !(4.0..=400.0).contains(&size) {
+        return Err(CommandError::new(
+            CommandErrorCode::InvalidArgument,
+            format!("font size {size} is outside 4..400 points"),
+        ));
+    }
+    Ok(())
 }
 
 fn parse_color(color: &str) -> Result<(u8, u8, u8), CommandError> {
@@ -262,6 +319,7 @@ pub(crate) struct TextBoxStyle {
     pub(crate) bold: bool,
     pub(crate) italic: bool,
     pub(crate) underline: bool,
+    pub(crate) strikeout: bool,
     pub(crate) color: (u8, u8, u8),
     pub(crate) alignment: TextAlignment,
 }
@@ -301,6 +359,8 @@ pub struct TextBoxRunView {
     pub bold: bool,
     pub italic: bool,
     pub underline: bool,
+    #[serde(default)]
+    pub strikeout: bool,
     /// Fill colour as `#rrggbb`.
     pub color: String,
 }
@@ -313,6 +373,7 @@ impl TextBoxStyle {
             bold: false,
             italic: false,
             underline: false,
+            strikeout: false,
             color: (0, 0, 0),
             alignment: TextAlignment::Left,
         }
@@ -321,21 +382,39 @@ impl TextBoxStyle {
     fn from_view(view: &TextBoxStyleView) -> Result<Self, CommandError> {
         let family = view.font_family.trim();
         let bundled = fonts::is_bundled_family(family);
+        let base14 = builtin_for_style(family, view.bold, view.italic).is_some();
+        let installed = system_fonts::catalog();
         if bundled {
-            // Noto Sans SC is a variable font with a weight axis but no italic
-            // face. Refusing italic is clearer than silently dropping it.
+            // The bundled families have no italic face. The Noto companions
+            // have a weight axis; Zhuque Fangsong is regular-only, so bold
+            // text keeps its regular outlines. Refusing italic is clearer
+            // than dropping it.
             if view.italic {
                 return Err(CommandError::new(
                     CommandErrorCode::UnsupportedFont,
                     format!(
                         "font {} has no italic variant; clear italic or choose a base-14 italic font",
-                        fonts::NOTO_SANS_SC_FAMILY
+                        fonts::normalize_family(family)
                     ),
                 ));
             }
-        } else if builtin_for_style(family, view.bold, view.italic).is_none() {
+        } else if !base14 && installed.has_family(family) {
+            // Installed families are used exactly as the machine provides
+            // them. Italic needs a real italic face; bold may fall back to the
+            // regular outlines when the family has no bold face.
+            if view.italic && !installed.has_italic(family) {
+                return Err(CommandError::new(
+                    CommandErrorCode::UnsupportedFont,
+                    format!(
+                        "font {} has no italic variant installed; clear italic or choose \
+                         another font",
+                        installed.family_for_name(family).unwrap_or(family)
+                    ),
+                ));
+            }
+        } else if !base14 {
             let mut available: Vec<&str> = BASE14_FONTS.iter().map(|font| font.label).collect();
-            available.push(fonts::noto_sans_sc().label);
+            available.extend(crate::fonts::bundled_fonts().iter().map(|font| font.label));
             return Err(CommandError::new(
                 CommandErrorCode::UnsupportedFont,
                 format!(
@@ -345,15 +424,10 @@ impl TextBoxStyle {
                 ),
             ));
         }
-        if !view.font_size.is_finite() || !(4.0..=400.0).contains(&view.font_size) {
-            return Err(CommandError::new(
-                CommandErrorCode::InvalidArgument,
-                format!("font size {} is outside 4..400 points", view.font_size),
-            ));
-        }
+        validate_font_size(view.font_size)?;
         Ok(Self {
-            font_family: if bundled {
-                fonts::NOTO_SANS_SC_FAMILY.to_owned()
+            font_family: if bundled || installed.has_family(family) {
+                fonts::normalize_family(family)
             } else {
                 family.to_owned()
             },
@@ -361,6 +435,7 @@ impl TextBoxStyle {
             bold: view.bold,
             italic: view.italic,
             underline: view.underline,
+            strikeout: view.strikeout,
             color: parse_color(&view.color)?,
             alignment: view.alignment,
         })
@@ -368,6 +443,10 @@ impl TextBoxStyle {
 
     fn is_bundled(&self) -> bool {
         fonts::is_bundled_family(&self.font_family)
+    }
+
+    fn is_installed(&self) -> bool {
+        system_fonts::catalog().has_family(&self.font_family)
     }
 
     fn builtin(&self) -> PdfFontBuiltin {
@@ -402,6 +481,8 @@ pub struct TextBoxTargetView {
     /// Name of the font the original Text Object uses.
     pub font_family: String,
     pub font_size: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_height: Option<f32>,
     /// Fill colour as `#rrggbb`.
     pub color: String,
     pub x: f32,
@@ -413,6 +494,8 @@ pub struct TextBoxTargetView {
     pub bold: bool,
     pub italic: bool,
     pub underline: bool,
+    #[serde(default)]
+    pub strikeout: bool,
     pub alignment: TextAlignment,
     /// Clockwise rotation in degrees in display space.
     pub rotation: f32,
@@ -422,6 +505,12 @@ pub struct TextBoxTargetView {
     /// True when this Text Box was created by the Text Box tool rather than
     /// being an original Text Object. Created boxes may be empty.
     pub created: bool,
+    /// True when the box still paints with the PDF's original embedded font,
+    /// which PDFX can preserve while only the size or colour changes. The
+    /// style panel then offers the original font as a choice and disables the
+    /// controls that need a replacement font.
+    #[serde(default)]
+    pub keep_original_font: bool,
     /// Styled character ranges inside `text`, sorted by start offset. Empty
     /// when the whole box uses the base style above.
     #[serde(default)]
@@ -537,6 +626,7 @@ pub(crate) struct BoxLayout {
     pub(crate) height: f32,
     pub(crate) rotation: f32,
     pub(crate) auto_height: bool,
+    pub(crate) line_height: Option<f32>,
 }
 
 /// The complete record state an undo/redo step restores.
@@ -631,8 +721,22 @@ pub(crate) struct LineEditAction {
     pub(crate) after_objects: Option<Vec<PdfPageObject<'static>>>,
 }
 
+/// A translation keeps the original text objects, glyph spacing, and fonts.
+/// Exact matrices (rather than inverse deltas) make undo pixel-stable.
+pub(crate) struct TextMoveAction {
+    page_index: u32,
+    box_id: u64,
+    before_state: u64,
+    after_state: u64,
+    before_matrices: Vec<PdfMatrix>,
+    after_matrices: Vec<PdfMatrix>,
+    before_layout: Option<BoxLayout>,
+    after_layout: Option<BoxLayout>,
+}
+
 pub(crate) enum EditAction {
     Box(BoxEditAction),
+    TextMove(TextMoveAction),
     Image(ImageEditAction),
     Line(LineEditAction),
     Field(FieldEditAction),
@@ -913,27 +1017,6 @@ fn object_index_for_raw_char(
     None
 }
 
-fn measure_text_width(
-    document: &PdfDocument<'static>,
-    object: &PdfPageTextObject<'_>,
-    text: &str,
-) -> Option<f32> {
-    let font_size = object.unscaled_font_size().value;
-    if !font_size.is_finite() || font_size <= 0.0 || text.is_empty() {
-        return None;
-    }
-    let detached = PdfPageTextObject::new(
-        document,
-        text,
-        object.font().token(),
-        PdfPoints::new(font_size),
-    )
-    .ok()?;
-    let bounds = detached.bounds().ok()?;
-    let width = bounds.width().value;
-    width.is_finite().then_some(width)
-}
-
 fn color_hex(text_object: &PdfPageTextObject<'_>) -> String {
     match text_object.fill_color() {
         Ok(color) => format!(
@@ -1027,7 +1110,7 @@ fn display_rotation_from_matrix(matrix: [f32; 6], page_rotation: u16) -> f32 {
 fn first_text_metadata(
     objects: &PdfPageObjects<'_>,
     start: usize,
-) -> Result<(String, f32, String), CommandError> {
+) -> Result<(String, f32, String, bool), CommandError> {
     let object = objects.get(start).map_err(|error| {
         CommandError::new(
             CommandErrorCode::Internal,
@@ -1040,10 +1123,27 @@ fn first_text_metadata(
             "the Text Box does not start with a text object",
         )
     })?;
-    let font_family = fonts::normalize_family(&text_object.font().name());
-    let font_size = text_object.unscaled_font_size().value;
+    let font = text_object.font();
+    let font_family = fonts::normalize_family(&font.name());
+    let font_is_embedded = font.is_embedded().unwrap_or(false);
+    let font_size = display_font_size(
+        text_object.unscaled_font_size().value,
+        text_object
+            .matrix()
+            .map(|matrix| {
+                [
+                    matrix.a(),
+                    matrix.b(),
+                    matrix.c(),
+                    matrix.d(),
+                    matrix.e(),
+                    matrix.f(),
+                ]
+            })
+            .unwrap_or([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]),
+    );
     let color = color_hex(text_object);
-    Ok((font_family, font_size, color))
+    Ok((font_family, font_size, color, font_is_embedded))
 }
 
 fn run_views(record: &TextBoxRecord) -> Vec<TextBoxRunView> {
@@ -1058,6 +1158,7 @@ fn run_views(record: &TextBoxRecord) -> Vec<TextBoxRunView> {
             bold: run.style.bold,
             italic: run.style.italic,
             underline: run.style.underline,
+            strikeout: run.style.strikeout,
             color: run.style.color_hex(),
         })
         .collect()
@@ -1082,14 +1183,17 @@ fn target_from_record(
     // and rotation mean the text layer's axis-aligned character boxes are not
     // the box outline, so derive nothing from them.
     if let Some(layout) = &record.layout {
-        let (font_family, font_size, color) = match &record.style {
+        let (font_family, font_size, color, font_is_embedded) = match &record.style {
             Some(style) => (
                 style.font_family.clone(),
                 style.font_size,
                 style.color_hex(),
+                false,
             ),
             None => first_text_metadata(objects, record.start)?,
         };
+        let keep_original_font =
+            record.style.is_none() && font_is_embedded && !font_is_advertised(&font_family);
         let (bold, italic) = match &record.style {
             Some(style) => (style.bold, style.italic),
             None => style_flags_from_font_name(&font_family),
@@ -1098,6 +1202,11 @@ fn target_from_record(
             .style
             .as_ref()
             .map(|style| style.underline)
+            .unwrap_or(false);
+        let strikeout = record
+            .style
+            .as_ref()
+            .map(|style| style.strikeout)
             .unwrap_or(false);
         let alignment = record
             .style
@@ -1110,6 +1219,7 @@ fn target_from_record(
             text: record.text.clone(),
             font_family,
             font_size,
+            line_height: layout.line_height.map(|height| height.max(font_size * 1.2)),
             color,
             x: layout.x,
             y: layout.y,
@@ -1118,10 +1228,12 @@ fn target_from_record(
             bold,
             italic,
             underline,
+            strikeout,
             alignment,
             rotation: layout.rotation,
             auto_height: layout.auto_height,
             created: record.created,
+            keep_original_font,
             runs: run_views(record),
         });
     }
@@ -1151,26 +1263,26 @@ fn target_from_record(
     let font = text_object.font();
     let font_name = font.name();
     let font_family = fonts::normalize_family(&font_name);
+    let keep_original_font =
+        font.is_embedded().unwrap_or(false) && !font_is_advertised(&font_family);
     let (bold, italic) = style_flags_from_font_name(&font_name);
-    let font_size = text_object.unscaled_font_size().value;
-    let color = color_hex(text_object);
-    let rotation = text_object
+    let matrix = text_object
         .matrix()
         .map(|matrix| {
-            display_rotation_from_matrix(
-                [
-                    matrix.a(),
-                    matrix.b(),
-                    matrix.c(),
-                    matrix.d(),
-                    matrix.e(),
-                    matrix.f(),
-                ],
-                layer.rotation,
-            )
+            [
+                matrix.a(),
+                matrix.b(),
+                matrix.c(),
+                matrix.d(),
+                matrix.e(),
+                matrix.f(),
+            ]
         })
-        .unwrap_or(0.0);
-    let (x, y, width, height) = legacy_box_rect(x, y, width, height, rotation);
+        .unwrap_or([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+    let font_size = display_font_size(text_object.unscaled_font_size().value, matrix);
+    let color = color_hex(text_object);
+    let rotation = display_rotation_from_matrix(matrix, layer.rotation);
+    let (x, y, _ink_width, height) = legacy_box_rect(x, y, width, height, rotation);
 
     Ok(TextBoxTargetView {
         box_id: record.box_id,
@@ -1178,14 +1290,18 @@ fn target_from_record(
         text: record.text.clone(),
         font_family,
         font_size,
+        line_height: None,
         color,
         x,
         y,
-        width,
+        // The editor must use the same fixed width as native word wrapping.
+        // Ink bounds shrink when text is shortened; the editing frame must not.
+        width: record.width,
         height,
         bold,
         italic,
         underline: false,
+        strikeout: false,
         alignment: TextAlignment::Left,
         rotation,
         // A legacy Text Object is sized by its own glyphs; moving or rotating
@@ -1193,6 +1309,7 @@ fn target_from_record(
         // text-layer height.
         auto_height: true,
         created: record.created,
+        keep_original_font,
         runs: run_views(record),
     })
 }
@@ -1214,6 +1331,412 @@ fn legacy_box_rect(x: f32, y: f32, width: f32, height: f32, rotation: f32) -> (f
     } else {
         (x, y, width, height)
     }
+}
+
+/// One page object's contribution to an editable Text Block, in display space.
+#[derive(Clone)]
+struct BlockObject {
+    text: String,
+    font_name: String,
+    font_size: f32,
+    color: String,
+    rotation: f32,
+    baseline: f32,
+    left: f32,
+    right: f32,
+    top: f32,
+    bottom: f32,
+}
+
+/// PDFium collapses repeated spaces in its reading-order text. Reconstruct
+/// exact integral space advances from this object's own glyph origins, so
+/// reopening an edited box does not turn two saved spaces into one.
+fn object_text_with_spaces(object: &PdfPageTextObject<'_>, page_text: &PdfPageText<'_>) -> String {
+    let text = object.text();
+    if !text.contains(' ') {
+        return text;
+    }
+    let Ok(chars) = page_text.chars_for_object(object) else {
+        return text;
+    };
+    let chars: Vec<_> = chars.iter().collect();
+    let Ok(matrix) = object.matrix() else {
+        return text;
+    };
+    let norm = matrix.a() * matrix.a() + matrix.b() * matrix.b();
+    let Some(advance) = object
+        .font()
+        .character_advance(' ', object.unscaled_font_size())
+    else {
+        return text;
+    };
+    if norm <= 0.0 || advance.value <= 0.0 {
+        return text;
+    }
+    let mut counts = Vec::new();
+    for (index, character) in chars.iter().enumerate() {
+        if character.unicode_char() != Some(' ') {
+            continue;
+        }
+        let count = chars
+            .get(index + 1)
+            .and_then(|next| {
+                let (x, y) = character.origin().ok()?;
+                let (nx, ny) = next.origin().ok()?;
+                let dx = nx.value - x.value;
+                let dy = ny.value - y.value;
+                let along = (dx * matrix.a() + dy * matrix.b()) / norm;
+                let across = (-dx * matrix.b() + dy * matrix.a()) / norm;
+                let spaces = along / advance.value;
+                (across.abs() < 0.05
+                    && (spaces - spaces.round()).abs() < 0.01
+                    && (1.0..=4096.0).contains(&spaces))
+                .then_some(spaces.round() as usize)
+            })
+            .unwrap_or(1);
+        counts.push(count);
+    }
+    if counts.len() != text.chars().filter(|c| *c == ' ').count() {
+        return text;
+    }
+    let mut counts = counts.into_iter();
+    text.chars()
+        .flat_map(|c| {
+            std::iter::repeat_n(
+                c,
+                if c == ' ' {
+                    counts.next().unwrap_or(1)
+                } else {
+                    1
+                },
+            )
+        })
+        .collect()
+}
+
+fn block_font_identity(name: &str) -> &str {
+    let mut name = base_font_name(name);
+    while let Some((base, suffix)) = name.rsplit_once('-') {
+        if suffix.len() != 16 || !suffix.bytes().all(|b| b.is_ascii_hexdigit()) {
+            break;
+        }
+        name = base;
+    }
+    name
+}
+
+/// Reads one page object as a Text Block member, or `None` when it is not a
+/// visible text object. Geometry comes from the text layer so it shares the
+/// coordinate system the frontend draws its dashed edit guides in.
+fn block_object(
+    layer: &crate::commands::TextLayerView,
+    layer_raw_indices: &[usize],
+    page_text: &PdfPageText<'_>,
+    objects: &PdfPageObjects<'_>,
+    object_index: usize,
+) -> Option<BlockObject> {
+    let object = objects.get(object_index).ok()?;
+    let text_object = object.as_text_object()?;
+    let mut text = object_text_with_spaces(text_object, page_text);
+    let has_marker = text.contains('\u{2}') || text.contains('\u{fffe}');
+    let mut has_hyphen = false;
+    if text.trim().is_empty() {
+        return None;
+    }
+    let font_name = block_font_identity(&text_object.font().name()).to_owned();
+    let matrix = text_object
+        .matrix()
+        .map(|matrix| {
+            [
+                matrix.a(),
+                matrix.b(),
+                matrix.c(),
+                matrix.d(),
+                matrix.e(),
+                matrix.f(),
+            ]
+        })
+        .unwrap_or([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+    let font_size = display_font_size(text_object.unscaled_font_size().value, matrix);
+    let chars = page_text.chars_for_object(text_object).ok()?;
+
+    let mut left = f32::INFINITY;
+    let mut right = f32::NEG_INFINITY;
+    let mut top = f32::INFINITY;
+    let mut bottom = f32::NEG_INFINITY;
+    let mut baseline: Option<f32> = None;
+    for character in chars.iter() {
+        has_hyphen |= has_marker && character.is_hyphen().unwrap_or(false);
+        let raw_index = character.index();
+        let Some(position) = layer_raw_indices
+            .iter()
+            .position(|index| *index == raw_index)
+        else {
+            continue;
+        };
+        let view = layer.chars.get(position)?;
+        if view.width <= 0.0 || view.height <= 0.0 {
+            continue;
+        }
+        left = left.min(view.x);
+        right = right.max(view.x + view.width);
+        top = top.min(view.y);
+        bottom = bottom.max(view.y + view.height);
+        baseline = Some(baseline.map_or(view.origin_y, |current: f32| current.min(view.origin_y)));
+    }
+    if !left.is_finite() || !right.is_finite() {
+        return None;
+    }
+
+    if has_hyphen {
+        text = text.replace(['\u{2}', '\u{fffe}'], "-");
+    }
+    Some(BlockObject {
+        text,
+        font_name,
+        font_size,
+        color: color_hex(text_object),
+        rotation: display_rotation_from_matrix(matrix, layer.rotation),
+        baseline: baseline?,
+        left,
+        right,
+        top,
+        bottom,
+    })
+}
+
+/// Whether two page objects are parts of the same editable line.
+///
+/// Word and WPS exports paint one object per glyph, so a Text Box built from a
+/// single object would edit a single character. Objects join only when they
+/// share the original look, sit on the same horizontal baseline, and are
+/// close enough to be one run of text; a gap wider than three quarters of the
+/// glyph height is a table cell or a column break.
+fn blocks_join(left: &BlockObject, right: &BlockObject, line_start: Option<f32>) -> bool {
+    if left.rotation.abs() > 0.01 || right.rotation.abs() > 0.01 {
+        return false;
+    }
+    if left.font_name != right.font_name {
+        return false;
+    }
+    if (left.font_size - right.font_size).abs() > 0.05 {
+        return false;
+    }
+    if left.color != right.color {
+        return false;
+    }
+    let height = (left.bottom - left.top)
+        .max(right.bottom - right.top)
+        .max(1.0);
+    if (left.baseline - right.baseline).abs() > 0.5 {
+        // Saved wrapped lines are separate PDF text objects. Rejoin adjacent
+        // aligned lines so reopening does not turn a resized paragraph into
+        // independently editable fragments. Never cross other page objects,
+        // font/style changes, columns, or a paragraph-sized vertical gap.
+        let line_step = right.baseline - left.baseline;
+        return line_step >= left.font_size * 0.85
+            && line_step <= left.font_size * 1.6
+            && (right.left - line_start.unwrap_or(left.left)).abs()
+                <= (left.font_size * 0.8).max(1.0);
+    }
+    if right.left < left.left - 0.25 * height {
+        return false;
+    }
+    let gap = right.left - left.right;
+    gap >= -0.5 * height && gap <= 0.75 * height
+}
+
+/// True when a boundary between two joined objects stood for a space glyph.
+fn blocks_need_space(left: &BlockObject, right: &BlockObject) -> bool {
+    if right.baseline - left.baseline > 0.5 {
+        if left.text.chars().last().is_some_and(|c| c.is_ascii_digit())
+            && right
+                .text
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_digit())
+        {
+            return false;
+        }
+        return left
+            .text
+            .chars()
+            .last()
+            .is_some_and(|c| c.is_ascii() && !c.is_whitespace() && c != '-')
+            && right
+                .text
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphanumeric());
+    }
+    let height = (left.bottom - left.top)
+        .max(right.bottom - right.top)
+        .max(1.0);
+    let gap = right.left - left.right;
+    gap >= (0.15 * height).max(0.6)
+        && !left.text.chars().last().is_some_and(char::is_whitespace)
+        && !right.text.chars().next().is_some_and(char::is_whitespace)
+}
+
+struct TextBlock {
+    start: usize,
+    count: usize,
+    text: String,
+    width: f32,
+    layout: Option<BoxLayout>,
+}
+
+/// Groups the clicked page object with the adjacent objects that form the same
+/// visible line. The block is one editable unit: its text, font, baseline and
+/// width come from the original objects, so an edit replaces the whole line
+/// instead of a single glyph.
+fn text_block_around(
+    entry: &OpenDocument,
+    page_index: u32,
+    page_text: &PdfPageText<'_>,
+    objects: &PdfPageObjects<'_>,
+    layer: &crate::commands::TextLayerView,
+    layer_raw_indices: &[usize],
+    object_index: usize,
+) -> Result<TextBlock, CommandError> {
+    let clicked = block_object(layer, layer_raw_indices, page_text, objects, object_index)
+        .ok_or_else(|| no_editable_text(page_index))?;
+    let mut members = vec![clicked];
+    let mut start = object_index;
+    while start > 0 {
+        if crate::watermark::is_watermark_object(entry, page_index, start - 1)
+            || entry
+                .edit
+                .records
+                .get(&page_index)
+                .is_some_and(|records| records.iter().any(|record| record.contains(start - 1)))
+        {
+            break;
+        }
+        let Some(previous) = block_object(layer, layer_raw_indices, page_text, objects, start - 1)
+        else {
+            break;
+        };
+        // A Word/WPS line can contain one PDF object per glyph. Compare
+        // paragraph alignment with the line's start, not its last glyph.
+        let mut line_start = previous.left;
+        if (previous.baseline - members[0].baseline).abs() > 0.5 {
+            let mut probe = previous.clone();
+            let mut probe_index = start - 1;
+            while probe_index > 0 {
+                let candidate_index = probe_index - 1;
+                if crate::watermark::is_watermark_object(entry, page_index, candidate_index)
+                    || entry.edit.records.get(&page_index).is_some_and(|records| {
+                        records
+                            .iter()
+                            .any(|record| record.contains(candidate_index))
+                    })
+                {
+                    break;
+                }
+                let Some(candidate) = block_object(
+                    layer,
+                    layer_raw_indices,
+                    page_text,
+                    objects,
+                    candidate_index,
+                ) else {
+                    break;
+                };
+                if (candidate.baseline - previous.baseline).abs() > 0.5
+                    || !blocks_join(&candidate, &probe, None)
+                {
+                    break;
+                }
+                line_start = line_start.min(candidate.left);
+                probe = candidate;
+                probe_index = candidate_index;
+            }
+        }
+        if !blocks_join(&previous, &members[0], Some(line_start)) {
+            break;
+        }
+        members.insert(0, previous);
+        start -= 1;
+    }
+
+    let mut end = object_index;
+    let object_count = objects.len();
+    while end + 1 < object_count {
+        if crate::watermark::is_watermark_object(entry, page_index, end + 1)
+            || entry
+                .edit
+                .records
+                .get(&page_index)
+                .is_some_and(|records| records.iter().any(|record| record.contains(end + 1)))
+        {
+            break;
+        }
+        let Some(next) = block_object(layer, layer_raw_indices, page_text, objects, end + 1) else {
+            break;
+        };
+        let last = members.last().expect("the block has its clicked object");
+        let line_start = members
+            .iter()
+            .rev()
+            .take_while(|member| (member.baseline - last.baseline).abs() <= 0.5)
+            .map(|member| member.left)
+            .fold(f32::INFINITY, f32::min);
+        if !blocks_join(last, &next, Some(line_start)) {
+            break;
+        }
+        members.push(next);
+        end += 1;
+    }
+
+    let mut text = String::new();
+    let mut width_left = f32::INFINITY;
+    let mut width_right = f32::NEG_INFINITY;
+    for (index, member) in members.iter().enumerate() {
+        if index > 0 && blocks_need_space(&members[index - 1], member) {
+            text.push(' ');
+        }
+        text.push_str(&member.text);
+        width_left = width_left.min(member.left);
+        width_right = width_right.max(member.right);
+    }
+    if text.trim().is_empty() {
+        return Err(no_editable_text(page_index));
+    }
+
+    let mut leading: Vec<f32> = members
+        .windows(2)
+        .map(|pair| pair[1].baseline - pair[0].baseline)
+        .filter(|step| *step > 0.5)
+        .collect();
+    leading.sort_by(f32::total_cmp);
+    let layout = leading.get(leading.len() / 2).map(|spacing| {
+        let top = members.iter().map(|m| m.top).fold(f32::INFINITY, f32::min);
+        let bottom = members
+            .iter()
+            .map(|m| m.bottom)
+            .fold(f32::NEG_INFINITY, f32::max);
+        BoxLayout {
+            x: width_left,
+            y: top,
+            width: (width_right - width_left).max(4.0),
+            height: (bottom - top).max(1.0),
+            rotation: 0.0,
+            auto_height: true,
+            line_height: Some(*spacing),
+        }
+    });
+    Ok(TextBlock {
+        start,
+        count: end - start + 1,
+        width: if (members[0].rotation.abs() - 90.0).abs() < 0.01 {
+            (members[0].bottom - members[0].top).max(1.0)
+        } else {
+            (width_right - width_left).max(1.0)
+        },
+        text,
+        layout,
+    })
 }
 
 fn target_for(
@@ -1267,35 +1790,24 @@ fn target_for(
             page_index,
         );
     }
-    let object = objects.get(object_index).map_err(|error| {
-        CommandError::new(
-            CommandErrorCode::Internal,
-            format!("could not read page object {object_index}: {error:?}"),
-        )
-    })?;
-    let text_object = object
-        .as_text_object()
-        .ok_or_else(|| no_editable_text(page_index))?;
-    let text = text_object.text();
-    if text.trim().is_empty() {
-        return Err(no_editable_text(page_index));
-    }
-    let width = measure_text_width(&entry.document, text_object, &text).unwrap_or_else(|| {
-        object
-            .bounds()
-            .map(|bounds| bounds.width().value.abs())
-            .unwrap_or(1.0)
-            .max(1.0)
-    });
+    let block = text_block_around(
+        entry,
+        page_index,
+        &page_text,
+        objects,
+        &layer,
+        &raw_indices,
+        object_index,
+    )?;
 
     entry.edit.next_box_id += 1;
     let record = TextBoxRecord {
         box_id: entry.edit.next_box_id,
-        start: object_index,
-        count: 1,
-        width,
-        text,
-        layout: None,
+        start: block.start,
+        count: block.count,
+        width: block.width,
+        text: block.text,
+        layout: block.layout,
         style: None,
         runs: Vec::new(),
         created: false,
@@ -1334,6 +1846,107 @@ pub fn text_edit_target(
     })
 }
 
+/// Web-font subsets for the original-font textarea. These use the same
+/// coverage plan/programs as a commit; nothing is attached to the PDF.
+#[tauri::command]
+pub fn text_box_editor_fonts(
+    document_id: String,
+    page_index: u32,
+    box_id: u64,
+    text: String,
+) -> Result<Vec<String>, CommandError> {
+    use base64::Engine;
+    with_open_document(&document_id, |entry| {
+        let physical = entry.physical_page(page_index)?;
+        let index = find_record(&entry.edit, physical, box_id)?;
+        let record = &entry.edit.records[&physical][index];
+        if record.deleted || record.count == 0 || record.style.is_some() {
+            return Ok(Vec::new());
+        }
+        let page = load_page(&entry.document, physical)?;
+        let style = read_style(page.objects(), record.start)?;
+        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        let plan = plan_fonts(&style, &normalized)?;
+        let mut programs = Vec::new();
+        if plan.uses_original() {
+            if let Some(program) = style.font_data.as_deref() {
+                let text: String = normalized
+                    .chars()
+                    .zip(&plan.fonts)
+                    .filter(|(c, font)| !is_line_break(*c) && matches!(font, GlyphFont::Original))
+                    .map(|(c, _)| c)
+                    .collect();
+                programs.push(
+                    fonts::subset_program(
+                        program,
+                        0,
+                        &style.font_family,
+                        false,
+                        &text,
+                        fonts::weight_for(style.font_is_bold),
+                    )?
+                    .web_font_bytes()?,
+                );
+            }
+        }
+        let fallback_text = plan.fallback_text(&normalized);
+        match plan.fallback_font() {
+            Some(GlyphFont::Bundled(font)) => programs.push(
+                font.subset(&fallback_text, fonts::weight_for(style.font_is_bold))?
+                    .web_font_bytes()?,
+            ),
+            Some(GlyphFont::System(font)) => programs.push(
+                font.subset(&fallback_text, fonts::weight_for(style.font_is_bold))?
+                    .web_font_bytes()?,
+            ),
+            _ => {}
+        }
+        Ok(programs
+            .into_iter()
+            .map(|bytes| base64::engine::general_purpose::STANDARD.encode(bytes))
+            .collect())
+    })
+}
+
+/// The linear scale a text matrix applies to its font size.
+///
+/// PDF text objects store the font size before the text matrix is applied.
+/// Word and WPS exports commonly store a size in the hundreds with a matrix
+/// that scales it down (for example 360 with a 0.05 scale paints 18 pt), so the
+/// size a person sees — and the size the editor must show — is the stored size
+/// times this scale.
+fn matrix_font_scale(matrix: [f32; 6]) -> f32 {
+    let scale = (matrix[0] * matrix[0] + matrix[1] * matrix[1]).sqrt();
+    if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    }
+}
+
+/// Converts a stored font size into the size the text paints at.
+fn display_font_size(unscaled: f32, matrix: [f32; 6]) -> f32 {
+    let size = unscaled * matrix_font_scale(matrix);
+    if size.is_finite() && size > 0.0 {
+        size
+    } else {
+        unscaled
+    }
+}
+
+/// Removes the matrix's scale so `font_size` alone carries the size.
+fn unscaled_matrix(matrix: [f32; 6]) -> [f32; 6] {
+    let scale = matrix_font_scale(matrix);
+    [
+        matrix[0] / scale,
+        matrix[1] / scale,
+        matrix[2] / scale,
+        matrix[3] / scale,
+        matrix[4],
+        matrix[5],
+    ]
+}
+
 /// Style read from the first Text Object of a box. The replacement keeps all
 /// of it, so an edit does not invent a new look.
 struct StyleSnapshot {
@@ -1344,8 +1957,9 @@ struct StyleSnapshot {
     matrix: [f32; 6],
     font_is_embedded: bool,
     /// Whether the embedded program is a bold instance. PDFX only needs this
-    /// to rebuild a Noto Sans SC subset at the same weight.
+    /// to rebuild a bundled-font subset at the same weight.
     font_is_bold: bool,
+    font_is_italic: bool,
     font_data: Option<Vec<u8>>,
 }
 
@@ -1366,7 +1980,7 @@ fn read_style(objects: &PdfPageObjects<'_>, start: usize) -> Result<StyleSnapsho
     let font = text_object.font();
     let font_name = font.name();
     let font_family = fonts::normalize_family(&font_name);
-    let font_is_bold = base_font_name(&font_name).contains("Bold");
+    let (font_is_bold, font_is_italic) = style_flags_from_font_name(&font_name);
     let font_is_embedded = font.is_embedded().unwrap_or(false);
     let font_data = if font_is_embedded {
         font.data().ok()
@@ -1386,22 +2000,25 @@ fn read_style(objects: &PdfPageObjects<'_>, start: usize) -> Result<StyleSnapsho
             format!("could not read the Text Box matrix: {error:?}"),
         )
     })?;
+    let matrix = [
+        matrix.a(),
+        matrix.b(),
+        matrix.c(),
+        matrix.d(),
+        matrix.e(),
+        matrix.f(),
+    ];
+    let font_size = display_font_size(font_size, matrix);
 
     Ok(StyleSnapshot {
         font_family,
         font_size,
         fill_color: text_object.fill_color().ok(),
         render_mode: text_object.render_mode(),
-        matrix: [
-            matrix.a(),
-            matrix.b(),
-            matrix.c(),
-            matrix.d(),
-            matrix.e(),
-            matrix.f(),
-        ],
+        matrix: unscaled_matrix(matrix),
         font_is_embedded,
         font_is_bold,
+        font_is_italic,
         font_data,
     })
 }
@@ -1480,165 +2097,395 @@ fn text_is_win_ansi(text: &str) -> bool {
         .all(is_win_ansi_char)
 }
 
-enum FontChoice {
+/// Which font paints one character of the replacement text.
+#[derive(Clone, Copy, PartialEq)]
+enum GlyphFont {
+    /// The box's own font program, which still has this glyph.
     Original,
+    /// A fresh subset of a bundled family.
+    Bundled(&'static fonts::BundledFont),
+    /// A fresh subset of a face installed on this machine.
+    System(&'static system_fonts::SystemFont),
+    /// A base-14 font.
     BuiltIn(PdfFontBuiltin),
-    /// Embed a fresh subset of the bundled font at this weight.
-    Bundled {
-        bold: bool,
-    },
 }
 
-struct FontDecision {
-    choice: FontChoice,
+/// Per-character font plan for one replacement.
+///
+/// An edit keeps the original font for every character it can still paint, so
+/// untouched Chinese text stays in the document's own typeface instead of
+/// turning into the bundled font. Only characters the original program lacks
+/// are painted by a fallback.
+struct FontPlan {
+    /// One entry per character of the replacement text. Line breaks are never
+    /// painted; they keep their neighbour's choice.
+    fonts: Vec<GlyphFont>,
+    /// Set when at least one character needs a font other than the original.
     fallback: Option<FontUsageView>,
 }
 
-/// Uses the bundled font as the fallback for characters the original font
-/// cannot render. `reason` must explain why the original font was replaced;
-/// the family name is appended so every notice names both fonts.
-fn bundled_fallback(
+impl FontPlan {
+    fn uniform(font: GlyphFont, characters: usize) -> Self {
+        Self {
+            fonts: vec![font; characters],
+            fallback: None,
+        }
+    }
+
+    fn fallback_font(&self) -> Option<GlyphFont> {
+        self.fonts
+            .iter()
+            .copied()
+            .find(|font| !matches!(font, GlyphFont::Original))
+    }
+
+    fn uses_original(&self) -> bool {
+        self.fonts
+            .iter()
+            .any(|font| matches!(font, GlyphFont::Original))
+    }
+
+    /// The characters a fallback font must render.
+    fn fallback_text(&self, text: &str) -> String {
+        text.chars()
+            .zip(&self.fonts)
+            .filter(|(character, font)| {
+                !is_line_break(*character) && !matches!(font, GlyphFont::Original)
+            })
+            .map(|(character, _)| character)
+            .collect()
+    }
+}
+
+fn is_line_break(character: char) -> bool {
+    matches!(character, '\n' | '\r')
+}
+
+/// The base-14 face that matches the original font's weight and serif style.
+fn latin_builtin(style: &StyleSnapshot) -> PdfFontBuiltin {
+    if fonts::is_serif_family(&style.font_family) {
+        match (style.font_is_bold, style.font_is_italic) {
+            (false, false) => PdfFontBuiltin::TimesRoman,
+            (true, false) => PdfFontBuiltin::TimesBold,
+            (false, true) => PdfFontBuiltin::TimesItalic,
+            (true, true) => PdfFontBuiltin::TimesBoldItalic,
+        }
+    } else {
+        match (style.font_is_bold, style.font_is_italic) {
+            (false, false) => PdfFontBuiltin::Helvetica,
+            (true, false) => PdfFontBuiltin::HelveticaBold,
+            (false, true) => PdfFontBuiltin::HelveticaOblique,
+            (true, true) => PdfFontBuiltin::HelveticaBoldOblique,
+        }
+    }
+}
+
+fn glyph_font_family(font: GlyphFont) -> String {
+    match font {
+        GlyphFont::Original => String::new(),
+        GlyphFont::Bundled(bundled) => bundled.family.to_owned(),
+        GlyphFont::System(installed) => installed.family.clone(),
+        GlyphFont::BuiltIn(built_in) => built_in.to_pdf_font_name().to_owned(),
+    }
+}
+
+/// The installed face that matches the original family and covers `text`.
+///
+/// A document names 微软雅黑 or 宋体 but may not embed the program (or embed a
+/// subset that lacks the characters being typed). When the machine has that
+/// family — from the OS or from WPS Office — using it keeps the document's
+/// intended typeface instead of switching to a bundled look-alike.
+fn installed_face_for(
     original: &str,
     text: &str,
-    reason: &str,
     bold: bool,
-) -> Result<FontDecision, CommandError> {
-    let bundled = fonts::noto_sans_sc();
-    if !bundled.covers(text) {
-        return Err(fonts::missing_glyph_error(bundled.family, text));
+    italic: bool,
+) -> Option<&'static system_fonts::SystemFont> {
+    // A base-14 name is reproduced without embedding anything; never let a
+    // similarly named installed family (Times New Roman for Times) win.
+    if built_in_for(base_font_name(original)).is_some() {
+        return None;
     }
-    Ok(FontDecision {
-        choice: FontChoice::Bundled { bold },
-        fallback: Some(FontUsageView {
+    let catalog = system_fonts::catalog();
+    let family = catalog.family_for_name(original)?;
+    let face = catalog.face_for_style(family, bold, italic)?;
+    face.covers(text).then_some(face)
+}
+
+/// Chooses a fallback for characters the original font cannot paint.
+///
+/// The installed face of the original family comes first, so a missing
+/// character continues in the same typeface the document uses. A WinAnsi
+/// string can also use a base-14 font; otherwise PDFX falls back to the
+/// bundled family whose style matches the original.
+fn pick_fallback_font(
+    style: &StyleSnapshot,
+    text: &str,
+    all_win_ansi: bool,
+) -> Result<GlyphFont, CommandError> {
+    if let Some(face) = installed_face_for(
+        &style.font_family,
+        text,
+        style.font_is_bold,
+        style.font_is_italic,
+    ) {
+        return Ok(GlyphFont::System(face));
+    }
+    if all_win_ansi {
+        return Ok(GlyphFont::BuiltIn(latin_builtin(style)));
+    }
+    Ok(GlyphFont::Bundled(pick_bundled_font(
+        &style.font_family,
+        text,
+    )?))
+}
+
+/// Chooses the bundled family whose style matches the original and that
+/// covers every missing character.
+///
+/// FangSong originals (FangS-SC, STFangsong, 仿宋_GB2312) get Zhuque Fangsong,
+/// so a new character keeps the thin strokes of the surrounding text.
+/// Song/Ming/Kai originals (SimSun, HYShuSongErKW) get Noto Serif SC, so
+/// editing a contract does not turn it into a sans-serif document; other
+/// originals get Noto Sans SC. Later candidates are tried before rejecting the
+/// edit, because a family may lack a rare character the missing text needs.
+fn pick_bundled_font(
+    original: &str,
+    missing: &str,
+) -> Result<&'static fonts::BundledFont, CommandError> {
+    let candidates: &[&'static fonts::BundledFont] = if fonts::is_fangsong_family(original) {
+        &[
+            fonts::zhuque_fangsong(),
+            fonts::noto_serif_sc(),
+            fonts::noto_sans_sc(),
+        ]
+    } else if fonts::is_serif_family(original) {
+        &[fonts::noto_serif_sc(), fonts::noto_sans_sc()]
+    } else {
+        &[fonts::noto_sans_sc(), fonts::noto_serif_sc()]
+    };
+    for candidate in candidates {
+        if candidate.covers(missing) {
+            return Ok(candidate);
+        }
+    }
+    Err(fonts::missing_glyph_error(candidates[0].family, missing))
+}
+
+/// A plan that paints every character with a fallback font.
+fn full_fallback_plan(
+    style: &StyleSnapshot,
+    text: &str,
+    characters: usize,
+    all_win_ansi: bool,
+    reason: &str,
+) -> Result<FontPlan, CommandError> {
+    let original = style.font_family.as_str();
+    let fallback = pick_fallback_font(style, text, all_win_ansi)?;
+    let family = glyph_font_family(fallback);
+    // Using the installed copy of the original family is not a visible
+    // fallback: the document keeps the typeface it named, PDFX only supplies
+    // the program the document did not embed.
+    let fallback_notice = if matches!(fallback, GlyphFont::System(_)) {
+        None
+    } else {
+        Some(FontUsageView {
             original_family: original.to_owned(),
-            family: bundled.family.to_owned(),
+            family: family.clone(),
             fallback: true,
-            reason: Some(format!(
-                "{reason}; {} was used instead",
-                fonts::NOTO_SANS_SC_FAMILY
-            )),
-        }),
+            reason: Some(format!("{reason}; {family} was used instead")),
+        })
+    };
+    Ok(FontPlan {
+        fonts: vec![fallback; characters],
+        fallback: fallback_notice,
     })
 }
 
-/// Chooses the font for a replacement, preserving the original when provably
-/// safe and otherwise using a base-14 Latin font or the bundled CJK font.
-fn decide_font(style: &StyleSnapshot, text: &str) -> Result<FontDecision, CommandError> {
-    let characters: Vec<char> = text
-        .chars()
-        .filter(|character| !matches!(character, '\n' | '\r'))
-        .collect();
-    let all_win_ansi = characters
-        .iter()
-        .all(|character| is_win_ansi_char(*character));
-    let original = style.font_family.clone();
+/// Chooses a font for every character of a replacement.
+///
+/// The original font is kept wherever its program provably paints the
+/// character. Subset fonts keep advances for glyphs they dropped but no
+/// outline, so [`face_paints`] is the proof. Characters the original cannot
+/// paint use a bundled font that matches the original's style (Zhuque
+/// Fangsong for FangSong names, Noto Serif SC for other serif names, Noto
+/// Sans SC otherwise), or a base-14 font when the missing characters are
+/// Latin.
+fn plan_fonts(style: &StyleSnapshot, text: &str) -> Result<FontPlan, CommandError> {
+    let original = style.font_family.as_str();
+    let characters: Vec<char> = text.chars().collect();
+    let all_win_ansi = text_is_win_ansi(text);
 
     if style.font_is_embedded {
-        let covered = style
+        // The original program is one of our own subsets. A larger subset of
+        // the same family is not a user-visible fallback.
+        if let Some(bundled) = fonts::bundled_family(original) {
+            if !bundled.covers(text) {
+                return Err(fonts::missing_glyph_error(bundled.family, text));
+            }
+            return Ok(FontPlan::uniform(
+                GlyphFont::Bundled(bundled),
+                characters.len(),
+            ));
+        }
+
+        if let Some(face) = style
             .font_data
             .as_deref()
             .and_then(|data| ttf_parser::Face::parse(data, 0).ok())
-            .map(|face| {
-                characters
+        {
+            let mut painted: Vec<bool> = Vec::with_capacity(characters.len());
+            let mut missing = String::new();
+            for character in &characters {
+                let paints = is_line_break(*character) || face_paints(&face, *character);
+                if !paints {
+                    missing.push(*character);
+                }
+                painted.push(paints);
+            }
+            if missing.is_empty() {
+                return Ok(FontPlan::uniform(GlyphFont::Original, characters.len()));
+            }
+
+            let fallback = pick_fallback_font(style, &missing, text_is_win_ansi(&missing))?;
+            let family = glyph_font_family(fallback);
+            // The installed copy of the same family is the document's own
+            // typeface, not a user-visible substitution.
+            let fallback_notice = if matches!(fallback, GlyphFont::System(_)) {
+                None
+            } else {
+                Some(FontUsageView {
+                    original_family: original.to_owned(),
+                    family: family.clone(),
+                    fallback: true,
+                    reason: Some(format!(
+                        "the embedded font {original} is missing glyphs for the new text; \
+                         {family} was used instead"
+                    )),
+                })
+            };
+            return Ok(FontPlan {
+                fonts: characters
                     .iter()
-                    .all(|character| face.glyph_index(*character).is_some())
-            })
-            .unwrap_or(false);
-
-        if covered {
-            return Ok(FontDecision {
-                choice: FontChoice::Original,
-                fallback: None,
+                    .zip(&painted)
+                    .map(|(_, paints)| {
+                        if *paints {
+                            GlyphFont::Original
+                        } else {
+                            fallback
+                        }
+                    })
+                    .collect(),
+                fallback: fallback_notice,
             });
         }
 
-        // The original program is one of our own subsets. Its cmap proves
-        // which characters it covers; a new character simply needs a larger
-        // subset of the same family, which is not a user-visible fallback.
-        if fonts::is_bundled_family(&original) {
-            return Ok(FontDecision {
-                choice: FontChoice::Bundled {
-                    bold: style.font_is_bold,
-                },
-                fallback: None,
-            });
-        }
+        return full_fallback_plan(
+            style,
+            text,
+            characters.len(),
+            all_win_ansi,
+            &format!("the embedded font {original} could not be inspected"),
+        );
+    }
 
-        if !all_win_ansi {
-            return bundled_fallback(
-                &original,
-                text,
-                &format!("the embedded font {original} is missing glyphs for the new text"),
-                false,
-            );
+    if let Some(built_in) = built_in_for(original) {
+        if all_win_ansi {
+            return Ok(FontPlan::uniform(
+                GlyphFont::BuiltIn(built_in),
+                characters.len(),
+            ));
         }
-        let reason = if style.font_data.is_some() {
-            format!(
-                "the embedded font {original} is missing glyphs for the new text; \
-                 Helvetica was used instead"
-            )
-        } else {
-            format!(
-                "the embedded font {original} could not be inspected; Helvetica was used instead"
-            )
-        };
-        return Ok(FontDecision {
-            choice: FontChoice::BuiltIn(PdfFontBuiltin::Helvetica),
+        let bundled = pick_bundled_font(original, text)?;
+        let family = glyph_font_family(GlyphFont::Bundled(bundled));
+        return Ok(FontPlan {
+            fonts: vec![GlyphFont::Bundled(bundled); characters.len()],
             fallback: Some(FontUsageView {
-                original_family: original,
-                family: "Helvetica".to_owned(),
+                original_family: original.to_owned(),
+                family: family.clone(),
                 fallback: true,
-                reason: Some(reason),
+                reason: Some(format!(
+                    "the font {original} cannot represent the replacement text; \
+                     {family} was used instead"
+                )),
             }),
         });
     }
 
-    if let Some(built_in) = built_in_for(&original) {
-        if !all_win_ansi {
-            return bundled_fallback(
-                &original,
-                text,
-                &format!("the font {original} cannot represent the replacement text"),
-                false,
-            );
-        }
-        return Ok(FontDecision {
-            choice: FontChoice::BuiltIn(built_in),
-            fallback: None,
-        });
-    }
+    full_fallback_plan(
+        style,
+        text,
+        characters.len(),
+        all_win_ansi,
+        &format!("the original font {original} is not embedded"),
+    )
+}
 
-    if !all_win_ansi {
-        return bundled_fallback(
-            &original,
-            text,
-            &format!("the original font {original} is not embedded"),
-            false,
-        );
+#[derive(Default)]
+struct OutlinePointCounter {
+    points: usize,
+}
+
+impl ttf_parser::OutlineBuilder for OutlinePointCounter {
+    fn move_to(&mut self, _x: f32, _y: f32) {
+        self.points += 1;
     }
-    let reason =
-        format!("the original font {original} is not embedded; Helvetica was used instead");
-    Ok(FontDecision {
-        choice: FontChoice::BuiltIn(PdfFontBuiltin::Helvetica),
-        fallback: Some(FontUsageView {
-            original_family: original,
-            family: "Helvetica".to_owned(),
-            fallback: true,
-            reason: Some(reason),
-        }),
-    })
+    fn line_to(&mut self, _x: f32, _y: f32) {
+        self.points += 1;
+    }
+    fn quad_to(&mut self, _x1: f32, _y1: f32, _x: f32, _y: f32) {
+        self.points += 1;
+    }
+    fn curve_to(&mut self, _x1: f32, _y1: f32, _x2: f32, _y2: f32, _x: f32, _y: f32) {
+        self.points += 1;
+    }
+    fn close(&mut self) {}
+}
+
+/// True when `character` produces a visible glyph in `face`.
+///
+/// Subset fonts keep the original cmap and advance widths for characters they
+/// dropped; only the outline is gone. PDFium would lay such a character out
+/// and paint nothing, so coverage must require an outline. Whitespace is the
+/// exception: it is meant to paint nothing and only needs an advance.
+fn face_paints(face: &ttf_parser::Face<'_>, character: char) -> bool {
+    let Some(glyph) = face.glyph_index(character) else {
+        return false;
+    };
+    if glyph.0 == 0 || face.glyph_hor_advance(glyph).unwrap_or(0) == 0 {
+        return false;
+    }
+    if character.is_whitespace() {
+        return true;
+    }
+    let mut outline = OutlinePointCounter::default();
+    face.outline_glyph(glyph, &mut outline).is_some() && outline.points > 0
 }
 
 /// Loads (or reuses) the session's subset token for `text`.
 fn bundled_token(
     entry: &mut OpenDocument,
+    font: &fonts::BundledFont,
     text: &str,
     bold: bool,
 ) -> Result<PdfFontToken, CommandError> {
     entry
         .edit
         .bundled_fonts
-        .token(&mut entry.document, text, fonts::weight_for(bold))
+        .token(&mut entry.document, font, text, fonts::weight_for(bold))
+}
+
+/// Loads (or reuses) the session's subset token for an installed font.
+fn system_token(
+    entry: &mut OpenDocument,
+    font: &system_fonts::SystemFont,
+    text: &str,
+    bold: bool,
+) -> Result<PdfFontToken, CommandError> {
+    entry
+        .edit
+        .bundled_fonts
+        .system_token(&mut entry.document, font, text, fonts::weight_for(bold))
 }
 
 fn measure_with_token(
@@ -1668,7 +2515,12 @@ fn measure_segment_advance(
     font_size: f32,
     text: &str,
 ) -> Option<f32> {
-    let advance = document.fonts().get(token).and_then(|font| {
+    // The document font registry contains newly loaded fonts only. A token
+    // obtained from an original page object is not necessarily registered.
+    // Resolve it through a detached object instead of falling back to ink bounds.
+    let probe = PdfPageTextObject::new(document, text, token, PdfPoints::new(font_size)).ok()?;
+    let font = probe.font();
+    let advance = {
         let size = PdfPoints::new(font_size);
         text.chars()
             .map(|character| {
@@ -1676,7 +2528,7 @@ fn measure_segment_advance(
                     .map(|width| width.value)
             })
             .sum::<Option<f32>>()
-    });
+    };
     match advance {
         Some(width) if width.is_finite() && width >= 0.0 => Some(width),
         _ => measure_with_token(document, token, font_size, text),
@@ -1684,78 +2536,9 @@ fn measure_segment_advance(
 }
 
 fn fits(width: Option<f32>, limit: f32) -> bool {
-    width.map(|width| width <= limit + 0.01).unwrap_or(true)
-}
-
-fn break_long_word<F: Fn(&str) -> Option<f32>>(
-    lines: &mut Vec<String>,
-    current: &mut String,
-    word: &str,
-    width: f32,
-    measure: &F,
-) {
-    for character in word.chars() {
-        let mut candidate = current.clone();
-        candidate.push(character);
-        if !current.is_empty() && !fits(measure(&candidate), width) {
-            lines.push(std::mem::take(current));
-        }
-        current.push(character);
-    }
-}
-
-/// Greedy word wrap at `width` text-space points, keeping explicit line
-/// breaks. A word wider than the box is broken between characters so no text
-/// is dropped.
-fn wrap_text<F: Fn(&str) -> Option<f32>>(text: &str, width: f32, measure: &F) -> Vec<String> {
-    let mut lines = Vec::new();
-    for paragraph in text.split('\n') {
-        if paragraph.is_empty() {
-            // PDFium text objects cannot hold an empty string; a single space
-            // preserves the blank line.
-            lines.push(" ".to_owned());
-            continue;
-        }
-        let mut current = String::new();
-        for word in paragraph.split(' ') {
-            let candidate = if current.is_empty() {
-                word.to_owned()
-            } else {
-                format!("{current} {word}")
-            };
-            if fits(measure(&candidate), width) || (current.is_empty() && word.is_empty()) {
-                current = candidate;
-                continue;
-            }
-            if !current.is_empty() {
-                lines.push(std::mem::take(&mut current));
-            }
-            if fits(measure(word), width) {
-                current = word.to_owned();
-            } else {
-                break_long_word(&mut lines, &mut current, word, width, measure);
-            }
-        }
-        lines.push(current);
-    }
-    while lines.len() > 1 && lines.last().is_some_and(|line| line.trim().is_empty()) {
-        lines.pop();
-    }
-    if lines.is_empty() {
-        lines.push(" ".to_owned());
-    }
-    lines
-}
-
-/// Everything needed to emit the text objects of one box.
-#[derive(Clone, Copy)]
-struct BoxRenderStyle {
-    token: PdfFontToken,
-    font_size: f32,
-    color: PdfColor,
-    render_mode: PdfPageTextRenderMode,
-    underline: bool,
-    alignment: TextAlignment,
+    // Imported boxes use rounded ink bounds. Match the textarea's quarter-
+    // point allowance so a subpixel difference cannot wrap the last glyph.
+    width.map(|width| width <= limit + 0.25).unwrap_or(true)
 }
 
 /// The concrete rendering attributes of one style segment.
@@ -1765,6 +2548,7 @@ struct SegmentStyle {
     font_size: f32,
     color: PdfColor,
     underline: bool,
+    strikeout: bool,
 }
 
 /// One wrapped line as (character, style index) pairs, where index 0 is the
@@ -1786,7 +2570,7 @@ fn span_width(
             text.push(span[index].0);
             index += 1;
         }
-        total += measure_with_token(
+        total += measure_segment_advance(
             document,
             styles[style_index].token,
             styles[style_index].font_size,
@@ -1802,9 +2586,7 @@ fn span_fits(
     width: f32,
     styles: &[SegmentStyle],
 ) -> bool {
-    span_width(document, span, styles)
-        .map(|measured| measured <= width + 0.01)
-        .unwrap_or(true)
+    fits(span_width(document, span, styles), width)
 }
 
 fn break_long_styled_word(
@@ -1837,8 +2619,7 @@ fn styled_line_or_space(line: StyledLine) -> StyledLine {
 
 /// Greedy word wrap over styled characters.
 ///
-/// The word and character-break rules mirror [`wrap_text`], but every width is
-/// measured with the font and size of the character being measured, so a run
+/// Every width is measured with the actual font and size, so a run
 /// with a larger font occupies its real advance and the line still wraps at the
 /// box width.
 fn wrap_styled(
@@ -1922,6 +2703,47 @@ fn wrap_styled(
     lines
 }
 
+/// Splits one wrapped line into `(style index, text)` runs, folding
+/// whitespace-only runs into a neighbour.
+///
+/// PDFium drops whitespace-only text objects from text extraction. A space
+/// can become its own run when two differently styled ranges meet, so such
+/// runs travel with the next text object (or the previous one at end of
+/// line) to keep copy/extract output identical to the box content.
+fn line_segments(line: &StyledLine) -> Vec<(usize, String)> {
+    let mut segments: Vec<(usize, String)> = Vec::new();
+    for (character, style_index) in line {
+        match segments.last_mut() {
+            Some((index, text)) if index == style_index => text.push(*character),
+            _ => segments.push((*style_index, character.to_string())),
+        }
+    }
+
+    let mut merged: Vec<(usize, String)> = Vec::with_capacity(segments.len());
+    let mut pending = String::new();
+    for (style_index, text) in segments {
+        if text.chars().all(char::is_whitespace) {
+            pending.push_str(&text);
+            continue;
+        }
+        let text = if pending.is_empty() {
+            text
+        } else {
+            let mut combined = std::mem::take(&mut pending);
+            combined.push_str(&text);
+            combined
+        };
+        merged.push((style_index, text));
+    }
+    if !pending.is_empty() {
+        match merged.last_mut() {
+            Some((_, text)) => text.push_str(&pending),
+            None => merged.push((0, pending)),
+        }
+    }
+    merged
+}
+
 /// Emits the page objects for one box whose lines contain styled segments.
 ///
 /// The line rules extend the uniform renderer: a line's height is 1.2 times
@@ -1937,6 +2759,7 @@ fn build_styled_box_objects(
     styles: &[SegmentStyle],
     lines: &[StyledLine],
     height: f32,
+    original_mode: Option<PdfPageTextRenderMode>,
 ) -> Result<Vec<PdfPageObject<'static>>, CommandError> {
     let theta = layout.rotation.to_radians();
     let alpha = (geometry.rotation() as f32 - layout.rotation).to_radians();
@@ -1945,45 +2768,10 @@ fn build_styled_box_objects(
     let mut line_top = 0.0;
 
     for line in lines {
-        let mut segments: Vec<(usize, String)> = Vec::new();
-        for (character, style_index) in line {
-            match segments.last_mut() {
-                Some((index, text)) if index == style_index => text.push(*character),
-                _ => segments.push((*style_index, character.to_string())),
-            }
-        }
+        let segments = line_segments(line);
         if segments.is_empty() {
             continue;
         }
-
-        // PDFium drops whitespace-only text objects from text extraction. A
-        // space can become its own segment when two differently styled ranges
-        // meet, so attach such segments to the next text object (or the
-        // previous one at end of line) to keep copy/extract output identical
-        // to the box content.
-        let mut merged: Vec<(usize, String)> = Vec::with_capacity(segments.len());
-        let mut pending = String::new();
-        for (style_index, text) in segments {
-            if text.chars().all(char::is_whitespace) {
-                pending.push_str(&text);
-                continue;
-            }
-            let text = if pending.is_empty() {
-                text
-            } else {
-                let mut combined = std::mem::take(&mut pending);
-                combined.push_str(&text);
-                combined
-            };
-            merged.push((style_index, text));
-        }
-        if !pending.is_empty() {
-            match merged.last_mut() {
-                Some((_, text)) => text.push_str(&pending),
-                None => merged.push((0, pending)),
-            }
-        }
-        let segments = merged;
 
         let widths: Vec<f32> = segments
             .iter()
@@ -2003,7 +2791,7 @@ fn build_styled_box_objects(
             .iter()
             .map(|(index, _)| styles[*index].font_size)
             .fold(0.0, f32::max);
-        let line_height = line_size * 1.2;
+        let line_height = layout.line_height.unwrap_or(0.0).max(line_size * 1.2);
         let offset = match alignment {
             TextAlignment::Left => 0.0,
             TextAlignment::Center => ((layout.width - line_width) / 2.0).max(0.0),
@@ -2038,7 +2826,7 @@ fn build_styled_box_objects(
                 )
             })?;
             let render_mode = if visible {
-                PdfPageTextRenderMode::FilledUnstroked
+                original_mode.unwrap_or(PdfPageTextRenderMode::FilledUnstroked)
             } else {
                 PdfPageTextRenderMode::Invisible
             };
@@ -2085,9 +2873,125 @@ fn build_styled_box_objects(
                 })?;
                 objects.push(PdfPageObject::from(path));
             }
+
+            if visible && style.strikeout && *width > 0.0 {
+                let strikeout_y = local_y - style.font_size * 0.3;
+                let (start_x, start_y) = rotate_local(offset + cursor, strikeout_y, theta);
+                let (end_x, end_y) = rotate_local(offset + cursor + width, strikeout_y, theta);
+                let (user_start_x, user_start_y) =
+                    geometry.point_inverse(layout.x + start_x, layout.y + start_y);
+                let (user_end_x, user_end_y) =
+                    geometry.point_inverse(layout.x + end_x, layout.y + end_y);
+                let path = PdfPagePathObject::new_line(
+                    document,
+                    PdfPoints::new(user_start_x),
+                    PdfPoints::new(user_start_y),
+                    PdfPoints::new(user_end_x),
+                    PdfPoints::new(user_end_y),
+                    style.color,
+                    PdfPoints::new((style.font_size * 0.06).max(0.4)),
+                )
+                .map_err(|error| {
+                    CommandError::new(
+                        CommandErrorCode::Internal,
+                        format!("could not create the Text Box strikeout: {error:?}"),
+                    )
+                })?;
+                objects.push(PdfPageObject::from(path));
+            }
             cursor += width;
         }
         line_top += line_height;
+    }
+
+    Ok(objects)
+}
+
+/// Emits the text objects of a legacy Text Object (one without a canonical
+/// layout) whose lines may contain several font runs.
+///
+/// Each run becomes its own text object, placed at the measured advance of the
+/// runs before it, and the box's original matrix is reused unchanged. This
+/// keeps the characters the embedded font can still paint in that font while
+/// only new characters use a fallback.
+fn build_native_text_objects(
+    document: &PdfDocument<'static>,
+    matrix: [f32; 6],
+    line_height: f32,
+    fill_color: Option<PdfColor>,
+    render_mode: PdfPageTextRenderMode,
+    styles: &[SegmentStyle],
+    lines: &[StyledLine],
+) -> Result<Vec<PdfPageObject<'static>>, CommandError> {
+    let [a, b, c, d, e, f] = matrix;
+    let mut objects = Vec::new();
+
+    for (line_number, line) in lines.iter().enumerate() {
+        let segments = line_segments(line);
+        let widths: Vec<f32> = segments
+            .iter()
+            .map(|(index, text)| {
+                measure_segment_advance(
+                    document,
+                    styles[*index].token,
+                    styles[*index].font_size,
+                    text,
+                )
+                .unwrap_or(0.0)
+                .max(0.0)
+            })
+            .collect();
+        let downward = line_number as f32 * line_height;
+        let mut cursor = 0.0;
+
+        for ((style_index, text), width) in segments.iter().zip(&widths) {
+            let style = styles[*style_index];
+            let mut object = PdfPageTextObject::new(
+                document,
+                text,
+                style.token,
+                PdfPoints::new(style.font_size),
+            )
+            .map_err(|error| {
+                CommandError::new(
+                    CommandErrorCode::Internal,
+                    format!("could not create replacement text: {error:?}"),
+                )
+            })?;
+            object
+                .set_fill_color(fill_color.unwrap_or(PdfColor::BLACK))
+                .map_err(|error| {
+                    CommandError::new(
+                        CommandErrorCode::Internal,
+                        format!("could not copy the text colour: {error:?}"),
+                    )
+                })?;
+            if render_mode != PdfPageTextRenderMode::Unknown {
+                object.set_render_mode(render_mode).map_err(|error| {
+                    CommandError::new(
+                        CommandErrorCode::Internal,
+                        format!("could not copy the text render mode: {error:?}"),
+                    )
+                })?;
+            }
+            object
+                .apply_matrix(PdfMatrix::new(
+                    a,
+                    b,
+                    c,
+                    d,
+                    e + cursor * a - downward * c,
+                    f + cursor * b - downward * d,
+                ))
+                .map_err(|error| {
+                    CommandError::new(
+                        CommandErrorCode::Internal,
+                        format!("could not place replacement text: {error:?}"),
+                    )
+                })?;
+            objects.push(PdfPageObject::from(object));
+            cursor += width;
+        }
     }
 
     Ok(objects)
@@ -2125,10 +3029,6 @@ fn check_layout(layout: &BoxLayout) -> Result<(), CommandError> {
     Ok(())
 }
 
-fn content_height(lines: usize, font_size: f32) -> f32 {
-    lines as f32 * font_size * 1.2
-}
-
 /// The height text is laid out into. Auto-height boxes grow to fit their
 /// content and never shrink below their current height; manual boxes keep
 /// exactly the height the user dragged.
@@ -2142,151 +3042,6 @@ fn effective_height(layout: &BoxLayout, content_height: f32) -> f32 {
 
 /// Reads the font, size, colour and render mode of a legacy Text Object so a
 /// transform can rebuild it without changing its look.
-fn read_legacy_font(
-    objects: &PdfPageObjects<'_>,
-    start: usize,
-) -> Result<BoxRenderStyle, CommandError> {
-    let object = objects.get(start).map_err(|error| {
-        CommandError::new(
-            CommandErrorCode::Internal,
-            format!("could not read the Text Box: {error:?}"),
-        )
-    })?;
-    let text_object = object.as_text_object().ok_or_else(|| {
-        CommandError::new(
-            CommandErrorCode::Internal,
-            "the Text Box does not start with a text object",
-        )
-    })?;
-    let font_size = text_object.unscaled_font_size().value;
-    if !font_size.is_finite() || font_size <= 0.0 {
-        return Err(CommandError::new(
-            CommandErrorCode::UnsupportedFont,
-            format!("the Text Box font size {font_size} cannot be edited"),
-        ));
-    }
-    let token = text_object.font().token();
-    let color = text_object.fill_color().unwrap_or(PdfColor::BLACK);
-    let render_mode = text_object.render_mode();
-    Ok(BoxRenderStyle {
-        token,
-        font_size,
-        color,
-        render_mode,
-        underline: false,
-        alignment: TextAlignment::Left,
-    })
-}
-
-/// Emits the page objects for one box.
-///
-/// Text objects are placed with a pure rotation + translation matrix; the font
-/// size lives on the object, matching PDF text-matrix semantics. Lines whose
-/// line box does not fit inside a manually sized box are emitted with the
-/// invisible render mode: they are clipped (not painted) but stay in the
-/// document and in text extraction, and reappear when the box is enlarged.
-fn build_box_objects(
-    document: &mut PdfDocument<'static>,
-    geometry: &DisplayGeometry,
-    layout: &BoxLayout,
-    render: BoxRenderStyle,
-    lines: &[String],
-    height: f32,
-) -> Result<Vec<PdfPageObject<'static>>, CommandError> {
-    let line_height = render.font_size * 1.2;
-    let theta = layout.rotation.to_radians();
-    let alpha = (geometry.rotation() as f32 - layout.rotation).to_radians();
-    let (sin_alpha, cos_alpha) = alpha.sin_cos();
-    let mut objects = Vec::new();
-
-    for (line_number, line) in lines.iter().enumerate() {
-        let line_width = measure_with_token(document, render.token, render.font_size, line)
-            .unwrap_or(0.0)
-            .max(0.0);
-        let offset = match render.alignment {
-            TextAlignment::Left => 0.0,
-            TextAlignment::Center => ((layout.width - line_width) / 2.0).max(0.0),
-            TextAlignment::Right => (layout.width - line_width).max(0.0),
-        };
-        let local_y = line_number as f32 * line_height + render.font_size * 0.8;
-        let (local_x, local_y_rotated) = rotate_local(offset, local_y, theta);
-        let (user_x, user_y) =
-            geometry.point_inverse(layout.x + local_x, layout.y + local_y_rotated);
-
-        let visible = (line_number as f32 + 1.0) * line_height <= height + 0.01;
-        let mut object = PdfPageTextObject::new(
-            document,
-            line,
-            render.token,
-            PdfPoints::new(render.font_size),
-        )
-        .map_err(|error| {
-            CommandError::new(
-                CommandErrorCode::Internal,
-                format!("could not create Text Box text: {error:?}"),
-            )
-        })?;
-        object.set_fill_color(render.color).map_err(|error| {
-            CommandError::new(
-                CommandErrorCode::Internal,
-                format!("could not set the Text Box colour: {error:?}"),
-            )
-        })?;
-        let render_mode = if visible {
-            render.render_mode
-        } else {
-            PdfPageTextRenderMode::Invisible
-        };
-        if render_mode != PdfPageTextRenderMode::Unknown {
-            object.set_render_mode(render_mode).map_err(|error| {
-                CommandError::new(
-                    CommandErrorCode::Internal,
-                    format!("could not set the Text Box render mode: {error:?}"),
-                )
-            })?;
-        }
-        object
-            .apply_matrix(PdfMatrix::new(
-                cos_alpha, sin_alpha, -sin_alpha, cos_alpha, user_x, user_y,
-            ))
-            .map_err(|error| {
-                CommandError::new(
-                    CommandErrorCode::Internal,
-                    format!("could not place Text Box text: {error:?}"),
-                )
-            })?;
-        objects.push(PdfPageObject::from(object));
-
-        if visible && render.underline && line_width > 0.0 {
-            let underline_y = local_y + render.font_size * 0.12;
-            let (start_x, start_y) = rotate_local(offset, underline_y, theta);
-            let (end_x, end_y) = rotate_local(offset + line_width, underline_y, theta);
-            let (user_start_x, user_start_y) =
-                geometry.point_inverse(layout.x + start_x, layout.y + start_y);
-            let (user_end_x, user_end_y) =
-                geometry.point_inverse(layout.x + end_x, layout.y + end_y);
-            let path = PdfPagePathObject::new_line(
-                document,
-                PdfPoints::new(user_start_x),
-                PdfPoints::new(user_start_y),
-                PdfPoints::new(user_end_x),
-                PdfPoints::new(user_end_y),
-                render.color,
-                PdfPoints::new((render.font_size * 0.06).max(0.4)),
-            )
-            .map_err(|error| {
-                CommandError::new(
-                    CommandErrorCode::Internal,
-                    format!("could not create the Text Box underline: {error:?}"),
-                )
-            })?;
-            objects.push(PdfPageObject::from(path));
-        }
-    }
-
-    Ok(objects)
-}
-
 /// Display-space baseline origin of the first character belonging to a box.
 fn first_baseline_point(
     layer: &crate::commands::TextLayerView,
@@ -2354,6 +3109,7 @@ fn style_change_layout(
         height: target.height.max(font_size * 1.2).max(1.0),
         rotation,
         auto_height: true,
+        line_height: None,
     })
 }
 
@@ -2816,6 +3572,7 @@ fn undo_for(entry: &mut OpenDocument) -> Result<EditStepView, CommandError> {
     // action needs annotation permission.
     match entry.edit.undo_stack.last() {
         Some(EditAction::Box(_))
+        | Some(EditAction::TextMove(_))
         | Some(EditAction::Image(_))
         | Some(EditAction::Line(_))
         | Some(EditAction::FormStructure(_))
@@ -2840,6 +3597,7 @@ fn undo_for(entry: &mut OpenDocument) -> Result<EditStepView, CommandError> {
     let structural = matches!(action, EditAction::Page(_));
     let mut step = match action {
         EditAction::Box(action) => undo_box(entry, action),
+        EditAction::TextMove(action) => restore_text_move(entry, action, false),
         EditAction::Image(action) => crate::image_edit::undo_image(entry, action),
         EditAction::Line(action) => crate::line_edit::undo_line(entry, action),
         EditAction::Field(action) => undo_field(entry, action),
@@ -2950,6 +3708,7 @@ fn redo_for(entry: &mut OpenDocument) -> Result<EditStepView, CommandError> {
     // action needs annotation permission.
     match entry.edit.redo_stack.last() {
         Some(EditAction::Box(_))
+        | Some(EditAction::TextMove(_))
         | Some(EditAction::Image(_))
         | Some(EditAction::Line(_))
         | Some(EditAction::FormStructure(_))
@@ -2974,6 +3733,7 @@ fn redo_for(entry: &mut OpenDocument) -> Result<EditStepView, CommandError> {
     let structural = matches!(action, EditAction::Page(_));
     let mut step = match action {
         EditAction::Box(action) => redo_box(entry, action),
+        EditAction::TextMove(action) => restore_text_move(entry, action, true),
         EditAction::Image(action) => crate::image_edit::redo_image(entry, action),
         EditAction::Line(action) => crate::line_edit::redo_line(entry, action),
         EditAction::Field(action) => redo_field(entry, action),
@@ -3053,11 +3813,228 @@ fn redo_box(
     })
 }
 
+/// A size/colour restyle of a legacy Text Object that keeps its original
+/// embedded font.
+///
+/// The panel sends this when the user changes only the size or colour of text
+/// that still uses a PDF font PDFX cannot reproduce itself; converting the box
+/// to a bundled font would visibly change every character.
+#[derive(Clone, Copy)]
+struct LegacyRestyle {
+    font_size: f32,
+    /// `#rrggbb` components.
+    color: (u8, u8, u8),
+}
+
+struct LegacyRenderPlan {
+    start: usize,
+    old_count: usize,
+    box_width: f32,
+    style: StyleSnapshot,
+    plan: FontPlan,
+    styles: Vec<SegmentStyle>,
+    char_styles: Vec<usize>,
+    font_size: f32,
+    color: PdfColor,
+}
+
+/// Editing and resizing must resolve exactly the same fonts and widths.
+fn prepare_legacy_render(
+    entry: &mut OpenDocument,
+    page_index: u32,
+    record_index: usize,
+    normalized: &str,
+    restyle: Option<LegacyRestyle>,
+) -> Result<LegacyRenderPlan, CommandError> {
+    // Inspect the box without holding a borrow of the document that would
+    // block loading a fallback font from its font collection.
+    let (start, old_count, box_width, style, plan, repair_space) = {
+        let page = load_page(&entry.document, page_index)?;
+        let objects = page.objects();
+        let record = &entry.edit.records[&page_index][record_index];
+        if record.count == 0 {
+            return Err(CommandError::new(
+                CommandErrorCode::InvalidArgument,
+                "this Text Box has been deleted",
+            ));
+        }
+        validate_box_range(objects, record.start, record.count)?;
+        let style = read_style(objects, record.start)?;
+        let plan = plan_fonts(&style, &normalized)?;
+        let repair_space = if normalized.contains(' ') && plan.uses_original() {
+            let object = objects.get(record.start).map_err(|error| {
+                CommandError::new(
+                    CommandErrorCode::Internal,
+                    format!("could not inspect original font: {error:?}"),
+                )
+            })?;
+            let font = object.as_text_object().unwrap().font();
+            style
+                .font_data
+                .as_deref()
+                .and_then(|data| ttf_parser::Face::parse(data, 0).ok())
+                .and_then(|face| {
+                    let gid = face.glyph_index(' ')?;
+                    let expected = f32::from(face.glyph_hor_advance(gid)?) * style.font_size
+                        / f32::from(face.units_per_em());
+                    let actual = font
+                        .character_advance(' ', PdfPoints::new(style.font_size))?
+                        .value;
+                    Some((actual - expected).abs() > 0.05)
+                })
+                .unwrap_or(false)
+        } else {
+            false
+        };
+        (
+            record.start,
+            record.count,
+            record.width,
+            style,
+            plan,
+            repair_space,
+        )
+    };
+
+    let font_size = restyle.map_or(style.font_size, |restyle| restyle.font_size);
+    validate_font_size(font_size)?;
+    let color = match restyle {
+        Some(restyle) => {
+            let (red, green, blue) = restyle.color;
+            PdfColor::new(red, green, blue, 255)
+        }
+        None => style.fill_color.unwrap_or(PdfColor::BLACK),
+    };
+
+    let fallback_token = match plan.fallback_font() {
+        Some(GlyphFont::BuiltIn(built_in)) => {
+            Some(entry.document.fonts_mut().new_built_in(built_in))
+        }
+        Some(GlyphFont::Bundled(bundled)) => {
+            let mut fallback_text = plan.fallback_text(&normalized);
+            // `wrap_styled` draws blank lines as a single space in style 0.
+            if !fallback_text.contains(' ') {
+                fallback_text.push(' ');
+            }
+            Some(bundled_token(
+                entry,
+                bundled,
+                &fallback_text,
+                style.font_is_bold,
+            )?)
+        }
+        Some(GlyphFont::System(installed)) => {
+            let mut fallback_text = plan.fallback_text(&normalized);
+            if !fallback_text.contains(' ') {
+                fallback_text.push(' ');
+            }
+            Some(system_token(
+                entry,
+                installed,
+                &fallback_text,
+                style.font_is_bold,
+            )?)
+        }
+        Some(GlyphFont::Original) | None => None,
+    };
+
+    let repaired_token = if repair_space {
+        let text: String = normalized
+            .chars()
+            .zip(&plan.fonts)
+            .filter(|(character, font)| {
+                !is_line_break(*character) && matches!(font, GlyphFont::Original)
+            })
+            .map(|(character, _)| character)
+            .collect();
+        Some(entry.edit.bundled_fonts.repaired_embedded_token(
+            &mut entry.document,
+            style.font_data.as_deref().unwrap(),
+            &style.font_family,
+            &text,
+        )?)
+    } else {
+        None
+    };
+    let page = load_page(&entry.document, page_index)?;
+    let original_token = if repaired_token.is_some() {
+        repaired_token
+    } else if plan.uses_original() {
+        let objects = page.objects();
+        let object = objects.get(start).map_err(|error| {
+            CommandError::new(
+                CommandErrorCode::Internal,
+                format!("could not read the Text Box: {error:?}"),
+            )
+        })?;
+        let text_object = object.as_text_object().ok_or_else(|| {
+            CommandError::new(
+                CommandErrorCode::Internal,
+                "the Text Box does not start with a text object",
+            )
+        })?;
+        let token = text_object.font().token();
+        Some(token)
+    } else {
+        None
+    };
+
+    // `wrap_styled` renders a blank line with style 0, so the fallback style
+    // comes first: bundled and base-14 fonts always have a space glyph.
+    let mut styles: Vec<SegmentStyle> = Vec::new();
+    let fallback_index = fallback_token.map(|token| {
+        styles.push(SegmentStyle {
+            token,
+            font_size,
+            color,
+            underline: false,
+            strikeout: false,
+        });
+        0
+    });
+    let original_index = match original_token {
+        Some(token) => {
+            let index = styles.len();
+            styles.push(SegmentStyle {
+                token,
+                font_size,
+                color,
+                underline: false,
+                strikeout: false,
+            });
+            index
+        }
+        None => 0,
+    };
+    let char_styles: Vec<usize> = normalized
+        .chars()
+        .zip(&plan.fonts)
+        .map(|(_, font)| match fallback_index {
+            Some(index) if !matches!(font, GlyphFont::Original) => index,
+            _ => original_index,
+        })
+        .collect();
+
+    drop(page);
+    Ok(LegacyRenderPlan {
+        start,
+        old_count,
+        box_width,
+        style,
+        plan,
+        styles,
+        char_styles,
+        font_size,
+        color,
+    })
+}
+
 fn apply_for(
     entry: &mut OpenDocument,
     page_index: u32,
     box_id: u64,
     text: String,
+    restyle: Option<LegacyRestyle>,
 ) -> Result<TextEditResultView, CommandError> {
     ensure_content_editable(&entry.document)?;
     let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
@@ -3088,107 +4065,46 @@ fn apply_for(
         ));
     }
 
-    // Inspect the box without holding a borrow of the document that would
-    // block loading a fallback font from its font collection.
-    let (start, old_count, box_width, style, decision) = {
-        let page = load_page(&entry.document, page_index)?;
-        let objects = page.objects();
-        let record = &entry.edit.records[&page_index][record_index];
-        if record.count == 0 {
-            return Err(CommandError::new(
-                CommandErrorCode::InvalidArgument,
-                "this Text Box has been deleted",
-            ));
-        }
-        validate_box_range(objects, record.start, record.count)?;
-        let style = read_style(objects, record.start)?;
-        let decision = decide_font(&style, &normalized)?;
-        (record.start, record.count, record.width, style, decision)
-    };
-
-    let chosen_token = match decision.choice {
-        FontChoice::BuiltIn(built_in) => Some(entry.document.fonts_mut().new_built_in(built_in)),
-        FontChoice::Bundled { bold } => Some(bundled_token(entry, &normalized, bold)?),
-        FontChoice::Original => None,
-    };
-
+    let LegacyRenderPlan {
+        start,
+        old_count,
+        box_width,
+        style,
+        plan,
+        styles,
+        char_styles,
+        font_size,
+        color,
+    } = prepare_legacy_render(entry, page_index, record_index, &normalized, restyle)?;
     let mut page = load_page(&entry.document, page_index)?;
-    let token = match chosen_token {
-        Some(token) => token,
-        None => {
-            let objects = page.objects();
-            let object = objects.get(start).map_err(|error| {
-                CommandError::new(
-                    CommandErrorCode::Internal,
-                    format!("could not read the Text Box: {error:?}"),
-                )
-            })?;
-            let text_object = object.as_text_object().ok_or_else(|| {
-                CommandError::new(
-                    CommandErrorCode::Internal,
-                    "the Text Box does not start with a text object",
-                )
-            })?;
-            let font = text_object.font();
-            font.token()
-        }
-    };
 
-    let lines = wrap_text(&normalized, box_width, &|candidate| {
-        measure_with_token(&entry.document, token, style.font_size, candidate)
-    });
-    let line_height = style.font_size * 1.2;
-    let [a, b, c, d, e, f] = style.matrix;
-    let mut replacements: Vec<PdfPageObject<'static>> = Vec::with_capacity(lines.len());
-    for (line_number, line) in lines.iter().enumerate() {
-        let mut object = PdfPageTextObject::new(
-            &entry.document,
-            line,
-            token,
-            PdfPoints::new(style.font_size),
-        )
-        .map_err(|error| {
-            CommandError::new(
-                CommandErrorCode::Internal,
-                format!("could not create replacement text: {error:?}"),
-            )
-        })?;
-        if let Some(color) = style.fill_color {
-            object.set_fill_color(color).map_err(|error| {
-                CommandError::new(
-                    CommandErrorCode::Internal,
-                    format!("could not copy the text colour: {error:?}"),
-                )
-            })?;
-        }
-        if style.render_mode != PdfPageTextRenderMode::Unknown {
-            object.set_render_mode(style.render_mode).map_err(|error| {
-                CommandError::new(
-                    CommandErrorCode::Internal,
-                    format!("could not copy the text render mode: {error:?}"),
-                )
-            })?;
-        }
-        let downward = line_number as f32 * line_height;
-        object
-            .apply_matrix(PdfMatrix::new(
-                a,
-                b,
-                c,
-                d,
-                e - downward * c,
-                f - downward * d,
-            ))
-            .map_err(|error| {
-                CommandError::new(
-                    CommandErrorCode::Internal,
-                    format!("could not place replacement text: {error:?}"),
-                )
-            })?;
-        replacements.push(PdfPageObject::from(object));
-    }
+    let lines = wrap_styled(
+        &entry.document,
+        &normalized,
+        &char_styles,
+        box_width,
+        &styles,
+    );
+    let line_height = entry.edit.records[&page_index][record_index]
+        .layout
+        .as_ref()
+        .and_then(|layout| layout.line_height)
+        .unwrap_or(0.0)
+        .max(font_size * 1.2);
+    let replacements = build_native_text_objects(
+        &entry.document,
+        style.matrix,
+        line_height,
+        Some(color),
+        style.render_mode,
+        &styles,
+        &lines,
+    )?;
 
     let new_count = replacements.len();
+    // Appending text grows an auto-height original box as well as a created
+    // one; the selection frame must include every newly wrapped line.
+    let content_height = lines.len() as f32 * line_height;
     let before_snapshot = entry.edit.records[&page_index][record_index].snapshot(record_index);
     let mut original_objects: Vec<PdfPageObject<'static>> = Vec::with_capacity(old_count);
     {
@@ -3225,6 +4141,11 @@ fn apply_for(
             let record = &mut records[record_index];
             record.count = new_count;
             record.text = normalized.clone();
+            if let Some(layout) = record.layout.as_mut() {
+                if layout.auto_height || restyle.is_some() {
+                    layout.height = layout.height.max(content_height);
+                }
+            }
         }
     }
     shift_object_indexes(
@@ -3249,7 +4170,7 @@ fn apply_for(
         page_index,
         box_id,
         text: normalized,
-        font: decision.fallback,
+        font: plan.fallback,
         history: entry.edit.history_view(),
     })
 }
@@ -3382,7 +4303,8 @@ fn resolve_box_font(
     text: &str,
 ) -> Result<ResolvedBoxFont, CommandError> {
     if style.is_bundled() {
-        let token = bundled_token(entry, text, style.bold)?;
+        let bundled = fonts::bundled_family(&style.font_family).unwrap_or_else(fonts::noto_sans_sc);
+        let token = bundled_token(entry, bundled, text, style.bold)?;
         return Ok(ResolvedBoxFont {
             token,
             style: style.clone(),
@@ -3390,7 +4312,51 @@ fn resolve_box_font(
         });
     }
 
-    if text_is_win_ansi(text) {
+    if style.is_installed() {
+        let catalog = system_fonts::catalog();
+        if let Some(face) = catalog.face_for_style(&style.font_family, style.bold, style.italic) {
+            if face.covers(text) {
+                let token = system_token(entry, face, text, style.bold)?;
+                let mut effective = style.clone();
+                effective.font_family = face.family.clone();
+                return Ok(ResolvedBoxFont {
+                    token,
+                    style: effective,
+                    fallback: None,
+                });
+            }
+        }
+        // The installed family cannot paint this text (a rare CJK extension
+        // character, or a Latin face asked to render Chinese). Latin text can
+        // use a base-14 face; anything else falls through to the bundled CJK
+        // font below and is reported as a fallback.
+        if text_is_win_ansi(text) {
+            let base_family = if fonts::is_serif_family(&style.font_family) {
+                "Times"
+            } else {
+                "Helvetica"
+            };
+            let built_in = builtin_for_style(base_family, style.bold, style.italic)
+                .expect("base-14 provides all four variants");
+            let token = entry.document.fonts_mut().new_built_in(built_in);
+            let mut effective = style.clone();
+            effective.font_family = base_family.to_owned();
+            return Ok(ResolvedBoxFont {
+                token,
+                style: effective,
+                fallback: Some(FontUsageView {
+                    original_family: style.font_family.clone(),
+                    family: base_family.to_owned(),
+                    fallback: true,
+                    reason: Some(format!(
+                        "the installed font {} cannot represent the replacement text; \
+                         {base_family} was used instead",
+                        style.font_family
+                    )),
+                }),
+            });
+        }
+    } else if text_is_win_ansi(text) {
         let token = entry.document.fonts_mut().new_built_in(style.builtin());
         return Ok(ResolvedBoxFont {
             token,
@@ -3415,7 +4381,7 @@ fn resolve_box_font(
     if !bundled.covers(text) {
         return Err(fonts::missing_glyph_error(bundled.family, text));
     }
-    let token = bundled_token(entry, text, style.bold)?;
+    let token = bundled_token(entry, bundled, text, style.bold)?;
     let mut effective = style.clone();
     effective.font_family = fonts::NOTO_SANS_SC_FAMILY.to_owned();
     Ok(ResolvedBoxFont {
@@ -3595,6 +4561,7 @@ fn render_styled_box(
         font_size: base.style.font_size,
         color: base.style.pdf_color(),
         underline: base.style.underline,
+        strikeout: base.style.strikeout,
     });
     for (run, token) in &resolved_runs {
         styles.push(SegmentStyle {
@@ -3602,6 +4569,7 @@ fn render_styled_box(
             font_size: run.style.font_size,
             color: run.style.pdf_color(),
             underline: run.style.underline,
+            strikeout: run.style.strikeout,
         });
     }
     let runs: Vec<TextBoxRun> = resolved_runs.into_iter().map(|(run, _)| run).collect();
@@ -3618,7 +4586,11 @@ fn render_styled_box(
     } else {
         let lines = wrap_styled(&entry.document, text, &char_styles, layout.width, &styles);
         let content_height = if styles.len() == 1 {
-            content_height(lines.len(), styles[0].font_size)
+            lines.len() as f32
+                * layout
+                    .line_height
+                    .unwrap_or(0.0)
+                    .max(styles[0].font_size * 1.2)
         } else {
             lines
                 .iter()
@@ -3627,7 +4599,7 @@ fn render_styled_box(
                         .iter()
                         .map(|(_, index)| styles[*index].font_size)
                         .fold(0.0, f32::max);
-                    size * 1.2
+                    layout.line_height.unwrap_or(0.0).max(size * 1.2)
                 })
                 .sum()
         };
@@ -3642,6 +4614,7 @@ fn render_styled_box(
         &styles,
         &lines,
         height,
+        None,
     )?;
 
     Ok(RenderedBox {
@@ -3760,6 +4733,7 @@ fn create_for(
         height: request.height,
         rotation: 0.0,
         auto_height: true,
+        line_height: None,
     };
     check_layout(&layout)?;
 
@@ -3853,15 +4827,15 @@ fn style_for(
     style_view: TextBoxStyleView,
 ) -> Result<TextBoxEditResultView, CommandError> {
     ensure_content_editable(&entry.document)?;
-    let new_style = TextBoxStyle::from_view(&style_view)?;
     let record_index = find_record(&entry.edit, page_index, box_id)?;
-    let (start, old_count, text, deleted) = {
+    let (start, old_count, text, deleted, uses_style) = {
         let record = &entry.edit.records[&page_index][record_index];
         (
             record.start,
             record.count,
             record.text.clone(),
             record.deleted,
+            record.style.is_some(),
         )
     };
     if deleted {
@@ -3870,6 +4844,58 @@ fn style_for(
             "this Text Box has been deleted",
         ));
     }
+
+    // A box that still paints an arbitrary embedded font cannot be recreated
+    // through the style system. Size and colour only change the same text
+    // objects' font size and fill, so the original program (and every original
+    // glyph) survives instead of being replaced by a bundled look-alike.
+    if !uses_style && old_count > 0 {
+        let original = {
+            let page = load_page(&entry.document, page_index)?;
+            let objects = page.objects();
+            validate_box_range(objects, start, old_count)?;
+            read_style(objects, start)?
+        };
+        if original.font_is_embedded
+            && !font_is_advertised(&original.font_family)
+            && style_view.font_family.trim() == original.font_family
+        {
+            if style_view.bold != original.font_is_bold
+                || style_view.italic != original.font_is_italic
+                || style_view.underline
+                || style_view.strikeout
+                || style_view.alignment != TextAlignment::Left
+            {
+                return Err(CommandError::new(
+                    CommandErrorCode::UnsupportedFont,
+                    format!(
+                        "the original font {} can keep only its size and colour; choose \
+                         another font before changing weight, underline or alignment",
+                        original.font_family
+                    ),
+                ));
+            }
+            let restyled = apply_for(
+                entry,
+                page_index,
+                box_id,
+                text,
+                Some(LegacyRestyle {
+                    font_size: style_view.font_size,
+                    color: parse_color(&style_view.color)?,
+                }),
+            )?;
+            let target = read_target(entry, page_index, box_id)?;
+            return Ok(TextBoxEditResultView {
+                page_index,
+                target,
+                font: restyled.font,
+                history: restyled.history,
+            });
+        }
+    }
+
+    let new_style = TextBoxStyle::from_view(&style_view)?;
     let layout = style_change_layout(entry, page_index, record_index, new_style.font_size)?;
     check_layout(&layout)?;
 
@@ -3961,7 +4987,20 @@ fn legacy_base_style(
         )
     })?;
     let font_name = text_object.font().name();
-    let font_size = text_object.unscaled_font_size().value;
+    let matrix = text_object
+        .matrix()
+        .map(|matrix| {
+            [
+                matrix.a(),
+                matrix.b(),
+                matrix.c(),
+                matrix.d(),
+                matrix.e(),
+                matrix.f(),
+            ]
+        })
+        .unwrap_or([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+    let font_size = display_font_size(text_object.unscaled_font_size().value, matrix);
     if !font_size.is_finite() || !(4.0..=400.0).contains(&font_size) {
         return Err(CommandError::new(
             CommandErrorCode::UnsupportedFont,
@@ -3971,7 +5010,7 @@ fn legacy_base_style(
 
     let (font_family, bold, italic) = if fonts::is_bundled_family(&font_name) {
         let (bold, italic) = style_flags_from_font_name(&font_name);
-        (fonts::NOTO_SANS_SC_FAMILY.to_owned(), bold, italic)
+        (fonts::normalize_family(&font_name), bold, italic)
     } else {
         let name = base_font_name(&font_name);
         let font = BASE14_FONTS
@@ -3991,10 +5030,7 @@ fn legacy_base_style(
     if italic && fonts::is_bundled_family(&font_family) {
         return Err(CommandError::new(
             CommandErrorCode::UnsupportedFont,
-            format!(
-                "the bundled font {} has no italic variant",
-                fonts::NOTO_SANS_SC_FAMILY
-            ),
+            format!("the bundled font {font_family} has no italic variant"),
         ));
     }
 
@@ -4008,6 +5044,7 @@ fn legacy_base_style(
         bold,
         italic,
         underline: false,
+        strikeout: false,
         color,
         alignment: TextAlignment::Left,
     })
@@ -4137,6 +5174,177 @@ fn selection_style_for(
     })
 }
 
+fn set_box_matrices(
+    entry: &OpenDocument,
+    page_index: u32,
+    box_id: u64,
+    matrices: &[PdfMatrix],
+) -> Result<(), CommandError> {
+    let index = find_record(&entry.edit, page_index, box_id)?;
+    let record = &entry.edit.records[&page_index][index];
+    if record.count != matrices.len() {
+        return Err(CommandError::new(
+            CommandErrorCode::Internal,
+            "the moved text object's range changed",
+        ));
+    }
+    let page = load_page(&entry.document, page_index)?;
+    for (offset, matrix) in matrices.iter().enumerate() {
+        let mut object = page.objects().get(record.start + offset).map_err(|e| {
+            CommandError::new(
+                CommandErrorCode::Internal,
+                format!("cannot read moved text: {e:?}"),
+            )
+        })?;
+        object.reset_matrix(*matrix).map_err(|e| {
+            CommandError::new(
+                CommandErrorCode::Internal,
+                format!("cannot move text: {e:?}"),
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn restore_text_move(
+    entry: &mut OpenDocument,
+    action: TextMoveAction,
+    redo: bool,
+) -> Result<EditStepView, CommandError> {
+    let index = find_record(&entry.edit, action.page_index, action.box_id)?;
+    set_box_matrices(
+        entry,
+        action.page_index,
+        action.box_id,
+        if redo {
+            &action.after_matrices
+        } else {
+            &action.before_matrices
+        },
+    )?;
+    entry.edit.records.get_mut(&action.page_index).unwrap()[index].layout = if redo {
+        action.after_layout.clone()
+    } else {
+        action.before_layout.clone()
+    };
+    entry.edit.current_state = if redo {
+        action.after_state
+    } else {
+        action.before_state
+    };
+    let page_index = action.page_index;
+    if redo {
+        entry.edit.undo_stack.push(EditAction::TextMove(action));
+    } else {
+        entry.edit.redo_stack.push(EditAction::TextMove(action));
+    }
+    Ok(EditStepView {
+        page_index,
+        page_count: entry.pages.len(),
+        page_structure_changed: false,
+        history: entry.edit.history_view(),
+    })
+}
+
+fn translate_box(
+    entry: &mut OpenDocument,
+    page_index: u32,
+    box_id: u64,
+    before: &TextBoxTargetView,
+    x: f32,
+    y: f32,
+    frame_height: Option<f32>,
+) -> Result<TextBoxEditResultView, CommandError> {
+    let index = find_record(&entry.edit, page_index, box_id)?;
+    let record = &entry.edit.records[&page_index][index];
+    let before_layout = record.layout.clone();
+    let mut after_layout = before_layout.clone().map(|mut layout| {
+        layout.x = x;
+        layout.y = y;
+        layout
+    });
+    let page = load_page(&entry.document, page_index)?;
+    let rotation = page
+        .rotation()
+        .map_err(|e| {
+            CommandError::new(
+                CommandErrorCode::RenderFailed,
+                format!("cannot read rotation: {e:?}"),
+            )
+        })?
+        .as_degrees() as u16;
+    let geometry = DisplayGeometry::new(&page, rotation)?;
+    if let Some(height) = frame_height {
+        let (layer, raw) = build_text_layer_with_raw_indices(&page, page_index)?;
+        let text = page.text().map_err(|_| no_editable_text(page_index))?;
+        let minimum = box_display_rect(&layer, &raw, &text, page.objects(), record)
+            .map(|(_, top, _, content_height)| top + content_height - before.y)
+            .unwrap_or(before.font_size * 1.2)
+            .max(before.font_size * 1.2);
+        after_layout = Some(BoxLayout {
+            x,
+            y,
+            width: before.width,
+            height: height.max(minimum),
+            rotation: before.rotation,
+            auto_height: true,
+            line_height: before_layout.as_ref().and_then(|layout| layout.line_height),
+        });
+    }
+    let (zero_x, zero_y) = geometry.point_inverse(0.0, 0.0);
+    let (delta_x, delta_y) = geometry.point_inverse(x - before.x, y - before.y);
+    let (dx, dy) = (delta_x - zero_x, delta_y - zero_y);
+    let mut before_matrices = Vec::with_capacity(record.count);
+    for offset in 0..record.count {
+        let object = page.objects().get(record.start + offset).map_err(|e| {
+            CommandError::new(
+                CommandErrorCode::Internal,
+                format!("cannot read text matrix: {e:?}"),
+            )
+        })?;
+        before_matrices.push(object.matrix().map_err(|e| {
+            CommandError::new(
+                CommandErrorCode::Internal,
+                format!("cannot read text matrix: {e:?}"),
+            )
+        })?);
+    }
+    drop(page);
+    let after_matrices: Vec<_> = before_matrices
+        .iter()
+        .map(|m| PdfMatrix::new(m.a(), m.b(), m.c(), m.d(), m.e() + dx, m.f() + dy))
+        .collect();
+    if let Err(error) = set_box_matrices(entry, page_index, box_id, &after_matrices) {
+        set_box_matrices(entry, page_index, box_id, &before_matrices)?;
+        return Err(error);
+    }
+    entry.edit.records.get_mut(&page_index).unwrap()[index].layout = after_layout.clone();
+    let before_state = entry.edit.current_state;
+    let after_state = entry.edit.next_state + 1;
+    entry.edit.next_state = after_state;
+    entry.edit.current_state = after_state;
+    entry.edit.redo_stack.clear();
+    entry
+        .edit
+        .undo_stack
+        .push(EditAction::TextMove(TextMoveAction {
+            page_index,
+            box_id,
+            before_state,
+            after_state,
+            before_matrices,
+            after_matrices,
+            before_layout,
+            after_layout,
+        }));
+    Ok(TextBoxEditResultView {
+        page_index,
+        target: read_target(entry, page_index, box_id)?,
+        font: None,
+        history: entry.edit.history_view(),
+    })
+}
+
 fn transform_for(
     entry: &mut OpenDocument,
     page_index: u32,
@@ -4144,15 +5352,52 @@ fn transform_for(
     request: TextBoxTransformRequest,
 ) -> Result<TextBoxEditResultView, CommandError> {
     ensure_content_editable(&entry.document)?;
-    let layout = BoxLayout {
+    let mut layout = BoxLayout {
         x: request.x,
         y: request.y,
         width: request.width,
         height: request.height,
         rotation: normalize_angle(request.rotation),
         auto_height: request.auto_height,
+        line_height: None,
     };
     check_layout(&layout)?;
+
+    let original = read_target(entry, page_index, box_id)?;
+    layout.line_height = original.line_height;
+    if (layout.width - original.width).abs() < 0.01
+        && (layout.height - original.height).abs() < 0.01
+        && (layout.rotation - original.rotation).abs() < 0.01
+        && layout.auto_height == original.auto_height
+    {
+        if (layout.x - original.x).abs() < 0.01 && (layout.y - original.y).abs() < 0.01 {
+            return Ok(TextBoxEditResultView {
+                page_index,
+                target: original,
+                font: None,
+                history: entry.edit.history_view(),
+            });
+        }
+        return translate_box(
+            entry, page_index, box_id, &original, layout.x, layout.y, None,
+        );
+    }
+
+    if (layout.width - original.width).abs() < 0.01
+        && layout.rotation.abs() < 0.01
+        && original.rotation.abs() < 0.01
+        && layout.auto_height
+    {
+        return translate_box(
+            entry,
+            page_index,
+            box_id,
+            &original,
+            layout.x,
+            layout.y,
+            Some(layout.height),
+        );
+    }
 
     let record_index = find_record(&entry.edit, page_index, box_id)?;
     let (start, old_count, text, deleted, style, runs) = {
@@ -4188,11 +5433,6 @@ fn transform_for(
         })?
         .as_degrees() as u16;
     let geometry = DisplayGeometry::new(&page, rotation)?;
-    let legacy_render = if style.is_none() && old_count > 0 {
-        Some(read_legacy_font(page.objects(), start)?)
-    } else {
-        None
-    };
     drop(page);
 
     // A transform keeps every styled range: the text and its offsets do not
@@ -4216,29 +5456,33 @@ fn transform_for(
             )
         }
         None => {
-            let render = legacy_render.ok_or_else(|| {
-                CommandError::new(
-                    CommandErrorCode::Internal,
-                    "the Text Box lost its font while being transformed",
-                )
-            })?;
-            let lines = if text.is_empty() {
-                Vec::new()
-            } else {
-                wrap_text(&text, layout.width, &|candidate| {
-                    measure_with_token(&entry.document, render.token, render.font_size, candidate)
-                })
-            };
-            let height = effective_height(&layout, content_height(lines.len(), render.font_size));
-            let objects = build_box_objects(
+            let prepared = prepare_legacy_render(entry, page_index, record_index, &text, None)?;
+            let lines = wrap_styled(
+                &entry.document,
+                &text,
+                &prepared.char_styles,
+                layout.width,
+                &prepared.styles,
+            );
+            let height = effective_height(
+                &layout,
+                lines.len() as f32
+                    * layout
+                        .line_height
+                        .unwrap_or(0.0)
+                        .max(prepared.font_size * 1.2),
+            );
+            let objects = build_styled_box_objects(
                 &mut entry.document,
                 &geometry,
                 &layout,
-                render,
+                TextAlignment::Left,
+                &prepared.styles,
                 &lines,
                 height,
+                Some(prepared.style.render_mode),
             )?;
-            (objects, height, None, Vec::new(), None)
+            (objects, height, None, Vec::new(), prepared.plan.fallback)
         }
     };
     let new_count = replacements.len();
@@ -4303,7 +5547,7 @@ pub fn apply_text_edit(
 ) -> Result<TextEditResultView, CommandError> {
     with_open_document(&document_id, |entry| {
         let physical = entry.physical_page(page_index)?;
-        let mut view = apply_for(entry, physical, box_id, text)?;
+        let mut view = apply_for(entry, physical, box_id, text, None)?;
         view.page_index = entry.logical_page(physical).unwrap_or(0);
         Ok(view)
     })
@@ -4419,6 +5663,80 @@ pub fn transform_text_box(
     })
 }
 
+/// Captures reusable native glyph pixels for smooth client-side translation.
+#[tauri::command]
+pub fn prepare_text_box_move_preview(
+    document_id: String,
+    page_index: u32,
+    box_id: u64,
+    scale: f32,
+) -> Result<Option<crate::text_move_preview::TextBoxMovePreview>, CommandError> {
+    let captured = with_open_document(&document_id, |entry| {
+        ensure_content_editable(&entry.document)?;
+        let physical = entry.physical_page(page_index)?;
+        let index = find_record(&entry.edit, physical, box_id)?;
+        let record = &entry.edit.records[&physical][index];
+        if record.deleted || record.count == 0 {
+            return Ok(None);
+        }
+        let range = record.start..record.start + record.count;
+        crate::text_move_preview::capture(entry, page_index, range, scale)
+    })?;
+    captured
+        .map(|capture| capture.encode(document_id, page_index))
+        .transpose()
+}
+
+/// A drag preview rendered with the real PDF font metrics and page background.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextBoxTransformPreview {
+    pub image: crate::commands::PageImageView,
+    pub target: TextBoxTargetView,
+}
+
+/// Render a reversible transform while holding the registry lock. No caller
+/// can observe the intermediate page; history, redo, and the original objects
+/// are restored before returning, even if rasterization fails. State IDs stay
+/// monotonic so layer-render caches never reuse a previous preview's pixels.
+#[tauri::command]
+pub fn preview_text_box_transform(
+    document_id: String,
+    page_index: u32,
+    box_id: u64,
+    transform: TextBoxTransformRequest,
+    scale: f32,
+) -> Result<TextBoxTransformPreview, CommandError> {
+    with_open_document(&document_id, |entry| {
+        let physical = entry.physical_page(page_index)?;
+        let before_len = entry.edit.undo_stack.len();
+        let saved_redo = std::mem::take(&mut entry.edit.redo_stack);
+        let transformed = transform_for(entry, physical, box_id, transform);
+        let rendered = match &transformed {
+            Ok(_) => crate::commands::render_page_preview_for(
+                entry,
+                &document_id,
+                page_index,
+                scale.clamp(0.1, 2.0),
+            ),
+            Err(error) => Err(error.clone()),
+        };
+        let restored = if entry.edit.undo_stack.len() > before_len {
+            undo_for(entry).map(|_| ())
+        } else {
+            Ok(())
+        };
+        entry.edit.redo_stack = saved_redo;
+        restored?;
+        let mut target = transformed?.target;
+        target.page_index = page_index;
+        Ok(TextBoxTransformPreview {
+            image: rendered?,
+            target,
+        })
+    })
+}
+
 /// The `edit_history` command: document-wide undo/redo availability.
 #[tauri::command]
 pub fn edit_history(document_id: String) -> Result<EditHistoryView, CommandError> {
@@ -4452,4 +5770,20 @@ pub fn mark_document_saved(document_id: String) -> Result<EditHistoryView, Comma
         entry.edit.mark_document_saved();
         Ok(entry.edit.history_view())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::face_paints;
+
+    #[test]
+    fn font_coverage_requires_a_painted_outline() {
+        let face = crate::fonts::noto_sans_sc()
+            .face()
+            .expect("the bundled font parses");
+
+        assert!(face_paints(&face, '改'));
+        assert!(face_paints(&face, ' '));
+        assert!(!face_paints(&face, '\u{E000}'));
+    }
 }

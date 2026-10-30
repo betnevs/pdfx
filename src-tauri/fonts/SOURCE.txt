@@ -1,4 +1,41 @@
+Noto Serif SC (variable TTF), google/fonts commit 2e61f4355afd22b801791b0df176065082423b87
+URL:     https://raw.githubusercontent.com/google/fonts/2e61f4355afd22b801791b0df176065082423b87/ofl/notoserifsc/NotoSerifSC%5Bwght%5D.ttf
+SHA-256: 050080d9255a86808f2945bffac582b31ef32bc36411ce29563b4961670c66f9
+License: SIL Open Font License 1.1, see NotoSerifSC-OFL.txt in this directory
+
 Noto Sans SC (variable TTF), google/fonts commit ddf386ba1b9fbc6b2c818f1ddcd9148f54ced94b
 URL:     https://raw.githubusercontent.com/google/fonts/ddf386ba1b9fbc6b2c818f1ddcd9148f54ced94b/ofl/notosanssc/NotoSansSC%5Bwght%5D.ttf
 SHA-256: a3041811a78c361b1de50f953c805e0244951c21c5bd412f7232ef0d899af0da
 License: SIL Open Font License 1.1, see NotoSansSC-OFL.txt in this directory
+
+Zhuque Fangsong Regular (static TTF, v0.212 technical preview), TrionesType
+URL:     https://github.com/TrionesType/zhuque/releases/download/v0.212/ZhuqueFangsong-v0.212.zip
+         (ZhuqueFangsong-Regular.ttf inside the archive)
+SHA-256: 558c62730844fe54ba220146ed62f859d4e2880188d92d985f8921c6e3743bc4
+License: SIL Open Font License 1.1, see ZhuqueFangsong-OFL.txt in this directory
+
+LXGW WenKai Regular, v1.530, LXGW
+URL:     https://github.com/lxgw/LxgwWenKai/releases/download/v1.530/LXGWWenKai-Regular.ttf
+SHA-256: 2d73eea94ad808999d90c0000c239a84a33b09d4bc6ab6c5b8bbf1eda8a7fc8b
+License: SIL Open Font License 1.1, see LXGWWenKai-OFL.txt in this directory
+
+Smiley Sans Oblique, v2.0.1, atelierAnchor
+URL:     https://github.com/atelier-anchor/smiley-sans/releases/download/v2.0.1/smiley-sans-v2.0.1.zip
+         (SmileySans-Oblique.ttf inside the archive)
+SHA-256: b447d7e781f08bc95c4c9f23ba71ed2b8ebb639aa7184485c71c4ca5afcd25c4
+License: SIL Open Font License 1.1, see SmileySans-OFL.txt in this directory
+
+Ma Shan Zheng Regular, google/fonts
+URL:     https://raw.githubusercontent.com/google/fonts/main/ofl/mashanzheng/MaShanZheng-Regular.ttf
+SHA-256: 6d2546bb189c732a8ca29af9e22457b152387d158aa459e4ac2ce1e51788b7fb
+License: SIL Open Font License 1.1, see MaShanZheng-OFL.txt in this directory
+
+ZCOOL XiaoWei Regular, google/fonts
+URL:     https://raw.githubusercontent.com/google/fonts/main/ofl/zcoolxiaowei/ZCOOLXiaoWei-Regular.ttf
+SHA-256: a42b620140f493db42f741351dfbf343c0936d58588ee8004b8b2a218d997ff1
+License: SIL Open Font License 1.1, see ZCOOLXiaoWei-OFL.txt in this directory
+
+ZCOOL QingKe HuangYou Regular, google/fonts
+URL:     https://raw.githubusercontent.com/google/fonts/main/ofl/zcoolqingkehuangyou/ZCOOLQingKeHuangYou-Regular.ttf
+SHA-256: 54f0c0df4308cd74cd0f2fd3494ae054dbc4a1fd6fa7d71f4807eb4cdd8b4136
+License: SIL Open Font License 1.1, see ZCOOLQingKeHuangYou-OFL.txt in this directory

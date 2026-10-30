@@ -8,6 +8,7 @@ import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialo
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
+import { registerPendingEdit } from "./lib/pendingEdits";
 import {
   READ_ONLY_REASON,
   SIGNATURE_INVALIDATED_WARNING,
@@ -196,6 +197,9 @@ function installDocumentBackend(overrides: Record<string, CommandHandler> = {}) 
       return { ...region, pngBase64: "iVBORw0KGgo=" };
     },
     extract_text_layer: () => textLayerView,
+    text_box_fonts: () => [],
+    text_boxes: () => [],
+    document_outline: () => [],
     form_fields: () => [],
     missing_required_fields: () => [],
     page_images: () => [],
@@ -333,6 +337,15 @@ async function acceptSaveOptions(
   );
 }
 
+/**
+ * Opens one of the PDFX-only inspectors from the overflow menu. They no
+ * longer occupy the reference editor's five tool tabs.
+ */
+async function selectPanel(user: TestUser, name: string): Promise<void> {
+  await user.click(screen.getByRole("button", { name: "更多工具" }));
+  await user.click(screen.getByRole("menuitem", { name }));
+}
+
 let setTitle: ReturnType<typeof vi.fn>;
 let onCloseRequested: ReturnType<typeof vi.fn>;
 let destroyWindowMock: ReturnType<typeof vi.fn>;
@@ -434,7 +447,7 @@ describe("PDFX workspace", () => {
 
     expect(await screen.findByText("report.pdf")).toBeInTheDocument();
     expect(setTitle).toHaveBeenCalledWith("report.pdf — PDFX");
-    expect(screen.getByRole("img", { name: "第 1 页" })).toHaveStyle({
+    expect(screen.getByRole("region", { name: "第 1 页" })).toHaveStyle({
       width: "612px",
       height: "792px",
     });
@@ -459,7 +472,7 @@ describe("PDFX workspace", () => {
     expect(commandCalls("extract_text_layer")).toEqual([
       ["extract_text_layer", { documentId: "doc-1", pageIndex: 0 }],
     ]);
-    expect(screen.getByRole("img", { name: "第 1 页" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "第 1 页" })).toBeInTheDocument();
   });
 
   it("opens a PDF dropped onto the window", async () => {
@@ -526,6 +539,7 @@ describe("PDFX workspace", () => {
     await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
     await screen.findByText("report.pdf");
 
+    await user.click(screen.getByRole("button", {name:"注释列表"}));
     const item = await screen.findByRole("button", {
       name: "高亮，第 3 页，测试作者",
     });
@@ -593,6 +607,7 @@ describe("PDFX workspace", () => {
     await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
     await screen.findByText("report.pdf");
 
+    await selectPanel(user, "图章");
     await user.click(screen.getByRole("button", { name: "放置已批准图章" }));
     expect(
       screen.getByText("在页面上单击放置“已批准”图章。"),
@@ -811,15 +826,13 @@ describe("PDFX workspace", () => {
     await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
 
     expect(await screen.findByText(READ_ONLY_REASON)).toBeInTheDocument();
-    expect(screen.getByRole("img", { name: "第 1 页" })).toBeInTheDocument();
-
-    const editing = screen.getByRole("button", { name: "编辑工具（即将提供）" });
-    expect(editing).toBeDisabled();
-    expect(editing).toHaveAttribute("aria-describedby", "read-only-reason");
+    expect(screen.getByRole("region", { name: "第 1 页" })).toBeInTheDocument();
 
     expect(screen.getByRole("button", { name: "保存更改" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "另存为…" })).toBeEnabled();
     expect(screen.getByText(UNENCRYPTED_OUTPUT_WARNING)).toBeInTheDocument();
+
+    await selectPanel(user, "水印");
     expect(
       screen.getByText("文档为只读，无法修改水印。"),
     ).toBeInTheDocument();
@@ -837,7 +850,7 @@ describe("PDFX workspace", () => {
     render(<App />);
     await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
 
-    expect(await screen.findByRole("img", { name: "第 1 页" })).toBeInTheDocument();
+    expect(await screen.findByRole("region", { name: "第 1 页" })).toBeInTheDocument();
     expect(screen.queryByText(READ_ONLY_REASON)).not.toBeInTheDocument();
     expect(screen.getByText(UNENCRYPTED_OUTPUT_WARNING)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "保存更改" })).toBeEnabled();
@@ -1242,6 +1255,7 @@ describe("PDFX workspace", () => {
     await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
     await screen.findByText("report.pdf");
 
+    await user.click(await screen.findByRole("button", {name:"编辑内容"}));
     const textLayer = await screen.findByRole("region", { name: "文本层" });
     vi.spyOn(textLayer, "getBoundingClientRect").mockReturnValue({
       x: 0,
@@ -1787,7 +1801,7 @@ describe("PDFX workspace", () => {
     Object.defineProperty(rail, "scrollTop", {
       configurable: true,
       writable: true,
-      value: 300 * 168,
+      value: 300 * 220,
     });
     fireEvent.scroll(rail);
 
@@ -1884,7 +1898,7 @@ describe("PDFX workspace", () => {
 
     // The rail scrolls the active page into view and lazily loads its window
     // instead of every thumbnail between pages 1 and 400.
-    expect(railScrollTop).toBe(400 * 168 - 600);
+    expect(railScrollTop).toBe(400 * 220 - 600);
     await waitFor(() =>
       expect(
         thumbnailCalls().some(
@@ -2030,7 +2044,7 @@ describe("PDFX workspace", () => {
     await screen.findByText("report.pdf");
 
     // Page 1 is portrait in PDF user space but displays landscape (90 degrees).
-    const first = await screen.findByRole("img", { name: "第 1 页" });
+    const first = await screen.findByRole("region", { name: "第 1 页" });
     await waitFor(() => {
       expect(first).toHaveStyle({ width: "792px", height: "612px" });
     });
@@ -2039,7 +2053,7 @@ describe("PDFX workspace", () => {
     expect(first).toHaveAttribute("data-page-height", "612");
 
     await user.click(screen.getByRole("button", { name: "下一页" }));
-    const second = await screen.findByRole("img", { name: "第 2 页" });
+    const second = await screen.findByRole("region", { name: "第 2 页" });
     await waitFor(() => {
       expect(second).toHaveStyle({ width: "432px", height: "288px" });
     });
@@ -2054,14 +2068,14 @@ describe("PDFX workspace", () => {
     await waitFor(() => {
       expect(second).toHaveStyle({ width: "864px", height: "576px" });
     });
-    expect(renderPageCalls().at(-1)).toMatchObject({
+    await waitFor(() => expect(renderPageCalls().at(-1)).toMatchObject({
       pageIndex: 1,
       scale: 2,
-    });
+    }));
 
     // The next page has a different media size and 180 degree rotation.
     await user.click(screen.getByRole("button", { name: "下一页" }));
-    const third = await screen.findByRole("img", { name: "第 3 页" });
+    const third = await screen.findByRole("region", { name: "第 3 页" });
     await waitFor(() => {
       expect(third).toHaveStyle({ width: "576px", height: "864px" });
     });
@@ -2216,8 +2230,9 @@ describe("PDFX workspace", () => {
 
     render(<App />);
     await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
-    await screen.findByRole("img", { name: "第 1 页" });
+    await screen.findByRole("region", { name: "第 1 页" });
 
+    await selectPanel(user, "水印");
     await user.type(screen.getByLabelText("水印文字"), "机密");
     await user.click(screen.getByRole("button", { name: "应用水印" }));
 
@@ -3522,6 +3537,7 @@ describe("PDFX workspace", () => {
     await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
     await screen.findByText("report.pdf");
 
+    await selectPanel(user, "导出");
     await user.click(screen.getByRole("button", { name: "打印…" }));
     const printDialog = await screen.findByRole("dialog", { name: "打印" });
     await user.click(
@@ -3565,6 +3581,7 @@ describe("PDFX workspace", () => {
     await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
     await screen.findByText("report.pdf");
 
+    await selectPanel(user, "导出");
     expect(screen.getByRole("button", { name: "打印…" })).toBeDisabled();
     expect(screen.getByText("文档所有者限制了打印权限。")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "导出当前页…" })).toBeEnabled();
@@ -3986,6 +4003,7 @@ describe("page operations", () => {
     const renderCalls = renderPageCalls().length;
     const thumbCalls = thumbnailCalls().length;
 
+    await selectPanel(user, "页面");
     await user.click(screen.getByRole("button", { name: "向右旋转" }));
 
     await waitFor(() =>
@@ -4026,6 +4044,7 @@ describe("page operations", () => {
     await user.click(await screen.findByRole("button", { name: "第 3 页" }));
     expect(await screen.findByText("第 3 / 3 页 · 100%")).toBeInTheDocument();
 
+    await selectPanel(user, "页面");
     await user.click(screen.getByRole("button", { name: "删除页面" }));
     const dialog = await screen.findByRole("dialog", { name: "删除页面" });
     expect(within(dialog).getByText(/确定删除第 3 页/)).toBeInTheDocument();
@@ -4062,6 +4081,7 @@ describe("page operations", () => {
     await screen.findByText("report.pdf");
     await waitFor(() => expect(pageInfoCalls().length).toBeGreaterThan(0));
 
+    await selectPanel(user, "页面");
     await user.click(screen.getByRole("button", { name: "插入空白页…" }));
     const dialog = await screen.findByRole("dialog", { name: "插入空白页" });
     expect(
@@ -4110,6 +4130,7 @@ describe("page operations", () => {
     const renderCalls = renderPageCalls().length;
     const thumbCalls = thumbnailCalls().length;
 
+    await selectPanel(user, "页面");
     await user.click(screen.getByRole("button", { name: "复制页面" }));
 
     await waitFor(() =>
@@ -4189,6 +4210,7 @@ describe("page operations", () => {
     await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
     await screen.findByText("report.pdf");
 
+    await selectPanel(user, "页面");
     await user.click(screen.getByRole("button", { name: "复制页面" }));
     expect(await screen.findByText("第 2 / 4 页 · 100%")).toBeInTheDocument();
     expect(await screen.findByText("未保存")).toBeInTheDocument();
@@ -4241,6 +4263,7 @@ describe("page operations", () => {
     expect(
       await screen.findByText("文档为只读，页面操作已禁用。"),
     ).toBeInTheDocument();
+    await selectPanel(user, "页面");
     for (const name of [
       "向左旋转",
       "向右旋转",
@@ -4505,6 +4528,33 @@ describe("recovery and recent files", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("removes one history entry, then clears the remainder without opening a document", async () => {
+    installDocumentBackend({
+      list_recent_files: () => recentFiles,
+      forget_recent_file: () => [recentFiles[1]],
+      clear_recent_files: () => [],
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByRole("button", {name: "移除 report.pdf 的记录"}));
+    await waitFor(() => expect(screen.queryByRole("button", {name: "打开 report.pdf"})).not.toBeInTheDocument());
+    expect(screen.getByRole("button", {name: "打开 notes.pdf"})).toBeInTheDocument();
+    await user.click(screen.getByRole("button", {name: "全部清空"}));
+    await waitFor(() => expect(screen.queryByRole("heading", {name: "最近文件"})).not.toBeInTheDocument());
+    expect(commandCalls("forget_recent_file")).toEqual([["forget_recent_file", {path: "/tmp/report.pdf"}]]);
+    expect(commandCalls("clear_recent_files")).toHaveLength(1);
+    expect(commandCalls("open_document")).toHaveLength(0);
+  });
+
+  it("keeps recent files and reports a failure when history cannot be cleared", async () => {
+    installDocumentBackend({list_recent_files: () => recentFiles, clear_recent_files: () => {throw new Error("disk write failed");}});
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByRole("button", {name: "全部清空"}));
+    expect(await screen.findByRole("alert")).toHaveTextContent("无法更新最近文件记录");
+    expect(screen.getByRole("button", {name: "打开 report.pdf"})).toBeInTheDocument();
+  });
+
   it("reports a missing recent file and removes it from the list", async () => {
     installDocumentBackend({
       list_recent_files: () => [recentFiles[0]],
@@ -4610,6 +4660,7 @@ describe("PDFX attachments", () => {
     await screen.findByText("report.pdf");
     await waitFor(() => expect(lastMenuState().get("edit.undo")).toBe(false));
 
+    await selectPanel(user, "附件");
     openDialogMock.mockResolvedValueOnce("/tmp/report.txt");
     await user.click(screen.getByRole("button", { name: "添加附件" }));
 
@@ -4692,6 +4743,7 @@ describe("PDFX layers", () => {
     const renderCalls = renderPageCalls().length;
     const thumbCalls = thumbnailCalls().length;
 
+    await selectPanel(user, "图层");
     await user.click(screen.getByRole("checkbox", { name: "显示 红线" }));
 
     await waitFor(() =>
@@ -4764,6 +4816,7 @@ describe("PDFX layers", () => {
     await user.click(screen.getByRole("button", { name: "打开 PDF…" }));
 
     expect(await screen.findByText("红线")).toBeInTheDocument();
+    await selectPanel(user, "图层");
     expect(screen.getByRole("checkbox", { name: "显示 红线" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "重命名 红线" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "删除 红线" })).toBeDisabled();
@@ -4771,4 +4824,45 @@ describe("PDFX layers", () => {
       screen.getByText("文档为只读，无法修改图层。"),
     ).toBeInTheDocument();
   });
+});
+
+describe("reference edit workspace", () => {
+  it("opens directly in content editing, exposes three text tools and toggles the sidebar", async () => {
+    installDocumentBackend();openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");
+    const user=userEvent.setup();render(<App />);
+    await user.click(screen.getByRole("button",{name:"打开 PDF…"}));
+    await waitFor(() => expect(screen.getByRole("button",{name:"编辑内容"})).toHaveAttribute("aria-pressed","true"));
+    expect(screen.getByRole("tab",{name:"编辑文本"})).toHaveAttribute("aria-selected","true");
+    expect(screen.getByRole("button",{name:"添加段落"})).toBeEnabled();
+    expect(screen.getByRole("button",{name:"新图片"})).toBeEnabled();
+    expect(screen.queryByRole("button",{name:"编辑"})).not.toBeInTheDocument();
+    expect(screen.getByRole("combobox",{name:"字体"})).toBeDisabled();
+    const sidebar=screen.getByRole("button",{name:"左侧面板"});
+    await user.click(sidebar);expect(sidebar).toHaveAttribute("aria-pressed","false");
+    await user.click(sidebar);expect(sidebar).toHaveAttribute("aria-pressed","true");
+    expect(screen.getByRole("button",{name:"编辑内容"})).toHaveAttribute("aria-pressed","true");
+    await user.click(screen.getByRole("tab",{name:"形状"}));
+    await waitFor(()=>expect(screen.getByRole("button",{name:"矩形"})).toHaveAttribute("aria-pressed","true"));
+    await user.click(screen.getByRole("button",{name:"椭圆"}));
+    expect(screen.getByRole("button",{name:"矩形"})).toHaveAttribute("aria-pressed","false");
+    expect(screen.getByRole("button",{name:"椭圆"})).toHaveAttribute("aria-pressed","true");
+    for(const name of ["弧","多边形","云","折线"]) expect(screen.getByRole("button",{name})).toBeEnabled();
+    await user.click(screen.getByRole("tab",{name:"编辑文本"}));
+    await waitFor(()=>expect(screen.getByRole("button",{name:"编辑内容"})).toHaveAttribute("aria-pressed","true"));
+  });
+});
+
+it("undo commits an active input before reversing it and preserves redo", async () => {
+  let committed=false;
+  let backendHistory={...idleHistory};
+  installDocumentBackend({edit_history:()=>backendHistory,undo_text_edit:()=>{expect(committed).toBe(true);backendHistory={...idleHistory,canRedo:true};return {pageIndex:0,pageCount:3,pageStructureChanged:false,history:backendHistory};}});
+  openDialogMock.mockResolvedValueOnce("/tmp/report.pdf");const user=userEvent.setup();render(<App />);
+  await user.click(screen.getByRole("button",{name:"打开 PDF…"}));await screen.findByText("report.pdf");
+  let release=()=>{};
+  act(()=>{release=registerPendingEdit("doc-1",async()=>{committed=true;return true;});});
+  await waitFor(()=>expect(screen.getByRole("button",{name:"撤销"})).toBeEnabled());
+  await user.click(screen.getByRole("button",{name:"撤销"}));
+  await waitFor(()=>expect(commandCalls("undo_text_edit")).toHaveLength(1));
+  await waitFor(()=>expect(screen.getByRole("button",{name:"重做"})).toBeEnabled());
+  act(release);
 });

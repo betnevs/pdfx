@@ -1,7 +1,7 @@
 //! Acceptance tests for the PDFX M0→M1 technical spike (ticket 03).
 //!
 //! Each test maps to one acceptance criterion in
-//! `.scratch/pdfx/issues/03-technical-spike.md`. The tests drive the spike's public
+//! `docs/planning/issues/03-technical-spike.md`. The tests drive the spike's public
 //! probe API; they fail loudly (rather than skipping) when the native assets are
 //! missing, because a skipped probe is not evidence for a go/no-go decision.
 

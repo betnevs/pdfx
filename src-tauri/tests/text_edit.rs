@@ -56,7 +56,8 @@ fn char_index_of(layer: &TextLayerView, needle: &str) -> usize {
 
 #[test]
 fn clicking_text_prefills_the_original_style_content_and_position() {
-    let document_id = open_fixture("text");
+    let source = synthetic::independent_text_rows_pdf();
+    let document_id = open_synthetic(&source);
     let layer = extract_text_layer(document_id.clone(), 0).expect("text layer");
     let char_index = char_index_of(&layer, "PDFX fixture");
 
@@ -103,7 +104,8 @@ fn clicking_text_prefills_the_original_style_content_and_position() {
 
 #[test]
 fn characters_resolve_to_their_own_text_object() {
-    let document_id = open_fixture("text");
+    let source = synthetic::independent_text_rows_pdf();
+    let document_id = open_synthetic(&source);
     let layer = extract_text_layer(document_id.clone(), 0).expect("text layer");
 
     let first = char_index_of(&layer, "PDFX fixture");
@@ -133,7 +135,7 @@ fn characters_resolve_to_their_own_text_object() {
         "Latin text is extractable from this page."
     );
 
-    // The second line sits below the first: 18pt text with 28pt line spacing.
+    // Independent rows are separated by borders and vertical spacing.
     assert!(
         second_target.y > first_target.y + first_target.height,
         "second Text Box must start below the first: {} vs {}",
@@ -146,7 +148,8 @@ fn characters_resolve_to_their_own_text_object() {
 
 #[test]
 fn target_lookup_reports_structured_errors() {
-    let document_id = open_fixture("text");
+    let source = synthetic::independent_text_rows_pdf();
+    let document_id = open_synthetic(&source);
 
     let error = text_edit_target("doc-missing".to_owned(), 0, 0).expect_err("unknown document");
     assert_eq!(error.code, CommandErrorCode::DocumentNotFound);
@@ -182,7 +185,8 @@ fn first_origin(layer: &TextLayerView, needle: &str) -> (f32, f32) {
 
 #[test]
 fn applying_an_edit_replaces_the_original_text_everywhere() {
-    let document_id = open_fixture("text");
+    let source = synthetic::independent_text_rows_pdf();
+    let document_id = open_synthetic(&source);
     let before = extract_text_layer(document_id.clone(), 0).expect("text layer");
     let target = text_edit_target(
         document_id.clone(),
@@ -264,7 +268,8 @@ fn applying_an_edit_replaces_the_original_text_everywhere() {
 
 #[test]
 fn deleting_a_text_box_removes_the_original_text_everywhere() {
-    let document_id = open_fixture("text");
+    let source = synthetic::independent_text_rows_pdf();
+    let document_id = open_synthetic(&source);
     let before = extract_text_layer(document_id.clone(), 0).expect("text layer");
     let target = text_edit_target(
         document_id.clone(),
@@ -418,7 +423,8 @@ fn the_canvas_reflects_the_edit_at_the_original_position() {
 
 #[test]
 fn long_text_wraps_at_the_text_box_width_and_expands_downward() {
-    let document_id = open_fixture("text");
+    let source = synthetic::independent_text_rows_pdf();
+    let document_id = open_synthetic(&source);
     let before = extract_text_layer(document_id.clone(), 0).expect("text layer");
     let clicked = char_index_of(&before, "The quick brown fox");
     let target = text_edit_target(document_id.clone(), 0, clicked as u32).expect("target");
@@ -537,7 +543,8 @@ moving any other text.";
 
 #[test]
 fn invalid_edits_are_rejected_without_changing_the_document() {
-    let document_id = open_fixture("text");
+    let source = synthetic::independent_text_rows_pdf();
+    let document_id = open_synthetic(&source);
     let before = extract_text_layer(document_id.clone(), 0).expect("text layer");
     let target = text_edit_target(
         document_id.clone(),
@@ -799,7 +806,8 @@ fn a_fresh_history_read_tracks_the_state_the_close_guard_asks_about() {
 
 #[test]
 fn undo_restores_deleted_text_and_redo_removes_it_again() {
-    let document_id = open_fixture("text");
+    let source = synthetic::independent_text_rows_pdf();
+    let document_id = open_synthetic(&source);
     let before = extract_text_layer(document_id.clone(), 0).expect("text layer");
     let before_pixels = render_pixels(&document_id, 0, 1.0);
     let target = text_edit_target(
@@ -933,7 +941,8 @@ original Text Box and therefore creates several text objects.";
 
 #[test]
 fn wrapping_an_earlier_box_keeps_later_boxes_addressable_after_undo() {
-    let document_id = open_fixture("text");
+    let source = synthetic::independent_text_rows_pdf();
+    let document_id = open_synthetic(&source);
     let before = extract_text_layer(document_id.clone(), 0).expect("text layer");
     let first = text_edit_target(
         document_id.clone(),
@@ -1045,6 +1054,7 @@ fn read_only_documents_reject_text_editing() {
             bold: true,
             italic: false,
             underline: true,
+            strikeout: false,
             color: "#c0392b".to_owned(),
             alignment: TextAlignment::Left,
         },
@@ -1116,6 +1126,117 @@ fn embedded_fonts_are_preserved_when_the_replacement_uses_covered_glyphs() {
         "the saved document must still reference the embedded font"
     );
     close_document(reopened).expect("close reopened document");
+
+    close_document(document_id).expect("close document");
+}
+
+#[test]
+fn size_and_colour_changes_keep_a_legacy_embedded_font() {
+    let pdf = synthetic::embedded_true_type_pdf();
+    let document_id = open_synthetic(&pdf);
+    let layer = extract_text_layer(document_id.clone(), 0).expect("text layer");
+    let target = text_edit_target(
+        document_id.clone(),
+        0,
+        char_index_of(&layer, "Embedded") as u32,
+    )
+    .expect("target");
+    assert!(
+        target.keep_original_font,
+        "an arbitrary embedded font must be offered as the original font"
+    );
+
+    let restyled = apply_text_box_style(
+        document_id.clone(),
+        0,
+        target.box_id,
+        TextBoxStyleView {
+            font_family: target.font_family.clone(),
+            font_size: 28.0,
+            bold: target.bold,
+            italic: target.italic,
+            underline: false,
+            strikeout: false,
+            color: "#c0392b".to_owned(),
+            alignment: target.alignment,
+        },
+    )
+    .expect("restyle the original font");
+
+    assert!(
+        restyled.font.is_none(),
+        "a size/colour change must not replace the original font: {:?}",
+        restyled.font
+    );
+    assert_eq!(
+        restyled.target.font_family, target.font_family,
+        "the original embedded font must survive the restyle"
+    );
+    assert!((restyled.target.font_size - 28.0).abs() < 0.01);
+    assert_eq!(restyled.target.color, "#c0392b");
+    assert!(
+        restyled.target.keep_original_font,
+        "the box must stay in original-font mode"
+    );
+
+    // Weight and underline need a replacement font; the backend refuses them
+    // instead of silently converting the box.
+    let error = apply_text_box_style(
+        document_id.clone(),
+        0,
+        target.box_id,
+        TextBoxStyleView {
+            font_family: target.font_family.clone(),
+            font_size: 28.0,
+            bold: !target.bold,
+            italic: target.italic,
+            underline: false,
+            strikeout: false,
+            color: "#c0392b".to_owned(),
+            alignment: target.alignment,
+        },
+    )
+    .expect_err("bold needs a replacement font");
+    assert_eq!(error.code, CommandErrorCode::UnsupportedFont);
+
+    // The saved document keeps the original font program for the restyle.
+    let bytes = save_document_bytes(&document_id).expect("serialize edited document");
+    let saved = synthetic::pdf_bytes_file("embedded-font-restyled", bytes);
+    let reopened = open_synthetic(&saved);
+    let reopened_layer = extract_text_layer(reopened.clone(), 0).expect("reopened layer");
+    let reopened_target = text_edit_target(
+        reopened.clone(),
+        0,
+        char_index_of(&reopened_layer, "Embedded") as u32,
+    )
+    .expect("reopened target");
+    assert_eq!(
+        reopened_target.font_family, target.font_family,
+        "the saved document must still reference the embedded font"
+    );
+    assert!(reopened_target.keep_original_font);
+    close_document(reopened).expect("close reopened document");
+
+    // Choosing a bundled family still converts the box and enables the rest.
+    let converted = apply_text_box_style(
+        document_id.clone(),
+        0,
+        target.box_id,
+        TextBoxStyleView {
+            font_family: "Noto Sans SC".to_owned(),
+            font_size: 28.0,
+            bold: false,
+            italic: false,
+            underline: true,
+            strikeout: false,
+            color: "#c0392b".to_owned(),
+            alignment: TextAlignment::Left,
+        },
+    )
+    .expect("convert to a bundled family");
+    assert_eq!(converted.target.font_family, "Noto Sans SC");
+    assert!(converted.target.underline);
+    assert!(!converted.target.keep_original_font);
 
     close_document(document_id).expect("close document");
 }
@@ -1211,4 +1332,141 @@ fn characters_the_bundled_font_lacks_are_rejected_without_mutating_the_document(
     );
 
     close_document(document_id).expect("close document");
+}
+
+#[test]
+fn spaces_use_the_embedded_program_advance_and_survive_reopening() {
+    let malformed = synthetic::embedded_font_with_wide_pdf_space();
+    let normal = synthetic::embedded_true_type_pdf();
+    for spaces in 0..=2 {
+        let replacement = format!("AA{}BB", " ".repeat(spaces));
+        let mut origins = Vec::new();
+        for pdf in [&normal, &malformed] {
+            let id = open_synthetic(pdf);
+            let target = text_edit_target(id.clone(), 0, 0).unwrap();
+            transform_text_box(
+                id.clone(),
+                0,
+                target.box_id,
+                TextBoxTransformRequest {
+                    x: target.x,
+                    y: target.y,
+                    width: 200.0,
+                    height: 24.0,
+                    rotation: 0.0,
+                    auto_height: true,
+                },
+            )
+            .unwrap();
+            let history = edit_history(id.clone()).unwrap();
+            let preview = pdfx_lib::text_edit::text_box_editor_fonts(
+                id.clone(),
+                0,
+                target.box_id,
+                replacement.clone(),
+            )
+            .unwrap();
+            assert!(!preview.is_empty());
+            assert_eq!(edit_history(id.clone()).unwrap().revision, history.revision);
+            use base64::Engine;
+            let preview_bytes = base64::engine::general_purpose::STANDARD
+                .decode(&preview[0])
+                .unwrap();
+            let face = ttf_parser::Face::parse(&preview_bytes, 0).unwrap();
+            let advance = |c| {
+                f32::from(
+                    face.glyph_hor_advance(face.glyph_index(c).unwrap())
+                        .unwrap(),
+                ) * 18.0
+                    / f32::from(face.units_per_em())
+            };
+            let expected_origin = advance('A') * 2.0 + advance(' ') * spaces as f32;
+            apply_text_edit(id.clone(), 0, target.box_id, replacement.clone()).unwrap();
+            let saved =
+                synthetic::pdf_bytes_file("spaces-roundtrip", save_document_bytes(&id).unwrap());
+            let reopened = open_synthetic(&saved);
+            assert_eq!(
+                text_edit_target(reopened.clone(), 0, 0)
+                    .unwrap()
+                    .text
+                    .trim_end(),
+                replacement,
+                "reopened editor must retain the entered spaces"
+            );
+            for current in [&id, &reopened] {
+                let layer = extract_text_layer(current.clone(), 0).unwrap();
+                // PDFium's reading-order text collapses consecutive spaces, so the
+                // physical glyph origins below are the round-trip spacing oracle.
+                assert_eq!(
+                    layer.text.split_whitespace().collect::<Vec<_>>(),
+                    replacement.split_whitespace().collect::<Vec<_>>()
+                );
+                let a = layer.chars.iter().find(|c| c.text == "A").unwrap();
+                let b = layer.chars.iter().find(|c| c.text == "B").unwrap();
+                let origin = b.origin_x - a.origin_x;
+                assert!(
+                    (origin - expected_origin).abs() < 0.1,
+                    "preview/commit spacing differs: {origin} vs {expected_origin}"
+                );
+                origins.push(origin);
+            }
+            close_document(reopened).unwrap();
+            close_document(id).unwrap();
+        }
+        for origin in &origins[1..] {
+            assert!(
+                (origin - origins[0]).abs() < 0.1,
+                "{spaces} spaces grew: {origins:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn resizing_after_a_spaced_edit_keeps_the_fallback_characters() {
+    let pdf = synthetic::embedded_font_with_wide_pdf_space();
+    let id = open_synthetic(&pdf);
+    let target = text_edit_target(id.clone(), 0, 0).unwrap();
+    apply_text_edit(id.clone(), 0, target.box_id, "AA  中文".to_owned()).unwrap();
+    transform_text_box(
+        id.clone(),
+        0,
+        target.box_id,
+        TextBoxTransformRequest {
+            x: target.x,
+            y: target.y,
+            width: 180.0,
+            height: 25.0,
+            rotation: 0.0,
+            auto_height: true,
+        },
+    )
+    .unwrap();
+    let layer = extract_text_layer(id.clone(), 0).unwrap();
+    assert!(
+        layer.text.contains("中文"),
+        "resize lost new characters: {:?}",
+        layer.text
+    );
+    close_document(id).unwrap();
+}
+
+#[test]
+fn shortening_then_retyping_text_keeps_the_editor_and_render_wrap_width_identical() {
+    let pdf = synthetic::embedded_true_type_pdf();
+    let id = open_synthetic(&pdf);
+    let original = text_edit_target(id.clone(), 0, 0).unwrap();
+    apply_text_edit(id.clone(), 0, original.box_id, "AA BB".into()).unwrap();
+    let shorter = text_edit_target(id.clone(), 0, 0).unwrap();
+    assert!(
+        (shorter.width - original.width).abs() < 0.01,
+        "editor shrank from {} to {}, while native wrap retained the old width",
+        original.width,
+        shorter.width
+    );
+    apply_text_edit(id.clone(), 0, original.box_id, "AA  BB".into()).unwrap();
+    let wider = text_edit_target(id.clone(), 0, 0).unwrap();
+    assert!((wider.width - original.width).abs() < 0.01);
+    assert_eq!(wider.text, "AA  BB");
+    close_document(id).unwrap();
 }

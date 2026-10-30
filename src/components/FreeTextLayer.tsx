@@ -18,6 +18,7 @@ import {
   type TextMarkupRect,
 } from "../lib/backend";
 import { notifyDocumentChanged } from "../lib/documentEvents";
+import { ToolShelf, type ToolShelfTool } from "./ToolShelf";
 
 /** Matches the backend's minimum free text box, in display points. */
 const MIN_SIZE = 12;
@@ -626,29 +627,33 @@ export function FreeTextLayer({
         </div>
       )}
 
-      <div
-        className="free-text-toolbar"
-        role="toolbar"
-        aria-label="自由文本工具"
-        onPointerDown={(event) => event.stopPropagation()}
-      >
-        <span className="free-text-toolbar-title">文本</span>
-        {(Object.keys(KIND_LABELS) as FreeTextKind[]).map((value) => (
-          <button
-            key={value}
-            type="button"
-            aria-pressed={tool === value}
-            disabled={busy}
-            onClick={() => {
+      <ToolShelf
+        tools={(Object.keys(KIND_LABELS) as FreeTextKind[]).map(
+          (value, index): ToolShelfTool => ({
+            id: `free-text-${value}`,
+            label: KIND_LABELS[value],
+            icon: value === "freetext" ? "textBox" : "note",
+            groups: value === "freetext" ? ["annotate", "forms"] : ["annotate"],
+            active: tool === value,
+            disabled: busy,
+            order: value === "freetext" ? 3 : 4 + index,
+            onActivate: () => {
               setNotice(null);
               setInteraction(null);
               setEditingName(null);
               setTool((current) => (current === value ? null : value));
-            }}
-          >
-            {KIND_LABELS[value]}
-          </button>
-        ))}
+            },
+          }),
+        )}
+        panelTitle="注释文本"
+        panelOpen={tool !== null || selected !== null}
+      >
+        <div
+          className="free-text-toolbar"
+          role="toolbar"
+          aria-label="自由文本工具"
+          onPointerDown={(event) => event.stopPropagation()}
+        >
         <button
           type="button"
           aria-label="编辑文本"
@@ -724,7 +729,8 @@ export function FreeTextLayer({
             {notice.text}
           </span>
         )}
-      </div>
+        </div>
+      </ToolShelf>
     </div>
   );
 }

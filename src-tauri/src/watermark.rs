@@ -365,10 +365,12 @@ fn build_text_object(
     config: &WatermarkConfig,
     text: &str,
 ) -> Result<PdfPageObject<'static>, CommandError> {
-    let token = entry
-        .edit
-        .bundled_fonts
-        .token(&mut entry.document, text, 400)?;
+    let token = entry.edit.bundled_fonts.token(
+        &mut entry.document,
+        crate::fonts::noto_sans_sc(),
+        text,
+        400,
+    )?;
     let (display_width, display_height) = geometry.display_size();
     let min_side = display_width.min(display_height);
     let font_size = (min_side * TEXT_FONT_RATIO * config.scale / 100.0).max(MIN_FONT_SIZE);

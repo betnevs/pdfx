@@ -1,0 +1,2 @@
+# Preserve third-party license notices as supplied by their authors.
+src-tauri/fonts/*-OFL.txt -whitespace

@@ -134,11 +134,15 @@ M0 原型还有两个独立 seam：
 
 ## 依赖许可
 
-仅使用宽松许可依赖：Tauri、React、Vite、Vitest、Testing Library、`pdfium-render` 为 MIT / Apache-2.0，TypeScript 为 Apache-2.0。PDFium 原生库为 BSD-3-Clause（含第三方许可，见解压后的 `src-tauri/vendor/pdfium/LICENSE`），由 setup 脚本按固定 SHA-256 获取，不随仓库分发；macOS 包会把 `LICENSE` 与完整 `licenses/` 目录放入 `Contents/Resources/pdfium-licenses/`。仓库不含付费服务、遥测或代码签名配置。
+仅使用宽松许可依赖：Tauri、React、Vite、Vitest、Testing Library、`pdfium-render` 为 MIT / Apache-2.0，TypeScript 为 Apache-2.0。PDFium 原生库为 BSD-3-Clause（含第三方许可，见解压后的 `src-tauri/vendor/pdfium/LICENSE`），由 setup 脚本按固定 SHA-256 获取，不随仓库分发；macOS 包会把 `LICENSE` 与完整 `licenses/` 目录放入 `Contents/Resources/pdfium-licenses/`。八款内置 CJK 字体为 SIL OFL 1.1，出处、版本与 SHA-256 见 `src-tauri/fonts/SOURCE.txt`；macOS 与 Windows 包会把它们的许可证放入 `font-licenses/`。WPS Office 自带的宋体、仿宋、微软雅黑等字体是商业授权，不随仓库或安装包分发；PDFX 只在运行时读取用户机器上已经安装的字体文件，并把实际用到的字形子集嵌入用户自己保存的 PDF，见 [ADR-0015](docs/adr/0015-installed-system-and-wps-fonts.md)。仓库不含付费服务、遥测或代码签名配置。
+
+## 2026-10-30 定版
+
+原始规格与任务历史归档在 `docs/planning/`。当前编辑工作区的定版范围、验证结果和清理说明见 [定版记录](docs/releases/2026-10-30.md)。本机正式产物集中放在 `release/macos/`，包括 `PDFX.app`、`PDFX_0.1.0_arm64.dmg` 与 SHA-256 校验文件；这些二进制不提交到 Git。构建脚本的原始输出仍在上文列出的 `src-tauri/target/` 路径，构建缓存清理后可按说明重新生成。
 
 ## 当前限制
 
-与规格、M0 原型和原定验收范围相比的完整差异，以及未执行的人工验证，见 [`docs/known-limitations.md`](docs/known-limitations.md)。其中重要的有：生产工作区没有实现原型顶部的“注释/编辑”模式切换与五个页签；只按需渲染当前页；界面语言设置只更新 `<html lang>`；初始版本只内置 Noto Sans SC 与 PDF base-14 字体；应用级退出不经过未保存确认；打印只限制解码位图而不限制压缩 PNG Blob；等。
+与规格、M0 原型和原定验收范围相比的完整差异，以及未执行的人工验证，见 [`docs/known-limitations.md`](docs/known-limitations.md)。2026-10-30 已按最新需求改为仅编辑模式，加入五个页签、连续页面及参考样式工作区，详见 [`编辑工作区复刻记录`](docs/reference-editing-2026-10-30.md)。其余重要限制包括：界面语言设置只更新 `<html lang>`；初始版本内置思源黑体、思源宋体、朱雀仿宋、霞鹜文楷、得意黑、马善政毛笔楷书、站酷小薇、站酷庆科黄油八款 OFL 字体与 PDF base-14 字体，并在运行时读取本机已安装的系统字体与 WPS Office 字体（不随包分发）；应用级退出不经过未保存确认；打印只限制解码位图而不限制压缩 PNG Blob；等。
 
 - 原生 PDFium 库需要本地运行 `npm run setup:native`；仓库不提交二进制。
 - M0 原型（票 02）只验证布局、交互与文案；不打开真实 PDF，后续能力显示为占位状态。

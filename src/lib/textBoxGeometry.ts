@@ -54,8 +54,14 @@ export function fitBoxToPage(
   pageWidth: number,
   pageHeight: number,
 ): BoxRect {
-  const x = Math.min(Math.max(rect.x, 0), Math.max(pageWidth - MIN_BOX_WIDTH, 0));
-  const y = Math.min(Math.max(rect.y, 0), Math.max(pageHeight - MIN_BOX_HEIGHT, 0));
+  const x = Math.min(
+    Math.max(rect.x, 0),
+    Math.max(pageWidth - MIN_BOX_WIDTH, 0),
+  );
+  const y = Math.min(
+    Math.max(rect.y, 0),
+    Math.max(pageHeight - MIN_BOX_HEIGHT, 0),
+  );
   return {
     x,
     y,
@@ -219,3 +225,70 @@ export function estimatedContentHeight(
   );
 }
 
+export type ResizeHandle = "nw" | "n" | "ne" | "e" | "se" | "s" | "sw" | "w";
+export const RESIZE_HANDLES: readonly ResizeHandle[] = [
+  "nw",
+  "n",
+  "ne",
+  "e",
+  "se",
+  "s",
+  "sw",
+  "w",
+];
+/** Resize in the box's axes, keeping the opposite edge/corner fixed. Font size is never scaled. */
+export function resizeBoxFromHandle(
+  rect: BoxRect,
+  rotationDegrees: number,
+  pointer: Point,
+  handle: ResizeHandle,
+): BoxRect {
+  const radians = (rotationDegrees * Math.PI) / 180;
+  const cos = Math.cos(radians),
+    sin = Math.sin(radians);
+  const dx = pointer.x - rect.x,
+    dy = pointer.y - rect.y;
+  const localX = dx * cos + dy * sin,
+    localY = -dx * sin + dy * cos;
+  let left = 0,
+    top = 0,
+    right = rect.width,
+    bottom = rect.height;
+  if (handle.includes("w")) left = Math.min(localX, right - 4);
+  if (handle.includes("e")) right = Math.max(localX, 4);
+  if (handle.includes("n")) top = Math.min(localY, bottom - 4);
+  if (handle.includes("s")) bottom = Math.max(localY, 4);
+  return {
+    x: rect.x + left * cos - top * sin,
+    y: rect.y + left * sin + top * cos,
+    width: right - left,
+    height: bottom - top,
+  };
+}
+
+/** A screen-space selection frame gives every handle room at every zoom. */
+export function contentSelectionFrame(rect: BoxRect, rotation: number, scale: number): BoxRect {
+  const zoom = Math.max(scale, 0.001);
+  const px = Math.max(6, (28 - rect.width * zoom) / 2) / zoom;
+  const py = Math.max(6, (28 - rect.height * zoom) / 2) / zoom;
+  const radians = rotation * Math.PI / 180;
+  return {
+    x: rect.x - px * Math.cos(radians) + py * Math.sin(radians),
+    y: rect.y - px * Math.sin(radians) - py * Math.cos(radians),
+    width: rect.width + 2 * px,
+    height: rect.height + 2 * py,
+  };
+}
+
+/** Use pointer deltas so padding and the point grabbed inside a handle cannot cause a jump. */
+export function resizeBoxFromDrag(
+  rect: BoxRect, rotation: number, start: Point, current: Point, handle: ResizeHandle,
+): BoxRect {
+  const x = handle.includes("w") ? 0 : handle.includes("e") ? rect.width : rect.width / 2;
+  const y = handle.includes("n") ? 0 : handle.includes("s") ? rect.height : rect.height / 2;
+  const radians = rotation * Math.PI / 180;
+  return resizeBoxFromHandle(rect, rotation, {
+    x: rect.x + x * Math.cos(radians) - y * Math.sin(radians) + current.x - start.x,
+    y: rect.y + x * Math.sin(radians) + y * Math.cos(radians) + current.y - start.y,
+  }, handle);
+}

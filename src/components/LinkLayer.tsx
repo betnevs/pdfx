@@ -17,6 +17,7 @@ import {
   linkUnsupportedText,
 } from "../lib/linkTarget";
 import { LinkTargetDialog } from "./LinkTargetDialog";
+import { ToolShelf, type ToolShelfTool } from "./ToolShelf";
 
 const READ_ONLY_REASON = "此文档不允许编辑内容";
 const ANNOTATION_PERMISSION_REASON = "此文档不允许添加注释";
@@ -137,23 +138,32 @@ export function LinkLayer({
   if (!editable) {
     return (
       <div className="link-layer" role="group" aria-label="链接层" data-testid="link-layer">
+        <ToolShelf
+        tools={[
+          {
+            id: "link-disabled",
+            label: "链接",
+            icon: "link",
+            groups: [],
+            disabled: true,
+            title: readOnly ? READ_ONLY_REASON : ANNOTATION_PERMISSION_REASON,
+            order: 3,
+          },
+        ] satisfies ToolShelfTool[]}
+        panelTitle="链接"
+        panelOpen
+      >
         <div
           className="link-toolbar"
           role="toolbar"
           aria-label="链接工具"
           onPointerDown={(event) => event.stopPropagation()}
         >
-          <button
-            type="button"
-            disabled
-            title={readOnly ? READ_ONLY_REASON : ANNOTATION_PERMISSION_REASON}
-          >
-            链接
-          </button>
           <span className="link-reason">
             {readOnly ? READ_ONLY_REASON : ANNOTATION_PERMISSION_REASON}
           </span>
         </div>
+      </ToolShelf>
       </div>
     );
   }
@@ -259,25 +269,31 @@ export function LinkLayer({
       aria-label="链接层"
       data-testid="link-layer"
     >
-      <div
-        className="link-toolbar"
-        role="toolbar"
-        aria-label="链接工具"
-        onPointerDown={(event) => event.stopPropagation()}
-      >
-        <button
-          type="button"
-          aria-pressed={active}
-          disabled={busy}
-          title={
-            active
+      <ToolShelf
+        tools={[
+          {
+            id: "link",
+            label: "链接",
+            icon: "link",
+            groups: [],
+            active,
+            disabled: busy,
+            title: active
               ? "退出链接选择"
-              : "显示页面上的链接，点击可选择、编辑或删除"
-          }
-          onClick={toggle}
+              : "显示页面上的链接，点击可选择、编辑或删除",
+            order: 3,
+            onActivate: toggle,
+          },
+        ]}
+        panelTitle="链接"
+        panelOpen={active || selected !== null}
+      >
+        <div
+          className="link-toolbar"
+          role="toolbar"
+          aria-label="链接工具"
+          onPointerDown={(event) => event.stopPropagation()}
         >
-          链接
-        </button>
         {selected && (
           <>
             <span className="toolbar-divider" aria-hidden="true" />
@@ -320,7 +336,8 @@ export function LinkLayer({
             {notice.text}
           </span>
         )}
-      </div>
+        </div>
+      </ToolShelf>
 
       {active &&
         imageTargets.map((target, index) => (

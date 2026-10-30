@@ -128,11 +128,29 @@ cleanup() {
 }
 trap cleanup EXIT
 mkdir -p "${DMG_DIR}"
-ditto "${APP}" "${STAGE}/PDFX.app"
+# Stage without APFS clones: hdiutil sizes the read/write image from the
+# staged tree, and cloned files can make that estimate smaller than the bytes
+# copy-helper writes, failing with "No space left on device".
+ditto --noclone "${APP}" "${STAGE}/PDFX.app"
 ln -s /Applications "${STAGE}/Applications"
 rm -f "${DMG}"
 note "Creating ${DMG}"
-hdiutil create -volname "PDFX" -srcfolder "${STAGE}" -ov -format UDZO "${DMG}" >/dev/null
+# hdiutil can transiently fail on APFS with "No space left on device" even when
+# the volume has ample free space (observed twice in a row on macOS 26.4, while
+# the identical command succeeded moments later). Retry briefly before failing
+# the build; -ov discards any half-written image from the previous attempt.
+CREATED=0
+for attempt in 1 2 3 4 5; do
+  if hdiutil create -volname "PDFX" -srcfolder "${STAGE}" -ov -format UDZO "${DMG}" >/dev/null; then
+    CREATED=1
+    break
+  fi
+  rm -f "${DMG}"
+  if [ "${attempt}" -lt 5 ]; then
+    sleep 2
+  fi
+done
+[ "${CREATED}" -eq 1 ] || fail "hdiutil could not create ${DMG} after 5 attempts"
 
 # --- verify ----------------------------------------------------------------
 note "Verifying the arm64 app bundle and dmg"

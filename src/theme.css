@@ -12,10 +12,10 @@
 :root {
   color-scheme: light;
 
-  --pdfx-bg: #f4f2ee;
-  --pdfx-surface: #fbfaf7;
+  --pdfx-bg: #f1f3f5;
+  --pdfx-surface: #f1f3f5;
   --pdfx-raised: #ffffff;
-  --pdfx-workspace: #f0eee9;
+  --pdfx-workspace: #f1f3f5;
   --pdfx-dot: #d9d4ca;
   --pdfx-page: #ffffff;
   --pdfx-page-ink: #1f2430;
@@ -26,25 +26,25 @@
   --pdfx-overlay: rgba(24, 26, 32, 0.42);
   --pdfx-overlay-page: rgba(31, 36, 48, 0.38);
 
-  --pdfx-text: #1f2430;
-  --pdfx-text-secondary: #4d5260;
-  --pdfx-muted: #666a75;
-  --pdfx-disabled-text: #9b968c;
-  --pdfx-disabled-surface: #f6f4f0;
-  --pdfx-disabled-border: #e2ddd5;
+  --pdfx-text: #343a40;
+  --pdfx-text-secondary: #666870;
+  --pdfx-muted: #626d78;
+  --pdfx-disabled-text: #aab5c0;
+  --pdfx-disabled-surface: #f1f3f5;
+  --pdfx-disabled-border: #cfd4da;
 
-  --pdfx-border: #ddd8cf;
-  --pdfx-border-strong: #c7c1b6;
-  --pdfx-border-control: #948d82;
-  --pdfx-border-hover: #a9a297;
+  --pdfx-border: #cfd4da;
+  --pdfx-border-strong: #aab5c0;
+  --pdfx-border-control: #7d8893;
+  --pdfx-border-hover: #7d8893;
   --pdfx-focus-ring: #e8453c;
   --pdfx-focus-halo: rgba(143, 136, 124, 0.35);
 
-  --pdfx-accent: #c83931;
-  --pdfx-accent-hover: #b7352e;
+  --pdfx-accent: #e52427;
+  --pdfx-accent-hover: #d92527;
   --pdfx-on-accent: #ffffff;
   --pdfx-accent-soft: #fdf1ef;
-  --pdfx-accent-text: #8a2f27;
+  --pdfx-accent-text: #d62528;
 
   --pdfx-danger-text: #8a4a43;
   --pdfx-danger-strong: #a3271f;
@@ -56,22 +56,22 @@
   --pdfx-warning-soft: #fff8e8;
   --pdfx-warning-border: #d9b36a;
 
-  --pdfx-blue: #3f6ad8;
-  --pdfx-blue-soft: #e6ecfb;
-  --pdfx-blue-text: #24469c;
-  --pdfx-blue-ui: #3f6ad8;
+  --pdfx-blue: #2b73ab;
+  --pdfx-blue-soft: #e8f0f7;
+  --pdfx-blue-text: #276ba2;
+  --pdfx-blue-ui: #2b73ab;
   --pdfx-blue-preview: rgba(63, 106, 216, 0.08);
   --pdfx-match-highlight: rgba(255, 196, 0, 0.35);
 
-  --pdfx-pill-bg: rgba(31, 36, 48, 0.86);
-  --pdfx-pill-bg-soft: rgba(31, 36, 48, 0.72);
-  --pdfx-pill-text: #ffffff;
-  --pdfx-pill-border: rgba(255, 255, 255, 0.45);
-  --pdfx-pill-hover: rgba(255, 255, 255, 0.16);
-  --pdfx-pill-active: rgba(255, 255, 255, 0.24);
-  --pdfx-status-success: #b9f0c2;
-  --pdfx-status-warning: #ffd7a1;
-  --pdfx-status-danger: #ffb4b4;
+  --pdfx-pill-bg: rgba(255, 255, 255, 0.97);
+  --pdfx-pill-bg-soft: rgba(255, 255, 255, 0.92);
+  --pdfx-pill-text: #1f2430;
+  --pdfx-pill-border: #c7c1b6;
+  --pdfx-pill-hover: #f1f3f5;
+  --pdfx-pill-active: #e6ecfb;
+  --pdfx-status-success: #1a6b2f;
+  --pdfx-status-warning: #8a5a16;
+  --pdfx-status-danger: #a3271f;
 
   --pdfx-page-shadow:
     0 1px 2px rgba(31, 36, 48, 0.14),
@@ -83,8 +83,24 @@
   --pdfx-popover-shadow: 0 2px 12px rgba(0, 0, 0, 0.2);
   --pdfx-settings-shadow: 0 24px 60px rgba(8, 10, 16, 0.35);
   --pdfx-editor-bg: rgba(255, 255, 255, 0.94);
+  --pdfx-control-shadow: 0 1px 3px rgba(31, 36, 48, 0.16);
 
-  --pdfx-scrollbar-thumb: #cdc6ba;
+  /* Canvas control bar: intentionally dark in every theme, like a viewer. */
+  --pdfx-canvasbar-bg: #48484f;
+  --pdfx-canvasbar-border: #48484f;
+  --pdfx-canvasbar-text: #e9eaee;
+  --pdfx-canvasbar-text-secondary: #c9ccd5;
+  --pdfx-canvasbar-muted: #a6aab4;
+  --pdfx-canvasbar-on: #ffffff;
+  --pdfx-canvasbar-input: #f3f4f6;
+  --pdfx-canvasbar-input-bg: #6d6d75;
+  --pdfx-canvasbar-input-border: #6d6d75;
+  --pdfx-canvasbar-divider: #3d414b;
+  --pdfx-canvasbar-hover: rgba(255, 255, 255, 0.12);
+  --pdfx-canvasbar-active: rgba(255, 255, 255, 0.18);
+  --pdfx-canvasbar-shadow: 0 8px 24px rgba(12, 14, 18, 0.28);
+
+  --pdfx-scrollbar-thumb: #868e96;
   --pdfx-scrollbar-track: transparent;
 }
 
@@ -162,6 +178,22 @@
   --pdfx-popover-shadow: 0 2px 14px rgba(0, 0, 0, 0.55);
   --pdfx-settings-shadow: 0 24px 60px rgba(0, 0, 0, 0.6);
   --pdfx-editor-bg: rgba(255, 255, 255, 0.94);
+  --pdfx-control-shadow: 0 1px 3px rgba(31, 36, 48, 0.16);
+
+  /* Canvas control bar: intentionally dark in every theme, like a viewer. */
+  --pdfx-canvasbar-bg: #48484f;
+  --pdfx-canvasbar-border: #48484f;
+  --pdfx-canvasbar-text: #e9eaee;
+  --pdfx-canvasbar-text-secondary: #c9ccd5;
+  --pdfx-canvasbar-muted: #a6aab4;
+  --pdfx-canvasbar-on: #ffffff;
+  --pdfx-canvasbar-input: #f3f4f6;
+  --pdfx-canvasbar-input-bg: #6d6d75;
+  --pdfx-canvasbar-input-border: #6d6d75;
+  --pdfx-canvasbar-divider: #3d414b;
+  --pdfx-canvasbar-hover: rgba(255, 255, 255, 0.12);
+  --pdfx-canvasbar-active: rgba(255, 255, 255, 0.18);
+  --pdfx-canvasbar-shadow: 0 8px 24px rgba(12, 14, 18, 0.28);
 
   --pdfx-scrollbar-thumb: #3d4554;
   --pdfx-scrollbar-track: transparent;
@@ -242,6 +274,22 @@
     --pdfx-popover-shadow: 0 2px 14px rgba(0, 0, 0, 0.55);
     --pdfx-settings-shadow: 0 24px 60px rgba(0, 0, 0, 0.6);
     --pdfx-editor-bg: rgba(255, 255, 255, 0.94);
+  --pdfx-control-shadow: 0 1px 3px rgba(31, 36, 48, 0.16);
+
+  /* Canvas control bar: intentionally dark in every theme, like a viewer. */
+  --pdfx-canvasbar-bg: #48484f;
+  --pdfx-canvasbar-border: #48484f;
+  --pdfx-canvasbar-text: #e9eaee;
+  --pdfx-canvasbar-text-secondary: #c9ccd5;
+  --pdfx-canvasbar-muted: #a6aab4;
+  --pdfx-canvasbar-on: #ffffff;
+  --pdfx-canvasbar-input: #f3f4f6;
+  --pdfx-canvasbar-input-bg: #6d6d75;
+  --pdfx-canvasbar-input-border: #6d6d75;
+  --pdfx-canvasbar-divider: #3d414b;
+  --pdfx-canvasbar-hover: rgba(255, 255, 255, 0.12);
+  --pdfx-canvasbar-active: rgba(255, 255, 255, 0.18);
+  --pdfx-canvasbar-shadow: 0 8px 24px rgba(12, 14, 18, 0.28);
 
     --pdfx-scrollbar-thumb: #3d4554;
     --pdfx-scrollbar-track: transparent;

@@ -138,22 +138,39 @@ fn utf16be_hex(text: &str) -> String {
 /// predefined UniGB-UCS2-H CMap, drawing mixed Chinese and Latin text at
 /// Helvetica-compatible 18pt.
 pub fn cjk_mixed_pdf() -> TempPdf {
-    let text = "中文 PDF 混合";
+    cjk_pdf_with_font("SimSun", "cjk-mixed")
+}
+
+/// The same page with a non-embedded FangSong face, so the fangsong fallback
+/// choice can be tested.
+pub fn cjk_fangsong_pdf() -> TempPdf {
+    cjk_pdf_with_font("FangS-SC", "cjk-fangsong")
+}
+
+fn cjk_pdf_with_font(base_font: &str, slug: &str) -> TempPdf {
+    cjk_text_pdf(base_font, slug, "中文 PDF 混合")
+}
+
+pub fn cjk_phone_pdf() -> TempPdf {
+    cjk_text_pdf("FangS-SC", "cjk-phone", "测试号码-0000")
+}
+
+fn cjk_text_pdf(base_font: &str, slug: &str, text: &str) -> TempPdf {
     let content = format!("BT /F1 18 Tf 72 720 Td <{}> Tj ET\n", utf16be_hex(text)).into_bytes();
     let objects = vec![
         (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
         (2, b"<< /Type /Pages /Kids [6 0 R] /Count 1 >>".to_vec()),
         (
             3,
-            b"<< /Type /Font /Subtype /Type0 /BaseFont /SimSun /Encoding /UniGB-UCS2-H /DescendantFonts [4 0 R] >>".to_vec(),
+            format!("<< /Type /Font /Subtype /Type0 /BaseFont /{base_font} /Encoding /UniGB-UCS2-H /DescendantFonts [4 0 R] >>").into_bytes(),
         ),
         (
             4,
-            b"<< /Type /Font /Subtype /CIDFontType2 /BaseFont /SimSun /CIDSystemInfo << /Registry (Adobe) /Ordering (GB1) /Supplement 2 >> /FontDescriptor 5 0 R /DW 1000 >>".to_vec(),
+            format!("<< /Type /Font /Subtype /CIDFontType2 /BaseFont /{base_font} /CIDSystemInfo << /Registry (Adobe) /Ordering (GB1) /Supplement 2 >> /FontDescriptor 5 0 R /DW 1000 >>").into_bytes(),
         ),
         (
             5,
-            b"<< /Type /FontDescriptor /FontName /SimSun /Flags 4 /FontBBox [-25 -254 1000 880] /ItalicAngle 0 /Ascent 880 /Descent -120 /CapHeight 880 /StemV 80 >>".to_vec(),
+            format!("<< /Type /FontDescriptor /FontName /{base_font} /Flags 4 /FontBBox [-25 -254 1000 880] /ItalicAngle 0 /Ascent 880 /Descent -120 /CapHeight 880 /StemV 80 >>").into_bytes(),
         ),
         (
             6,
@@ -161,7 +178,7 @@ pub fn cjk_mixed_pdf() -> TempPdf {
         ),
         (7, stream("", &content)),
     ];
-    write_pdf("cjk-mixed", build_pdf(objects, 1))
+    write_pdf(slug, build_pdf(objects, 1))
 }
 
 /// A 612x792 page whose Latin character code is mapped by ToUnicode to
@@ -672,4 +689,78 @@ pub fn cyclic_signature_fields_pdf() -> TempPdf {
         (6, b"<< /FT /Sig /T (second) /Kids [5 0 R] >>".to_vec()),
     ];
     write_pdf("cyclic-signature-fields", build_pdf(objects, 1))
+}
+
+/// Independent table rows separated by real path objects, unlike soft-wrapped
+/// paragraph lines. Moving one row must never pull the other rows with it.
+pub fn independent_text_rows_pdf() -> TempPdf {
+    let content=b"BT /F1 18 Tf 72 720 Td (PDFX fixture: text layer.) Tj ET\n72 690 m 540 690 l S\nBT /F1 18 Tf 72 650 Td (Latin text is extractable from this page.) Tj ET\n72 620 m 540 620 l S\nBT /F1 18 Tf 72 580 Td (The quick brown fox jumps over the lazy dog. \\(1234567890\\)) Tj ET\n";
+    write_pdf("independent-text-rows",build_pdf(vec![
+      (1,b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+      (2,b"<< /Type /Pages /Kids [4 0 R] /Count 1 >>".to_vec()),
+      (3,HELVETICA.to_vec()),
+      (4,b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R >>".to_vec()),
+      (5,stream("",content)),
+    ],1))
+}
+
+pub fn glyph_by_glyph_wrapped_phone_pdf() -> TempPdf {
+    let mut content = String::new();
+    for (text, x, y) in [("Phone-", 72.0, 720.0), ("0000", 82.8, 698.4)] {
+        for (index, c) in text.chars().enumerate() {
+            content.push_str(&format!(
+                "BT /F1 18 Tf 1 0 0 1 {} {} Tm ({c}) Tj ET\n",
+                x + index as f32 * 10.8,
+                y
+            ));
+        }
+    }
+    write_pdf("glyph-wrapped-phone",build_pdf(vec![
+      (1,b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+      (2,b"<< /Type /Pages /Kids [4 0 R] /Count 1 >>".to_vec()),
+      (3,b"<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>".to_vec()),
+      (4,b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R >>".to_vec()),
+      (5,stream("",content.as_bytes())),
+    ],1))
+}
+
+/// A font program with a real narrow space, but a PDF /Widths table that
+/// gives its unmapped/incorrectly mapped space the default em-wide advance.
+/// Word/WPS CID exports can exhibit the same mismatch despite retaining cmap.
+pub fn embedded_font_with_wide_pdf_space() -> TempPdf {
+    let source = embedded_true_type_pdf();
+    let mut document = lopdf::Document::load(source.path_string()).unwrap();
+    let font = document
+        .get_object_mut((3, 0))
+        .unwrap()
+        .as_dict_mut()
+        .unwrap();
+    let widths = font.get_mut(b"Widths").unwrap().as_array_mut().unwrap();
+    widths[0] = lopdf::Object::Integer(1000);
+    // Embedded subsets can keep legacy sfnt headers and unsorted directories;
+    // repairing the encoding must handle those without changing outlines.
+    let mut program = EMBEDDED_FONT.to_vec();
+    let count = usize::from(u16::from_be_bytes([program[4], program[5]]));
+    let mut records: Vec<_> = program[12..12 + count * 16]
+        .chunks_exact(16)
+        .map(|r| r.to_vec())
+        .collect();
+    records.reverse();
+    program[12..12 + count * 16].copy_from_slice(&records.concat());
+    program[..4].copy_from_slice(b"true");
+    document
+        .get_object_mut((5, 0))
+        .unwrap()
+        .as_stream_mut()
+        .unwrap()
+        .set_content(program);
+    document
+        .get_object_mut((7, 0))
+        .unwrap()
+        .as_stream_mut()
+        .unwrap()
+        .set_content(b"BT /F1 18 Tf 72 720 Td (MMMM) Tj ET\n".to_vec());
+    let mut bytes = Vec::new();
+    document.save_to(&mut bytes).unwrap();
+    pdf_bytes_file("wide-pdf-space", bytes)
 }

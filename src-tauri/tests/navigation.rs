@@ -330,3 +330,22 @@ fn measure_thumbnail_and_region_latency_on_a_long_document() {
 
     close_document(view.document_id).expect("document should close");
 }
+
+#[test]
+fn reads_the_original_outline_destination() {
+    let manifest = fixtures::load_manifest();
+    let fixture = fixtures::fixture(&manifest, "structure").unwrap();
+    let document = open_document(
+        fixtures::fixture_path(fixture)
+            .to_string_lossy()
+            .into_owned(),
+        None,
+    )
+    .unwrap();
+    let outline = pdfx_lib::navigation::document_outline(document.document_id.clone()).unwrap();
+    assert!(!outline.is_empty());
+    assert_eq!(outline[0].page_index, Some(0));
+    assert_eq!(outline[0].depth, 0);
+    assert!(!outline[0].title.is_empty());
+    close_document(document.document_id).unwrap();
+}

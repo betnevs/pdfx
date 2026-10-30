@@ -16,6 +16,7 @@ import {
   type SaveProgress,
   type SaveResultView,
 } from "./backend";
+import { flushPendingEdits, hasDirtyPendingEdits, PENDING_EDIT_CHANGED } from "./pendingEdits";
 import { onDocumentChanged } from "./documentEvents";
 
 /** A save that failed and can be retried. */
@@ -134,6 +135,12 @@ export function useDocumentSave(
   options: DocumentSaveOptions = {},
 ): DocumentSave {
   const documentId = document?.documentId ?? null;
+  const [pendingDirty, setPendingDirty] = useState(false);
+  useEffect(() => {
+    const update = () => setPendingDirty(documentId ? hasDirtyPendingEdits(documentId) : false);
+    update(); window.addEventListener(PENDING_EDIT_CHANGED, update);
+    return () => window.removeEventListener(PENDING_EDIT_CHANGED, update);
+  }, [documentId]);
   const [history, setHistory] = useState<EditHistoryView | null>(null);
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState<SaveProgress | null>(null);
@@ -331,6 +338,7 @@ export function useDocumentSave(
     if (!current) {
       return false;
     }
+    if (!(await flushPendingEdits(current.documentId))) return false;
     try {
       const missing = await missingRequiredFields(current.documentId);
       if (missing.length > 0) {
@@ -568,9 +576,9 @@ export function useDocumentSave(
   }, []);
 
   return {
-    dirty: history?.dirty ?? false,
-    canUndo: (history?.canUndo ?? false) && !(document?.readOnly ?? false),
-    canRedo: (history?.canRedo ?? false) && !(document?.readOnly ?? false),
+    dirty: pendingDirty || (history?.dirty ?? false),
+    canUndo: (pendingDirty || (history?.canUndo ?? false)) && !(document?.readOnly ?? false),
+    canRedo: !pendingDirty && (history?.canRedo ?? false) && !(document?.readOnly ?? false),
     canSaveChanges: !(document?.readOnly ?? false),
     busy,
     progress,

@@ -26,6 +26,7 @@ import {
   type ShapeGeometryLike,
   type ShapeRect,
 } from "../lib/shapeGeometry";
+import { ToolShelf, type ToolShelfTool } from "./ToolShelf";
 
 /** Defaults chosen to be visible on both light and dark pages. */
 const DEFAULT_FILL = "#3366cc";
@@ -593,39 +594,70 @@ export function ShapeLayer({
       )}
 
       {canEdit && (
+        <ToolShelf
+          defaultToolId="square"
+          tools={[
+            {
+              id: "square",
+              label: "矩形",
+              icon: "shape",
+              groups: ["shapes"],
+              active: tool === "square",
+              disabled: !drawable || busy,
+              title: !drawable
+                ? "至少需要填充或描边中的一项"
+                : "拖动绘制矩形",
+              order: 1,
+              onActivate: () => {
+                setNotice(null);
+                setInteraction(null);
+                setTool((current) => (current === "square" ? null : "square"));
+              },
+            },
+            {
+              id: "circle",
+              label: "椭圆",
+              icon: "circle",
+              groups: ["shapes"],
+              active: tool === "circle",
+              disabled: !drawable || busy,
+              title: !drawable
+                ? "至少需要填充或描边中的一项"
+                : "拖动绘制椭圆",
+              order: 2,
+              onActivate: () => {
+                setNotice(null);
+                setInteraction(null);
+                setTool((current) => (current === "circle" ? null : "circle"));
+              },
+            },
+            {
+              id: "comment-shape",
+              label: "添加形状",
+              icon: "shape",
+              groups: ["comment"],
+              active: tool === "square",
+              disabled: !drawable || busy,
+              title: !drawable
+                ? "至少需要填充或描边中的一项"
+                : "拖动绘制矩形",
+              order: 4,
+              onActivate: () => {
+                setNotice(null);
+                setInteraction(null);
+                setTool((current) => (current === "square" ? null : "square"));
+              },
+            },
+          ] satisfies ToolShelfTool[]}
+          panelTitle="形状"
+          panelOpen={tool !== null}
+        >
         <div
           className="shape-toolbar"
           role="toolbar"
           aria-label="形状工具"
           onPointerDown={(event) => event.stopPropagation()}
         >
-          <span className="shape-toolbar-title">形状</span>
-          <button
-            type="button"
-            aria-pressed={tool === "square"}
-            disabled={!drawable || busy}
-            title={!drawable ? "至少需要填充或描边中的一项" : "拖动绘制矩形"}
-            onClick={() => {
-              setNotice(null);
-              setInteraction(null);
-              setTool((current) => (current === "square" ? null : "square"));
-            }}
-          >
-            矩形
-          </button>
-          <button
-            type="button"
-            aria-pressed={tool === "circle"}
-            disabled={!drawable || busy}
-            title={!drawable ? "至少需要填充或描边中的一项" : "拖动绘制椭圆"}
-            onClick={() => {
-              setNotice(null);
-              setInteraction(null);
-              setTool((current) => (current === "circle" ? null : "circle"));
-            }}
-          >
-            椭圆
-          </button>
           <label className="shape-toolbar-control">
             <input
               type="checkbox"
@@ -710,6 +742,7 @@ export function ShapeLayer({
             </span>
           )}
         </div>
+        </ToolShelf>
       )}
 
       {canEdit &&

@@ -102,6 +102,28 @@ check(
   resources["vendor/pdfium/LICENSE"] === "pdfium-licenses/LICENSE" &&
     resources["vendor/pdfium/licenses/"] === "pdfium-licenses/",
 );
+const fontLicenseFamilies = [
+  "NotoSansSC",
+  "NotoSerifSC",
+  "ZhuqueFangsong",
+  "LXGWWenKai",
+  "SmileySans",
+  "MaShanZheng",
+  "ZCOOLXiaoWei",
+  "ZCOOLQingKeHuangYou",
+];
+check(
+  "OFL font licenses and provenance are bundled",
+  resources["fonts/SOURCE.txt"] === "font-licenses/SOURCE.txt" &&
+    fontLicenseFamilies.every(
+      (family) =>
+        resources[`fonts/${family}-OFL.txt`] ===
+          `font-licenses/${family}-OFL.txt` &&
+        existsSync(
+          path.join(REPO_ROOT, `src-tauri/fonts/${family}-OFL.txt`),
+        ),
+    ),
+);
 check(
   "install notes are bundled as INSTALL-windows.md",
   resources["../docs/install-windows.md"] === "INSTALL-windows.md",

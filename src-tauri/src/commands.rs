@@ -831,6 +831,15 @@ pub fn forget_recent_file(path: String) -> Result<Vec<crate::recovery::RecentFil
     }
 }
 
+/// Clears the recent-file index without deleting any PDF or recovery data.
+#[tauri::command]
+pub fn clear_recent_files() -> Result<Vec<crate::recovery::RecentFile>, CommandError> {
+    match crate::recovery::recent_files_store() {
+        Some(store) => store.clear().map_err(crate::recovery::map_recovery_error),
+        None => Ok(Vec::new()),
+    }
+}
+
 /// Serializes the current in-memory document, including every applied edit.
 ///
 /// This is the save-pipeline seam ticket 10 builds on. It returns the bytes an
@@ -923,17 +932,50 @@ pub fn render_page(
 ) -> Result<PageImageView, CommandError> {
     validate_scale(scale)?;
 
-    let (width, height, png) = with_open_document(&document_id, |entry| {
-        let physical_index = entry.physical_page(page_index)?;
-        let document = entry.render_document()?;
-        let page = load_page(document, physical_index)?;
-        let (pixel_width, pixel_height) = checked_page_pixels(&page, page_index, scale)?;
-        let png = render_full_page_png(&page, page_index, pixel_width, pixel_height)?;
-        Ok((pixel_width, pixel_height, png))
-    })?;
+    with_open_document(&document_id, |entry| {
+        render_page_for(entry, &document_id, page_index, scale)
+    })
+}
 
+/// Render within an already-held registry guard (also used by reversible previews).
+pub(crate) fn render_page_for(
+    entry: &mut OpenDocument,
+    document_id: &str,
+    page_index: u32,
+    scale: f32,
+) -> Result<PageImageView, CommandError> {
+    render_page_with_encoding(entry, document_id, page_index, scale, false)
+}
+
+pub(crate) fn render_page_preview_for(
+    entry: &mut OpenDocument,
+    document_id: &str,
+    page_index: u32,
+    scale: f32,
+) -> Result<PageImageView, CommandError> {
+    render_page_with_encoding(entry, document_id, page_index, scale, true)
+}
+
+fn render_page_with_encoding(
+    entry: &mut OpenDocument,
+    document_id: &str,
+    page_index: u32,
+    scale: f32,
+    fast: bool,
+) -> Result<PageImageView, CommandError> {
+    validate_scale(scale)?;
+    let physical_index = entry.physical_page(page_index)?;
+    let document = entry.render_document()?;
+    let page = load_page(document, physical_index)?;
+    let (width, height) = checked_page_pixels(&page, page_index, scale)?;
+    let rgba = render_page_rgba(&page, page_index, width, height)?;
+    let png = if fast {
+        encode_preview_png(&rgba, width, height)?
+    } else {
+        encode_png(&rgba, width, height)?
+    };
     Ok(PageImageView {
-        document_id,
+        document_id: document_id.to_owned(),
         page_index,
         scale,
         width,
@@ -1227,7 +1269,19 @@ pub fn extract_text(
         // A missing text layer is normal for scanned documents.
         Ok(page
             .text()
-            .map(|page_text| page_text.all())
+            .map(|page_text| {
+                let text = page_text.all();
+                if (text.contains('\u{2}') || text.contains('\u{fffe}'))
+                    && page_text
+                        .chars()
+                        .iter()
+                        .any(|c| c.is_hyphen().unwrap_or(false))
+                {
+                    text.replace(['\u{2}', '\u{fffe}'], "-")
+                } else {
+                    text
+                }
+            })
             .unwrap_or_default())
     })?;
 
@@ -1456,7 +1510,14 @@ pub(crate) fn build_text_layer_with_raw_indices(
                 format!("could not read character {index} on page {page_index}: {error:?}"),
             )
         })?;
-        let value = character.unicode_value();
+        let raw_value = character.unicode_value();
+        // PDFium encodes a detected line-ending hyphen as an internal marker.
+        // Editing must preserve that visible punctuation, not insert U+0002.
+        let value = if matches!(raw_value, 0x2 | 0xfffe) && character.is_hyphen().unwrap_or(false) {
+            u32::from('-')
+        } else {
+            raw_value
+        };
         if value == 0 {
             // PDFium uses zero for characters without a Unicode mapping.
             index += 1;
@@ -1470,7 +1531,11 @@ pub(crate) fn build_text_layer_with_raw_indices(
             .origin()
             .map(|(x, y)| (x.value, y.value))
             .unwrap_or((0.0, 0.0));
-        let font_size = character.unscaled_font_size().value;
+        // Display size: Word and WPS PDFs store an unscaled size with a
+        // compensating text matrix (18pt painted as 360 x 0.05), and the
+        // frontend uses this number to size selection thresholds and the
+        // inline editor.
+        let font_size = character.scaled_font_size().value;
 
         // PDFium stores text as UTF-16 code units; combine a surrogate pair
         // into a single selectable character with the union of both boxes.
@@ -1616,11 +1681,29 @@ fn union_boxes(
 }
 
 pub(crate) fn encode_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, CommandError> {
+    encode_png_with_compression(rgba, width, height, png::Compression::Balanced)
+}
+
+pub(crate) fn encode_preview_png(
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+) -> Result<Vec<u8>, CommandError> {
+    encode_png_with_compression(rgba, width, height, png::Compression::Fast)
+}
+
+fn encode_png_with_compression(
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    compression: png::Compression,
+) -> Result<Vec<u8>, CommandError> {
     let mut output = Vec::new();
     {
         let mut encoder = png::Encoder::new(&mut output, width, height);
         encoder.set_color(png::ColorType::Rgba);
         encoder.set_depth(png::BitDepth::Eight);
+        encoder.set_compression(compression);
         let mut writer = encoder.write_header().map_err(|error| {
             CommandError::new(
                 CommandErrorCode::RenderFailed,

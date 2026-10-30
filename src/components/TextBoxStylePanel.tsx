@@ -7,6 +7,9 @@ import type {
   TextBoxTargetView,
   TextRangeView,
 } from "../lib/backend";
+import { WorkspaceIcon } from "./WorkspaceIcon";
+import { TextColorPalette } from "./TextStylePlaceholder";
+import { isFangSongFamily, isSerifFamily } from "../lib/fontPreview";
 
 export interface TextBoxStylePanelProps {
   target: TextBoxTargetView;
@@ -23,7 +26,32 @@ export interface TextBoxStylePanelProps {
   editing?: boolean;
   onChange: (style: TextBoxStyleView, selection: TextRangeView | null) => void;
   onDelete: () => void;
+  onLink?: () => void;
+  showDelete?: boolean;
 }
+
+/** Sizes WPS and Word put in front of the user, in points. */
+const FONT_SIZE_PRESETS = [
+  8, 9, 10, 10.5, 11, 12, 14, 16, 18, 20, 22, 24, 26, 28, 32, 36, 42, 48, 56,
+  64, 72,
+];
+
+/**
+ * The value of the "原字体" choice.
+ *
+ * It is a sentinel rather than the original family name so the select keeps
+ * showing the original choice even when that family is also installed. The
+ * installed duplicate is hidden while this mode is active because both
+ * options would carry the same family name and the backend would keep using
+ * the embedded program either way.
+ */
+const KEEP_ORIGINAL_FONT = "__original__";
+
+type FontOption = {
+  value: string;
+  label: string;
+  source: string;
+};
 
 function wholeBoxStyle(target: TextBoxTargetView): TextBoxStyleView {
   return {
@@ -32,6 +60,7 @@ function wholeBoxStyle(target: TextBoxTargetView): TextBoxStyleView {
     bold: target.bold,
     italic: target.italic,
     underline: target.underline,
+    strikeout: target.strikeout ?? false,
     color: target.color,
     alignment: target.alignment,
   };
@@ -61,19 +90,61 @@ function selectionStyle(
     bold: run.bold,
     italic: run.italic,
     underline: run.underline,
+    strikeout: run.strikeout ?? false,
     color: run.color,
     alignment: target.alignment,
   };
 }
 
+/** Removes the `ABCDEF+` subset prefix from a PDF font name. */
+function baseFontName(family: string): string {
+  return /^[A-Z]{6}\+/.test(family) ? family.slice(7) : family;
+}
+
+/** The advertised family that reproduces a PDF font name, when there is one. */
+function advertisedFamily(
+  targetFamily: string,
+  fonts: TextBoxFontView[],
+): string | null {
+  const name = baseFontName(targetFamily);
+  const match = fonts.find(
+    (font) => font.family === name || font.postscriptName === name,
+  );
+  return match?.family ?? null;
+}
+
+/**
+ * The bundled face closest to an original font PDFX cannot reproduce itself.
+ *
+ * This mirrors the backend's fallback choice, so the panel shows the family
+ * the first style change will actually use instead of silently defaulting to
+ * Helvetica.
+ */
+function suggestedFamily(targetFamily: string, families: string[]): string {
+  const preferred = isFangSongFamily(targetFamily)
+    ? "Zhuque Fangsong"
+    : isSerifFamily(targetFamily)
+      ? "Noto Serif SC"
+      : "Noto Sans SC";
+  return families.includes(preferred)
+    ? preferred
+    : (families[0] ?? targetFamily);
+}
+
 /**
  * Whole-box and selection style controls for a Text Box.
  *
- * Only fonts advertised by the backend's registry are offered: the PDF base-14
- * Latin families and the bundled Noto Sans SC CJK family. Existing text keeps
- * its original embedded font when ttf-parser proves glyph coverage; otherwise
- * the backend falls back to the bundled font and reports it, which the canvas
- * surfaces as a notice.
+ * The font list is the backend's registry: the PDF base-14 Latin families,
+ * the bundled OFL CJK faces and the fonts installed on this machine (OS fonts
+ * and WPS Office's document fonts). Existing text keeps its original embedded
+ * font when ttf-parser proves glyph coverage; a missing character first uses
+ * the installed copy of the same family, then the bundled face, and the
+ * backend reports the latter on the canvas.
+ *
+ * A box that still paints an arbitrary embedded font offers that font as an
+ * "原字体" choice. Only the size and colour can change in that mode, because
+ * any other change needs a replacement font; choosing another family
+ * switches the box to a fully styleable Text Box.
  *
  * With a non-empty editor selection the controls style only that range and
  * hide the box-level alignment and deletion actions. An empty selection or a
@@ -87,6 +158,8 @@ export function TextBoxStylePanel({
   editing = false,
   onChange,
   onDelete,
+  onLink,
+  showDelete = true,
 }: TextBoxStylePanelProps) {
   const families = useMemo(() => {
     const seen = new Set<string>();
@@ -100,20 +173,69 @@ export function TextBoxStylePanel({
     return result;
   }, [fonts]);
 
+  const labels = useMemo(() => {
+    const result = new Map<string, string>();
+    for (const font of fonts) {
+      if (!result.has(font.family)) {
+        result.set(font.family, font.label);
+      }
+    }
+    return result;
+  }, [fonts]);
+
+  const sources = useMemo(() => {
+    const result = new Map<string, string>();
+    for (const font of fonts) {
+      if (!result.has(font.family)) {
+        result.set(font.family, font.source);
+      }
+    }
+    return result;
+  }, [fonts]);
+
   const baseStyle = selection
     ? selectionStyle(target, selection)
     : wholeBoxStyle(target);
   // A legacy Text Object can carry a font family outside the built-in list
-  // (an embedded font, ArialMT, Helvetica-Bold...). The backend only accepts
-  // the advertised families for a restyle, so start from an offered family
-  // instead of sending one the panel cannot show.
-  const selectedFamily = families.includes(baseStyle.fontFamily)
-    ? baseStyle.fontFamily
-    : (families[0] ?? baseStyle.fontFamily);
+  // (an embedded font, Helvetica-Bold, Times-Roman...). Match it to the
+  // advertised variant first, then to the bundled look-alike the backend
+  // would fall back to, instead of defaulting every edit to Helvetica.
+  const keepOriginal =
+    target.keepOriginalFont && baseStyle.fontFamily === target.fontFamily;
+  // Prefer the installed family's localized label (for example 仿宋-简) when
+  // the same family is on this machine; otherwise show the PDF's font name.
+  const originalLabel = labels.get(target.fontFamily) ?? target.fontFamily;
+  const advertised = advertisedFamily(baseStyle.fontFamily, fonts);
+  const selectedFamily = keepOriginal
+    ? target.fontFamily
+    : (advertised ?? suggestedFamily(baseStyle.fontFamily, families));
   const style: TextBoxStyleView = {
     ...baseStyle,
     fontFamily: selectedFamily,
   };
+  // The "原字体" choice is rendered separately when `keepOriginal` is true, so
+  // it stays out of the optgroups and is never listed twice. An installed copy
+  // of that same family is hidden too: its option value is the original family
+  // name, which cannot ask the backend for the installed program, so choosing
+  // it would silently stay on the original font.
+  const familyOptions = useMemo<FontOption[]>(
+    () =>
+      families
+        .filter((family) => !(keepOriginal && family === target.fontFamily))
+        .map((family) => ({
+          value: family,
+          label: labels.get(family) ?? family,
+          source: sources.get(family) ?? "embedded",
+        })),
+    [families, labels, sources, keepOriginal, target.fontFamily],
+  );
+  const builtInOptions = familyOptions.filter(
+    (option) => option.source !== "wps" && option.source !== "system",
+  );
+  const wpsOptions = familyOptions.filter((option) => option.source === "wps");
+  const systemOptions = familyOptions.filter(
+    (option) => option.source === "system",
+  );
   const selectionCount = selection ? selection.end - selection.start : 0;
   const touchedRuns = selection
     ? target.runs.filter(
@@ -126,6 +248,13 @@ export function TextBoxStylePanel({
       (touchedRuns.length === 1 &&
         (touchedRuns[0].start > selection.start ||
           touchedRuns[0].end < selection.end)));
+
+  // The original-font mode has no replacement program, so the backend refuses
+  // weight, underline and alignment changes; disable instead of failing.
+  const styleLocked = busy || (keepOriginal && selection !== null);
+  const sizePreset = FONT_SIZE_PRESETS.includes(style.fontSize)
+    ? String(style.fontSize)
+    : "";
 
   const update = (patch: Partial<TextBoxStyleView>) => {
     const next = { ...style, ...patch };
@@ -156,93 +285,155 @@ export function TextBoxStylePanel({
       onPointerDown={(event) => event.stopPropagation()}
     >
       {editing && (
-        <p className="text-box-selection-note">
+        <p className="text-box-selection-note visually-hidden">
           {selection
             ? `已选择 ${selectionCount} 个字符，样式更改只应用到所选范围。`
             : "未选择文字；样式更改将应用到整个文本框。"}
         </p>
       )}
       {mixedSelection && (
-        <p className="text-box-selection-note">
+        <p className="text-box-selection-note visually-hidden">
           所选范围包含多种样式；控件显示起始字符的样式。
         </p>
       )}
+      {keepOriginal && (
+        <p className="text-box-selection-note visually-hidden">
+          {selection
+            ? "使用原字体的文本框只能整体调整字号和颜色；取消选择后再修改。"
+            : "正在使用 PDF 中的原字体。字号和颜色会保留原字体；选择其他字体可启用粗体、斜体、下划线与对齐。"}
+        </p>
+      )}
 
-      <label className="text-box-style-field">
-        <span>字体</span>
-        <select
-          aria-label="字体"
-          value={style.fontFamily}
-          disabled={busy}
-          onChange={(event) => update({ fontFamily: event.target.value })}
-        >
-          {families.map((family) => (
-            <option key={family} value={family}>
-              {family}
-            </option>
-          ))}
-        </select>
-      </label>
+      <div className="text-style-font-row">
+        <label className="text-box-style-field">
+          <span className="visually-hidden">字体</span>
+          <select
+            aria-label="字体"
+            value={keepOriginal ? KEEP_ORIGINAL_FONT : style.fontFamily}
+            disabled={styleLocked}
+            onChange={(event) => {
+              const value = event.target.value;
+              update({
+                fontFamily:
+                  value === KEEP_ORIGINAL_FONT ? target.fontFamily : value,
+              });
+            }}
+          >
+            {keepOriginal && (
+              <option value={KEEP_ORIGINAL_FONT}>
+                原字体 · {originalLabel}
+              </option>
+            )}
+            <optgroup label="内置字体">
+              {builtInOptions.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </optgroup>
+            {wpsOptions.length > 0 && (
+              <optgroup label="WPS 字体">
+                {wpsOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </optgroup>
+            )}
+            {systemOptions.length > 0 && (
+              <optgroup label="本机字体">
+                {systemOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </optgroup>
+            )}
+          </select>
+        </label>
 
-      <label className="text-box-style-field">
-        <span>字号</span>
-        <input
-          type="number"
-          aria-label="字号"
-          min={4}
-          max={400}
-          step={1}
-          value={style.fontSize}
-          disabled={busy}
-          onChange={(event) => {
-            const size = Number(event.target.value);
-            if (Number.isFinite(size) && size >= 4 && size <= 400) {
-              update({ fontSize: size });
-            }
-          }}
-        />
-      </label>
-
+        <label className="text-box-style-field">
+          <span className="visually-hidden">字号</span>
+          <span className="text-box-size-row">
+            <input
+              type="number"
+              aria-label="字号"
+              min={4}
+              max={400}
+              step={0.5}
+              value={style.fontSize}
+              disabled={styleLocked}
+              onChange={(event) => {
+                const size = Number(event.target.value);
+                if (Number.isFinite(size) && size >= 4 && size <= 400) {
+                  update({ fontSize: size });
+                }
+              }}
+            />
+            <select
+              className="text-box-size-preset"
+              aria-label="常用字号"
+              value={sizePreset}
+              disabled={styleLocked}
+              onChange={(event) => {
+                const size = Number(event.target.value);
+                if (Number.isFinite(size) && size >= 4 && size <= 400) {
+                  update({ fontSize: size });
+                }
+              }}
+            >
+              <option value="">常用</option>
+              {FONT_SIZE_PRESETS.map((size) => (
+                <option key={size} value={size}>
+                  {size}
+                </option>
+              ))}
+            </select>
+          </span>
+        </label>
+      </div>
       <div className="text-box-style-group" role="group" aria-label="字形">
         <button
           type="button"
           aria-pressed={style.bold}
-          disabled={busy}
+          disabled={styleLocked || keepOriginal}
           onPointerDown={keepTextSelection}
           onClick={() => update({ bold: !style.bold })}
         >
-          粗体
+          <WorkspaceIcon name="bold" />
+          <span className="visually-hidden">粗体</span>
         </button>
         <button
           type="button"
           aria-pressed={style.italic}
-          disabled={busy}
+          disabled={styleLocked || keepOriginal}
           onPointerDown={keepTextSelection}
           onClick={() => update({ italic: !style.italic })}
         >
-          斜体
+          <WorkspaceIcon name="italic" />
+          <span className="visually-hidden">斜体</span>
         </button>
         <button
           type="button"
           aria-pressed={style.underline}
-          disabled={busy}
+          disabled={styleLocked || keepOriginal}
           onPointerDown={keepTextSelection}
           onClick={() => update({ underline: !style.underline })}
         >
-          下划线
+          <WorkspaceIcon name="underline" />
+          <span className="visually-hidden">下划线</span>
+        </button>
+        <button
+          type="button"
+          aria-label="删除线"
+          aria-pressed={style.strikeout ?? false}
+          disabled={styleLocked || keepOriginal}
+          onPointerDown={keepTextSelection}
+          onClick={() => update({ strikeout: !style.strikeout })}
+        >
+          <WorkspaceIcon name="strikeout" />
         </button>
       </div>
-
-      <label className="text-box-style-field">
-        <span>颜色</span>
-        <input
-          type="color"
-          aria-label="颜色"
-          value={style.color}
-          disabled={busy}
-          onChange={(event) => update({ color: event.target.value })}
-        />
-      </label>
 
       {!selection && (
         <div className="text-box-style-group" role="group" aria-label="对齐">
@@ -251,22 +442,47 @@ export function TextBoxStylePanel({
               key={alignment.value}
               type="button"
               aria-pressed={target.alignment === alignment.value}
-              disabled={busy}
+              disabled={styleLocked || keepOriginal}
               onClick={() => update({ alignment: alignment.value })}
             >
-              {alignment.label}
+              <WorkspaceIcon
+                name={
+                  alignment.value === "left"
+                    ? "alignLeft"
+                    : alignment.value === "center"
+                      ? "alignCenter"
+                      : "alignRight"
+                }
+              />
+              <span className="visually-hidden">{alignment.label}</span>
             </button>
           ))}
         </div>
       )}
 
-      <p className="text-box-font-note">
-        支持 PDF 基础字体（Helvetica、Times、Courier，Latin 字符）和内置中文字体
-        Noto Sans SC（中文与 Latin 混排）。编辑已有文字时优先保留原字体；原字体缺少所需字形时自动改用
-        Noto Sans SC，并在画布上提示。
+      <div className="text-box-style-group">
+        <button
+          type="button"
+          aria-label="URL 链接"
+          title="URL 链接"
+          disabled={!onLink || busy}
+          onPointerDown={keepTextSelection}
+          onClick={onLink}
+        >
+          <WorkspaceIcon name="link" />
+        </button>
+      </div>
+      <TextColorPalette
+        color={style.color}
+        disabled={styleLocked}
+        onChange={(color) => update({ color })}
+      />
+      <p className="text-box-font-note visually-hidden">
+        编辑已有文字时优先保留原字体；原字体缺少的字优先使用本机安装的同名字体，仍缺少时再改用内置字体：仿宋改用朱雀仿宋，宋体等衬线字体改用思源宋体，其余中文改用思源黑体。可在“WPS
+        字体”和“本机字体”分组中选择已安装的字体。
       </p>
 
-      {!selection && !editing && (
+      {showDelete && !selection && !editing && (
         <button
           type="button"
           className="text-box-delete"

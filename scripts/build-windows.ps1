@@ -262,16 +262,20 @@ $PortableName = "${ExpectedPrefix}-portable"
 $PortableStage = Join-Path $PortableDir $PortableName
 $PortableZip = Join-Path $PortableDir "$PortableName.zip"
 $LicenseStage = Join-Path $PortableStage 'pdfium-licenses'
+$FontLicenseStage = Join-Path $PortableStage 'font-licenses'
 
 if (Test-Path -Path $PortableStage) {
     Remove-Item -Path $PortableStage -Recurse -Force
 }
 New-Item -ItemType Directory -Path $LicenseStage -Force | Out-Null
+New-Item -ItemType Directory -Path $FontLicenseStage -Force | Out-Null
 
 Copy-Item -Path $ExePath -Destination (Join-Path $PortableStage "$ProductName.exe") -Force
 Copy-Item -Path $PdfiumDll -Destination (Join-Path $PortableStage 'pdfium.dll') -Force
 Copy-Item -Path $PdfiumLicense -Destination (Join-Path $LicenseStage 'LICENSE') -Force
 Copy-Item -Path (Join-Path $PdfiumLicenses '*') -Destination $LicenseStage -Recurse -Force
+Copy-Item -Path (Join-Path $RepoRoot 'src-tauri\fonts\*-OFL.txt') -Destination $FontLicenseStage -Force
+Copy-Item -Path (Join-Path $RepoRoot 'src-tauri\fonts\SOURCE.txt') -Destination $FontLicenseStage -Force
 $InstallNotes = Join-Path $RepoRoot 'docs\install-windows.md'
 if (-not (Test-Path -Path $InstallNotes -PathType Leaf)) {
     Fail "install notes are missing: $InstallNotes"
@@ -287,7 +291,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 $Archive = [System.IO.Compression.ZipFile]::OpenRead($PortableZip)
 try {
     $Entries = @($Archive.Entries | ForEach-Object { $_.FullName.Replace('\', '/') })
-    foreach ($RequiredEntry in @("$ProductName.exe", 'pdfium.dll', 'INSTALL-windows.md', 'pdfium-licenses/LICENSE')) {
+    foreach ($RequiredEntry in @("$ProductName.exe", 'pdfium.dll', 'INSTALL-windows.md', 'pdfium-licenses/LICENSE', 'font-licenses/SOURCE.txt', 'font-licenses/NotoSansSC-OFL.txt')) {
         if ($Entries -notcontains $RequiredEntry) {
             Fail "portable zip is missing $RequiredEntry."
         }

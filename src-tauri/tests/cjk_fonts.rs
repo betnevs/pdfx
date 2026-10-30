@@ -43,6 +43,7 @@ fn bundled_style(size: f32) -> TextBoxStyleView {
         bold: false,
         italic: false,
         underline: false,
+        strikeout: false,
         color: "#000000".to_owned(),
         alignment: TextAlignment::Left,
     }
@@ -500,7 +501,9 @@ fn a_non_embedded_original_font_falls_back_and_reports_the_change() {
     let font = result.font.expect("the fallback must be reported");
     assert!(font.fallback);
     assert_eq!(font.original_family, "SimSun");
-    assert_eq!(font.family, "Noto Sans SC");
+    // SimSun is a Song-style face, so the serif companion preserves the
+    // document's look instead of switching to a sans-serif font.
+    assert_eq!(font.family, "Noto Serif SC");
     let reason = font.reason.expect("the fallback needs a reason");
     assert!(
         reason.contains("SimSun") && reason.contains("not embedded"),
@@ -523,7 +526,7 @@ fn a_non_embedded_original_font_falls_back_and_reports_the_change() {
         char_index_of(&edited, "中文") as u32,
     )
     .expect("target after fallback");
-    assert_eq!(second.font_family, "Noto Sans SC");
+    assert_eq!(second.font_family, "Noto Serif SC");
     let second_result = apply_text_edit(
         document_id.clone(),
         0,
@@ -539,6 +542,102 @@ fn a_non_embedded_original_font_falls_back_and_reports_the_change() {
 
     let bytes = save_document_bytes(&document_id).expect("serialize edited document");
     let saved = synthetic::pdf_bytes_file("cjk-simsun-fallback", bytes);
+    let reopened = open_synthetic(&saved);
+    let reopened_text = extract_text(reopened.clone(), 0).expect("reopened text");
+    let reopened_compact: String = reopened_text
+        .text
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    assert!(
+        reopened_compact.contains("中文排版测试PDF二次"),
+        "the saved fallback text must be extractable: {:?}",
+        reopened_text.text
+    );
+    close_document(reopened).expect("close reopened");
+    close_document(document_id).expect("close");
+}
+
+#[test]
+fn a_fangsong_original_keeps_a_fangsong_face() {
+    let pdf = synthetic::cjk_fangsong_pdf();
+    let document_id = open_synthetic(&pdf);
+    let layer = extract_text_layer(document_id.clone(), 0).expect("text layer");
+    let target = text_edit_target(document_id.clone(), 0, char_index_of(&layer, "中文") as u32)
+        .expect("target");
+    assert_eq!(target.font_family, "FangS-SC");
+
+    let result = apply_text_edit(
+        document_id.clone(),
+        0,
+        target.box_id,
+        "中文排版测试 PDF".to_owned(),
+    )
+    .expect("edit a non-embedded fangsong font");
+    // On a machine with WPS Office's FangS-SC installed, that copy of the same
+    // family reproduces the original exactly and no visible fallback happens.
+    // Otherwise the bundled Zhuque Fangsong keeps the fangsong look and the
+    // substitution is reported on the canvas.
+    let installed_fangsong = text_box_fonts().into_iter().any(|font| {
+        font.family == "FangS-SC" && font.source != "embedded" && font.source != "base14"
+    });
+    if installed_fangsong {
+        assert!(
+            result.font.is_none(),
+            "an installed copy of the original family needs no fallback notice: {:?}",
+            result.font
+        );
+    } else {
+        let font = result.font.expect("the fallback must be reported");
+        assert!(font.fallback);
+        assert_eq!(font.original_family, "FangS-SC");
+        // Noto Serif SC is far heavier than a fangsong face, so a new character
+        // in a FangS document would stand out; Zhuque Fangsong keeps the look.
+        assert_eq!(font.family, "Zhuque Fangsong");
+        let reason = font.reason.expect("the fallback needs a reason");
+        assert!(
+            reason.contains("FangS-SC") && reason.contains("not embedded"),
+            "the reason should name the font and why it was replaced: {reason}"
+        );
+    }
+
+    let edited = extract_text_layer(document_id.clone(), 0).expect("edited layer");
+    let compact: String = edited.text.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        compact.contains("中文排版测试PDF"),
+        "the replacement must be searchable: {:?}",
+        edited.text
+    );
+
+    // The object now carries the replacement family, so another edit keeps
+    // using it rather than choosing again.
+    let second = text_edit_target(
+        document_id.clone(),
+        0,
+        char_index_of(&edited, "中文") as u32,
+    )
+    .expect("target after fallback");
+    let expected_family = if installed_fangsong {
+        "FangS-SC"
+    } else {
+        "Zhuque Fangsong"
+    };
+    assert_eq!(second.font_family, expected_family);
+    let second_result = apply_text_edit(
+        document_id.clone(),
+        0,
+        second.box_id,
+        "中文排版测试 PDF 二次".to_owned(),
+    )
+    .expect("edit the replacement font again");
+    assert!(
+        second_result.font.is_none(),
+        "an embedded subset that covers the text is kept, not a fallback: {:?}",
+        second_result.font
+    );
+
+    let bytes = save_document_bytes(&document_id).expect("serialize edited document");
+    let saved = synthetic::pdf_bytes_file("cjk-fangsong-fallback", bytes);
     let reopened = open_synthetic(&saved);
     let reopened_text = extract_text(reopened.clone(), 0).expect("reopened text");
     let reopened_compact: String = reopened_text
@@ -705,6 +804,84 @@ fn editing_existing_text_with_chinese_uses_the_bundled_font_and_survives_save() 
         reopened_text.text
     );
 
+    close_document(reopened).expect("close reopened");
+    close_document(document_id).expect("close");
+}
+
+#[test]
+fn a_mixed_edit_keeps_the_original_font_for_characters_it_still_paints() {
+    let pdf = synthetic::embedded_true_type_pdf();
+    let document_id = open_synthetic(&pdf);
+    let layer = extract_text_layer(document_id.clone(), 0).expect("text layer");
+    let target = text_edit_target(
+        document_id.clone(),
+        0,
+        char_index_of(&layer, "Embedded") as u32,
+    )
+    .expect("target");
+
+    // The Latin characters already existed in the embedded font, so only the
+    // new Chinese characters need the bundled fallback. Replacing the whole
+    // line must not turn "Embedded ... sample." into Noto.
+    apply_text_edit(
+        document_id.clone(),
+        0,
+        target.box_id,
+        "Embedded 中文 sample.".to_owned(),
+    )
+    .expect("mixed-script edit");
+
+    let bytes = save_document_bytes(&document_id).expect("save");
+    let mut doc = Document::load_mem(&bytes).expect("lopdf opens the saved document");
+    doc.decompress();
+
+    let base_fonts: Vec<String> = doc
+        .objects
+        .values()
+        .filter_map(|object| {
+            let Object::Dictionary(dict) = object else {
+                return None;
+            };
+            let name = dict.get(b"BaseFont").ok()?.as_name().ok()?;
+            Some(String::from_utf8_lossy(name).into_owned())
+        })
+        .collect();
+    assert!(
+        base_fonts
+            .iter()
+            .any(|name| name.contains("LiberationSans")),
+        "the original embedded font must still paint the Latin runs: {base_fonts:?}"
+    );
+    assert!(
+        base_fonts.iter().any(|name| name.contains("NotoSansSC")),
+        "the new Chinese characters need the bundled subset: {base_fonts:?}"
+    );
+
+    // The bundled subset holds only the new characters (plus the space a blank
+    // line needs), not the Latin text the original font still paints.
+    let facts = read_cid_subset(&doc);
+    let mapped: BTreeSet<char> = parse_bfchars(&facts.to_unicode)
+        .values()
+        .map(|value| value.chars().next().expect("one character"))
+        .collect();
+    assert_eq!(
+        mapped,
+        BTreeSet::from(['中', '文', ' ']),
+        "the fallback subset must contain only the characters it paints"
+    );
+
+    let reopened = open_synthetic(&synthetic::pdf_bytes_file("mixed-font-edit", bytes));
+    let reopened_text = extract_text(reopened.clone(), 0).expect("reopened text");
+    let compact: String = reopened_text
+        .text
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect();
+    assert!(
+        compact.contains("Embedded中文sample."),
+        "text extraction must keep the character order across font runs: {:?}",
+        reopened_text.text
+    );
     close_document(reopened).expect("close reopened");
     close_document(document_id).expect("close");
 }

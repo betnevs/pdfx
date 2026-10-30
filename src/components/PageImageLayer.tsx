@@ -32,6 +32,7 @@ import {
 } from "../lib/imageGeometry";
 import { LinkTargetDialog } from "./LinkTargetDialog";
 import { SignatureDialog } from "./SignatureDialog";
+import { ToolShelf, useEditorTools, type ToolShelfTool } from "./ToolShelf";
 
 const READ_ONLY_REASON = "此文档不允许编辑内容";
 const ANNOTATION_PERMISSION_REASON = "此文档不允许添加注释";
@@ -150,6 +151,7 @@ export function PageImageLayer({
   canAnnotate = false,
   pageCount = 0,
 }: PageImageLayerProps) {
+  const hosted = useEditorTools();
   const [images, setImages] = useState<ImageObjectView[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [interaction, setInteraction] = useState<Interaction | null>(null);
@@ -509,30 +511,53 @@ export function PageImageLayer({
       onPointerUp={finishInteraction}
       onPointerCancel={() => setInteraction(null)}
     >
-      <div
-        className="image-edit-toolbar"
-        onPointerDown={(event) => event.stopPropagation()}
-      >
-        <button
-          type="button"
-          disabled={readOnly || busy}
-          title={readOnly ? READ_ONLY_REASON : "选择一张 PNG 或 JPG 图片插入当前页"}
-          onClick={() => void chooseAndInsert()}
-        >
-          插入图片…
-        </button>
-        <button
-          type="button"
-          disabled={readOnly || busy}
-          title={
-            readOnly
+      <ToolShelf
+        tools={[
+          {
+            id: "insert-image",
+            label: hosted ? "新图片" : "插入图片…",
+            icon: "image",
+            groups: ["text"],
+            disabled: readOnly || busy,
+            title: readOnly
               ? READ_ONLY_REASON
-              : "绘制、输入或上传签名并插入当前页"
-          }
-          onClick={() => setSignatureOpen(true)}
+              : "选择一张 PNG 或 JPG 图片插入当前页",
+            order: 2,
+            onActivate: () => void chooseAndInsert(),
+          },
+          {
+            id: "insert-signature",
+            label: hosted ? "签名" : "插入签名…",
+            icon: "signature",
+            groups: ["insert"],
+            disabled: readOnly || busy,
+            title: readOnly
+              ? READ_ONLY_REASON
+              : "绘制、输入或上传签名并插入当前页",
+            order: 2,
+            onActivate: () => setSignatureOpen(true),
+          },
+          {id:"image-stamp",label:"盖章",icon:"stamp",groups:["insert"],order:4,disabled:readOnly || busy,onActivate:()=>void chooseAndInsert()},
+          {
+            id: "comment-image",
+            label: "添加图片",
+            icon: "image",
+            groups: ["comment"],
+            disabled: readOnly || busy,
+            title: readOnly
+              ? READ_ONLY_REASON
+              : "选择一张 PNG 或 JPG 图片插入当前页",
+            order: 2,
+            onActivate: () => void chooseAndInsert(),
+          },
+        ] satisfies ToolShelfTool[]}
+        panelTitle="图片"
+        panelOpen={selected !== null}
+      >
+        <div
+          className="image-edit-toolbar"
+          onPointerDown={(event) => event.stopPropagation()}
         >
-          插入签名…
-        </button>
         <button
           type="button"
           disabled={readOnly || busy || selected === null}
@@ -582,7 +607,8 @@ export function PageImageLayer({
             {notice.text}
           </span>
         )}
-      </div>
+        </div>
+      </ToolShelf>
 
       {images.map((image) => {
         const rect = previewFor(image, interaction);

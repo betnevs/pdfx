@@ -119,10 +119,12 @@ function makeBox(overrides: Partial<TextBoxTargetView> = {}): TextBoxTargetView 
     bold: false,
     italic: false,
     underline: false,
+        strikeout: false,
     alignment: "left",
     rotation: 0,
     autoHeight: true,
     created: true,
+    keepOriginalFont: false,
     runs: [],
     ...overrides,
   };
@@ -671,8 +673,8 @@ describe("PageTextLayer text boxes", () => {
     expect(
       [...(family as HTMLSelectElement).options].map((option) => option.value),
     ).toEqual(["Helvetica", "Times", "Courier", "Noto Sans SC"]);
-    expect(screen.getByText(/支持 PDF 基础字体/)).toBeInTheDocument();
-    expect(screen.getByText(/内置中文字体/)).toBeInTheDocument();
+    expect(screen.getByText(/优先保留原字体/)).toBeInTheDocument();
+    expect(screen.getByText(/思源宋体/)).toBeInTheDocument();
 
     fireEvent.change(family, { target: { value: "Times" } });
     await waitFor(() => expect(styleCalls).toHaveLength(1));
@@ -686,6 +688,7 @@ describe("PageTextLayer text boxes", () => {
         bold: false,
         italic: false,
         underline: false,
+        strikeout: false,
         color: "#000000",
         alignment: "left",
       },
@@ -963,6 +966,7 @@ describe("PageTextLayer text boxes", () => {
         bold: false,
         italic: false,
         underline: false,
+        strikeout: false,
         color: "#000000",
         alignment: "left",
       },
@@ -1029,17 +1033,92 @@ describe("PageTextLayer text boxes", () => {
       pointerId: 1,
     });
 
-    // The panel cannot offer the original family, so it starts from the first
-    // built-in one instead of sending a family the backend would reject.
+    // The panel cannot keep this font (it is not embedded), so it starts from
+    // the bundled look-alike the backend would use instead of Helvetica.
     const family = await screen.findByRole("combobox", { name: "字体" });
-    expect((family as HTMLSelectElement).value).toBe("Helvetica");
+    expect((family as HTMLSelectElement).value).toBe("Noto Sans SC");
     fireEvent.click(screen.getByRole("button", { name: "粗体" }));
     await waitFor(() => expect(styleCalls).toHaveLength(1));
     expect(styleCalls[0]).toMatchObject({
       documentId: "doc-1",
       pageIndex: 2,
       boxId: 7,
-      style: { fontFamily: "Helvetica", bold: true },
+      style: { fontFamily: "Noto Sans SC", bold: true },
+    });
+  });
+
+  it("keeps an original embedded font and limits the panel to size and colour", async () => {
+    let store: TextBoxTargetView[] = [];
+    const styleCalls: Record<string, unknown>[] = [];
+    const legacy = makeBox({
+      boxId: 8,
+      text: "Original",
+      created: false,
+      fontFamily: "FangS-SC",
+      x: 72,
+      y: 72,
+      width: 58,
+      height: 20,
+      fontSize: 18,
+      autoHeight: true,
+      keepOriginalFont: true,
+    });
+
+    mockCommands({
+      text_boxes: () => [...store],
+      text_edit_target: () => {
+        store = [legacy];
+        return legacy;
+      },
+      apply_text_box_style: (args) => {
+        styleCalls.push(args);
+        const style = args.style as Record<string, unknown>;
+        store[0] = { ...store[0], ...style, keepOriginalFont: true };
+        return {
+          pageIndex: 2,
+          target: store[0],
+          font: null,
+          history: editedHistory,
+        };
+      },
+    });
+
+    await renderLayer();
+    await enterBoxMode();
+    const region = screen.getByRole("region", { name: "文本层" });
+    fireEvent.pointerDown(region, {
+      clientX: 76,
+      clientY: 80,
+      button: 0,
+      pointerId: 1,
+    });
+    fireEvent.pointerUp(region, {
+      clientX: 76,
+      clientY: 80,
+      button: 0,
+      pointerId: 1,
+    });
+
+    const family = await screen.findByRole("combobox", { name: "字体" });
+    expect((family as HTMLSelectElement).value).toBe("__original__");
+    expect(
+      screen.getByRole("option", { name: "原字体 · FangS-SC" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/正在使用 PDF 中的原字体/)).toBeInTheDocument();
+    // Weight, underline and alignment need a replacement font.
+    expect(screen.getByRole("button", { name: "粗体" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "斜体" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "下划线" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "居中" })).toBeDisabled();
+
+    fireEvent.change(screen.getByRole("spinbutton", { name: "字号" }), {
+      target: { value: "28" },
+    });
+    await waitFor(() => expect(styleCalls).toHaveLength(1));
+    expect(styleCalls[0]).toMatchObject({
+      pageIndex: 2,
+      boxId: 8,
+      style: { fontFamily: "FangS-SC", fontSize: 28 },
     });
   });
 });
@@ -1135,12 +1214,13 @@ describe("PageTextLayer selection text styles", () => {
         bold: true,
         italic: false,
         underline: false,
+        strikeout: false,
         color: "#000000",
         alignment: "left",
       },
     });
     expect(
-      await screen.findByText("Times 无法用于新文字，已改用 Noto Sans SC：缺少所需字形"),
+      await screen.findByText("Times 缺少部分新文字的字形，这些字已改用 Noto Sans SC"),
     ).toBeInTheDocument();
     expect(textarea.selectionStart).toBe(6);
     expect(textarea.selectionEnd).toBe(11);
@@ -1228,6 +1308,7 @@ describe("PageTextLayer selection text styles", () => {
             bold: true,
             italic: false,
             underline: false,
+        strikeout: false,
             color: "#c0392b",
           },
         ],

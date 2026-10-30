@@ -33,6 +33,7 @@ import {
   type LineEndpoint,
   type Point,
 } from "../lib/lineGeometry";
+import { ToolShelf, type ToolShelfTool } from "./ToolShelf";
 
 /** Defaults chosen to be visible on both light and dark pages. */
 const DEFAULT_STROKE = "#000000";
@@ -695,38 +696,47 @@ export function LineLayer({
       )}
 
       {canEdit && (
+        <ToolShelf
+          tools={[
+            {
+              id: "line",
+              label: "直线",
+              icon: "line",
+              groups: ["shapes"],
+              active: tool === "line",
+              disabled: busy,
+              title: "拖动绘制直线",
+              order: 6,
+              onActivate: () => {
+                setNotice(null);
+                setInteraction(null);
+                setTool((current) => (current === "line" ? null : "line"));
+              },
+            },
+            {
+              id: "arrow",
+              label: "箭头",
+              icon: "arrow",
+              groups: ["shapes"],
+              active: tool === "arrow",
+              disabled: busy,
+              title: "拖动绘制箭头",
+              order: 8,
+              onActivate: () => {
+                setNotice(null);
+                setInteraction(null);
+                setTool((current) => (current === "arrow" ? null : "arrow"));
+              },
+            },
+          ] satisfies ToolShelfTool[]}
+          panelTitle="线条"
+          panelOpen={tool !== null || selected !== null}
+        >
         <div
           className="line-controls"
           onPointerDown={(event) => event.stopPropagation()}
         >
           <div className="line-toolbar" role="toolbar" aria-label="直线与箭头工具">
-            <span className="line-toolbar-title">线条</span>
-            <button
-              type="button"
-              aria-pressed={tool === "line"}
-              disabled={busy}
-              title="拖动绘制直线"
-              onClick={() => {
-                setNotice(null);
-                setInteraction(null);
-                setTool((current) => (current === "line" ? null : "line"));
-              }}
-            >
-              直线
-            </button>
-            <button
-              type="button"
-              aria-pressed={tool === "arrow"}
-              disabled={busy}
-              title="拖动绘制箭头"
-              onClick={() => {
-                setNotice(null);
-                setInteraction(null);
-                setTool((current) => (current === "arrow" ? null : "arrow"));
-              }}
-            >
-              箭头
-            </button>
             <label className="line-toolbar-control">
               <span>颜色</span>
               <input
@@ -857,6 +867,7 @@ export function LineLayer({
             </div>
           )}
         </div>
+        </ToolShelf>
       )}
 
       {canEdit && !busy && !tool && selected && chromeGeometry && rotateHandle && (

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { TextCharView } from "./backend";
 import {
   buildTextLayer,
+  editableTextBlocks,
   findCharAt,
   selectionForChar,
   selectionForDrag,
@@ -136,6 +137,64 @@ describe("text layer grouping", () => {
     expect(empty.lines).toEqual([]);
     expect(empty.words).toEqual([]);
     expect(selectionText(layer, { start: 0, end: 0 })).toBe("");
+  });
+});
+
+describe("editable text blocks", () => {
+  it("joins adjacent characters on the same baseline into one block", () => {
+    const blocks = editableTextBlocks([
+      makeChar("业", 10, 10, 18, 18),
+      makeChar("务", 28, 10, 18, 18),
+    ]);
+
+    expect(blocks).toEqual([{ x: 10, y: 10, width: 36, height: 18 }]);
+  });
+
+  it("splits blocks at gaps wider than a space, such as table cells", () => {
+    const blocks = editableTextBlocks([
+      makeChar("名", 10, 10, 18, 18),
+      makeChar("称", 28, 10, 18, 18),
+      makeChar("值", 70, 10, 18, 18),
+      makeChar("一", 88, 10, 18, 18),
+    ]);
+
+    expect(blocks).toEqual([
+      { x: 10, y: 10, width: 36, height: 18 },
+      { x: 70, y: 10, width: 36, height: 18 },
+    ]);
+  });
+
+  it("starts a new block after a generated line break", () => {
+    const blocks = editableTextBlocks([
+      makeChar("上", 10, 10, 18, 18),
+      generated("\r", 28, 10),
+      generated("\n", 28, 10),
+      makeChar("下", 10, 40, 18, 18),
+    ]);
+
+    expect(blocks).toHaveLength(2);
+    expect(blocks[1]).toEqual({ x: 10, y: 40, width: 18, height: 18 });
+  });
+
+  it("splits blocks when the font size changes on one line", () => {
+    const blocks = editableTextBlocks([
+      makeChar("A", 10, 10, 10, 12, 18),
+      makeChar("B", 20, 10, 10, 12, 24),
+    ]);
+
+    expect(blocks).toHaveLength(2);
+  });
+
+  it("gives each rotated character its own block", () => {
+    const blocks = editableTextBlocks([
+      makeChar("A", 100, 10, 12),
+      makeChar("B", 100, 25, 12),
+    ]);
+
+    expect(blocks).toEqual([
+      { x: 100, y: 10, width: 12, height: 12 },
+      { x: 100, y: 25, width: 12, height: 12 },
+    ]);
   });
 });
 

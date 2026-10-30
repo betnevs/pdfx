@@ -22,7 +22,6 @@ import {
   type PageRegionView,
 } from "./backend";
 import {
-  anchoredScroll,
   clampScale,
   DEFAULT_SCALE,
   fitScale,
@@ -33,22 +32,48 @@ import {
   type Rect,
   type ScrollViewport,
 } from "./pageGeometry";
+import { flushPendingEdits, hasPendingEdits } from "./pendingEdits";
 import { onDocumentChanged } from "./documentEvents";
 import { isEditableTarget } from "./keyboard";
 
 /** Extra page pixels rendered around the viewport at high zoom. */
 const REGION_OVERSCAN = 200;
+/** PDFX renders at most this many bitmap pixels per CSS pixel. */
+const MAX_RENDER_PIXEL_RATIO = 2;
+/** Mirrors the backend's maximum scale; a render scale may not exceed it. */
+const MAX_RENDER_SCALE = 40;
 
 export type ZoomMode = "custom" | "width" | "page";
+
+/**
+ * Bitmap pixels per CSS pixel. Retina displays need a 2x bitmap or the page
+ * looks blurry, but the backend rejects scales above 40x, so at extreme zoom
+ * the density is reduced to whatever the zoom leaves room for.
+ */
+export function renderPixelRatio(scale: number, devicePixelRatio = 1): number {
+  const density = Number.isFinite(devicePixelRatio) && devicePixelRatio > 0
+    ? devicePixelRatio
+    : 1;
+  const preferred = Math.min(MAX_RENDER_PIXEL_RATIO, Math.max(1, density));
+  const available = MAX_RENDER_SCALE / Math.max(scale, Number.MIN_VALUE);
+  return Math.max(1, Math.min(preferred, available));
+}
 
 export interface PageRender {
   /** Scale of the pixels in `image`/`regions`; older renders are ignored. */
   scale: number;
+  /** Bitmap pixels per CSS pixel used for this render. */
+  pixelRatio: number;
   image: PageImageView | null;
   regions: PageRegionView[];
 }
 
-const EMPTY_RENDER: PageRender = { scale: 0, image: null, regions: [] };
+const EMPTY_RENDER: PageRender = {
+  scale: 0,
+  pixelRatio: 1,
+  image: null,
+  regions: [],
+};
 
 interface Anchor {
   pageScrollLeft: number;
@@ -56,6 +81,9 @@ interface Anchor {
   viewportWidth: number;
   viewportHeight: number;
   previousScale: number;
+  pointX?: number;
+  pointY?: number;
+  pageIndex?: number;
 }
 
 interface FullscreenSnapshot {
@@ -74,6 +102,7 @@ export interface DocumentViewModel {
   viewportRef: RefObject<HTMLDivElement | null>;
   surfaceRef: RefObject<HTMLDivElement | null>;
   goToPage: (index: number) => void;
+  setVisiblePage: (index: number) => void;
   zoomTo: (scale: number) => void;
   zoomBy: (factor: number) => void;
   fit: (mode: FitMode) => void;
@@ -83,20 +112,42 @@ export interface DocumentViewModel {
   handleViewportKeyDown: (event: ReactKeyboardEvent<HTMLElement>) => void;
 }
 
-function readViewport(stage: HTMLElement | null): ScrollViewport {
+function readViewport(stage: HTMLElement | null, surface?: HTMLElement | null): ScrollViewport {
   if (!stage) {
     return { scrollLeft: 0, scrollTop: 0, width: 0, height: 0 };
   }
   return {
-    scrollLeft: stage.scrollLeft,
-    scrollTop: stage.scrollTop,
+    scrollLeft: surface ? stage.getBoundingClientRect().left - surface.getBoundingClientRect().left : stage.scrollLeft,
+    scrollTop: surface ? stage.getBoundingClientRect().top - surface.getBoundingClientRect().top : stage.scrollTop,
     width: stage.clientWidth,
     height: stage.clientHeight,
   };
 }
 
+
+function fittingViewport(stage: HTMLElement | null): { width: number; height: number } {
+  if (!stage) return { width: 0, height: 0 };
+  const inner = stage.querySelector<HTMLElement>(".page-stage-inner");
+  const style = inner ? getComputedStyle(inner) : null;
+  const padding = (value: string | undefined) => Number.parseFloat(value ?? "0") || 0;
+  return {
+    width: Math.max(0, stage.clientWidth - padding(style?.paddingLeft) - padding(style?.paddingRight)),
+    height: Math.max(0, stage.clientHeight - padding(style?.paddingTop) - padding(style?.paddingBottom)),
+  };
+}
+
 function rectKey(rect: Rect): string {
   return `${rect.x}:${rect.y}:${rect.width}:${rect.height}`;
+}
+
+/** CSS-pixel viewport measurements in render-bitmap pixels. */
+function scaleViewport(viewport: ScrollViewport, ratio: number): ScrollViewport {
+  return {
+    scrollLeft: viewport.scrollLeft * ratio,
+    scrollTop: viewport.scrollTop * ratio,
+    width: viewport.width * ratio,
+    height: viewport.height * ratio,
+  };
 }
 
 function covers(outer: Rect, target: Rect): boolean {
@@ -116,18 +167,24 @@ function covers(outer: Rect, target: Rect): boolean {
 export function useDocumentViewer(
   document: DocumentView | null,
   onError: (error: CommandError) => void,
+  continuous = false,
 ): DocumentViewModel {
   const documentId = document?.documentId ?? null;
 
   const [pageIndex, setPageIndex] = useState(0);
   const [scale, setScale] = useState(DEFAULT_SCALE);
-  const [zoomMode, setZoomMode] = useState<ZoomMode>("custom");
+  const [zoomMode, setZoomMode] = useState<ZoomMode>(continuous ? "width" : "custom");
+  const [density, setDensity] = useState(() =>
+    typeof window === "undefined" ? 1 : window.devicePixelRatio || 1,
+  );
   const [infos, setInfos] = useState<Record<number, PageInfo>>({});
   const [render, setRender] = useState<PageRender>(EMPTY_RENDER);
   const [fullscreen, setFullscreenState] = useState(false);
   // Bumped when an edit changes page content; re-renders the same page.
   const [contentRevision, setContentRevision] = useState(0);
 
+  const continuousRef = useRef(continuous);
+  continuousRef.current = continuous;
   const viewportRef = useRef<HTMLDivElement>(null);
   const surfaceRef = useRef<HTMLDivElement>(null);
   const requestRef = useRef(0);
@@ -139,6 +196,7 @@ export function useDocumentViewer(
   onErrorRef.current = onError;
 
   const info = document ? (infos[pageIndex] ?? null) : null;
+  const pixelRatio = renderPixelRatio(scale, density);
 
   const stateRef = useRef({
     document,
@@ -147,11 +205,30 @@ export function useDocumentViewer(
     zoomMode,
     info,
     render,
+    pixelRatio,
   });
-  stateRef.current = { document, pageIndex, scale, zoomMode, info, render };
+  stateRef.current = {
+    document,
+    pageIndex,
+    scale,
+    zoomMode,
+    info,
+    render,
+    pixelRatio,
+  };
   fullscreenRef.current = fullscreen;
 
-  // A new document starts on page one at actual size.
+  // A window moved to a different display changes its pixel density; render
+  // again so the page stays sharp.
+  useEffect(() => {
+    const update = () => {
+      setDensity(window.devicePixelRatio || 1);
+    };
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, []);
+
+  // The editing workspace opens at a readable width; standalone viewers retain actual size.
   useEffect(() => {
     requestRef.current += 1;
     regionKeyRef.current = null;
@@ -159,7 +236,7 @@ export function useDocumentViewer(
     fullscreenSnapshotRef.current = null;
     setPageIndex(0);
     setScale(DEFAULT_SCALE);
-    setZoomMode("custom");
+    setZoomMode(continuousRef.current ? "width" : "custom");
     setInfos({});
     setRender(EMPTY_RENDER);
     setFullscreenState(false);
@@ -212,6 +289,8 @@ export function useDocumentViewer(
 
   // Render the current page after every page/zoom/metadata change. Large
   // bitmaps are replaced by a viewport-sized region to keep 4000% usable.
+  // Bitmaps are rendered at the display's pixel density so they stay sharp on
+  // Retina screens; all layout geometry remains in CSS pixels.
   useEffect(() => {
     if (!documentId || !info) {
       return;
@@ -219,57 +298,70 @@ export function useDocumentViewer(
     const requestId = ++requestRef.current;
     regionKeyRef.current = null;
     let cancelled = false;
+    const renderScale = scale * pixelRatio;
 
-    setRender({ scale, image: null, regions: [] });
-
-    if (shouldTile(info, scale)) {
-      const pixel = pagePixelSize(info, scale);
-      const region = visiblePageRegion(
-        readViewport(viewportRef.current),
-        pixel,
-        REGION_OVERSCAN,
-      );
-      if (region.width <= 0 || region.height <= 0) {
-        return;
+    // Retain the last painted page while a replacement is being rasterized.
+    // The surface scales it to the new geometry instead of exposing white.
+    const keepPageImage = (previous: PageRender) =>
+      previous.image?.documentId === documentId && previous.image.pageIndex === pageIndex
+        ? previous.image : null;
+    const paint = () => {
+      if (shouldTile(info, renderScale)) {
+        const pixel = pagePixelSize(info, renderScale);
+        const region = visiblePageRegion(
+          scaleViewport(readViewport(viewportRef.current, continuous ? surfaceRef.current : null), pixelRatio),
+          pixel,
+          REGION_OVERSCAN * pixelRatio,
+        );
+        if (region.width <= 0 || region.height <= 0) {
+          return;
+        }
+        regionKeyRef.current = rectKey(region);
+        renderPageRegion(
+          documentId,
+          pageIndex,
+          renderScale,
+          region.x,
+          region.y,
+          region.width,
+          region.height,
+        )
+          .then((view) => {
+            if (!cancelled && requestRef.current === requestId) {
+              setRender((previous) => ({ scale, pixelRatio, image: keepPageImage(previous), regions: [view] }));
+            }
+          })
+          .catch((error) => {
+            if (!cancelled && requestRef.current === requestId) {
+              onErrorRef.current(toCommandError(error));
+            }
+          });
+      } else {
+        renderPage(documentId, pageIndex, renderScale)
+          .then((image) => {
+            if (!cancelled && requestRef.current === requestId) {
+              setRender({ scale, pixelRatio, image, regions: [] });
+            }
+          })
+          .catch((error) => {
+            if (!cancelled && requestRef.current === requestId) {
+              onErrorRef.current(toCommandError(error));
+            }
+          });
       }
-      regionKeyRef.current = rectKey(region);
-      renderPageRegion(
-        documentId,
-        pageIndex,
-        scale,
-        region.x,
-        region.y,
-        region.width,
-        region.height,
-      )
-        .then((view) => {
-          if (!cancelled && requestRef.current === requestId) {
-            setRender({ scale, image: null, regions: [view] });
-          }
-        })
-        .catch((error) => {
-          if (!cancelled && requestRef.current === requestId) {
-            onErrorRef.current(toCommandError(error));
-          }
-        });
-    } else {
-      renderPage(documentId, pageIndex, scale)
-        .then((image) => {
-          if (!cancelled && requestRef.current === requestId) {
-            setRender({ scale, image, regions: [] });
-          }
-        })
-        .catch((error) => {
-          if (!cancelled && requestRef.current === requestId) {
-            onErrorRef.current(toCommandError(error));
-          }
-        });
-    }
 
+    };
+    // Wheel events can arrive faster than native rasterization. Coalesce the
+    // expensive calls while keeping geometry/overlays responsive each frame.
+    const previous = stateRef.current.render;
+    const zooming = previous.scale > 0 && previous.scale !== scale;
+    const timer = zooming ? window.setTimeout(paint, 80) : null;
+    if (!zooming) paint();
     return () => {
       cancelled = true;
+      if (timer !== null) window.clearTimeout(timer);
     };
-  }, [documentId, pageIndex, scale, info, contentRevision]);
+  }, [documentId, pageIndex, scale, pixelRatio, info, contentRevision]);
 
   // Fit modes follow viewport and page changes until the user zooms manually.
   useEffect(() => {
@@ -283,7 +375,7 @@ export function useDocumentViewer(
       }
       const next = fitScale(
         zoomMode,
-        { width: stage.clientWidth, height: stage.clientHeight },
+        fittingViewport(stage),
         info,
       );
       if (next !== stateRef.current.scale) {
@@ -292,7 +384,9 @@ export function useDocumentViewer(
     };
     recompute();
     window.addEventListener("resize", recompute);
-    return () => window.removeEventListener("resize", recompute);
+    const observer=typeof ResizeObserver === "undefined" ? null : new ResizeObserver(recompute);
+    if (viewportRef.current) observer?.observe(viewportRef.current);
+    return () => {window.removeEventListener("resize", recompute);observer?.disconnect();};
   }, [info, zoomMode]);
 
   // Keep the page point at the viewport centre fixed while zooming.
@@ -303,30 +397,26 @@ export function useDocumentViewer(
     }
     anchorRef.current = null;
     const stage = viewportRef.current;
-    const surface = surfaceRef.current;
+    const surface = anchor.pageIndex === undefined ? surfaceRef.current : stage?.querySelector<HTMLElement>(`[data-page-slot="${anchor.pageIndex}"]`);
     if (!stage || !surface) {
       return;
     }
-    const pageScrollLeft = anchoredScroll(
-      anchor.pageScrollLeft,
-      anchor.viewportWidth,
-      anchor.previousScale,
-      scale,
-    );
-    const pageScrollTop = anchoredScroll(
-      anchor.pageScrollTop,
-      anchor.viewportHeight,
-      anchor.previousScale,
-      scale,
-    );
-    stage.scrollLeft = pageScrollLeft + surface.offsetLeft;
-    stage.scrollTop = pageScrollTop + surface.offsetTop;
+    // Page-relative offsets can be negative for a centred page. Clamp only
+    // after returning to viewport coordinates, or wheel zoom jumps sideways.
+    const pointX = anchor.pointX ?? anchor.viewportWidth / 2;
+    const pointY = anchor.pointY ?? anchor.viewportHeight / 2;
+    const pageScrollLeft = (anchor.pageScrollLeft + pointX) * scale / anchor.previousScale - pointX;
+    const pageScrollTop = (anchor.pageScrollTop + pointY) * scale / anchor.previousScale - pointY;
+    const offsetLeft = continuousRef.current ? surface.getBoundingClientRect().left - stage.getBoundingClientRect().left + stage.scrollLeft : surface.offsetLeft;
+    const offsetTop = continuousRef.current ? surface.getBoundingClientRect().top - stage.getBoundingClientRect().top + stage.scrollTop : surface.offsetTop;
+    stage.scrollLeft = Math.max(0, pageScrollLeft + offsetLeft);
+    stage.scrollTop = Math.max(0, pageScrollTop + offsetTop);
   }, [scale]);
 
   // Navigating to another page starts at its top-left corner.
   useLayoutEffect(() => {
     const stage = viewportRef.current;
-    if (stage) {
+    if (stage && !continuousRef.current) {
       stage.scrollLeft = 0;
       stage.scrollTop = 0;
     }
@@ -349,7 +439,7 @@ export function useDocumentViewer(
     };
   }, []);
 
-  const goToPage = useCallback((index: number) => {
+  const goToPage = useCallback(async (index: number) => {
     const current = stateRef.current;
     if (!current.document || !Number.isFinite(index)) {
       return;
@@ -358,28 +448,41 @@ export function useDocumentViewer(
       current.document.pageCount - 1,
       Math.max(0, Math.trunc(index)),
     );
-    if (next === current.pageIndex) {
-      return;
+    if (next !== current.pageIndex && hasPendingEdits(current.document.documentId) && !(await flushPendingEdits(current.document.documentId))) return;
+    if (continuousRef.current) {
+      const stage = viewportRef.current;
+      const target = stage?.querySelector<HTMLElement>(`[data-page-slot="${next}"]`);
+      if (stage && target) stage.scrollTop += target.getBoundingClientRect().top - stage.getBoundingClientRect().top - 16;
     }
+    if (next === current.pageIndex) return;
     anchorRef.current = null;
     setPageIndex(next);
   }, []);
 
-  const zoomTo = useCallback((requested: number) => {
+  const setVisiblePage = useCallback(async (index: number) => {
+    if (index === stateRef.current.pageIndex) return;
+    const id = stateRef.current.document?.documentId;
+    if (id && hasPendingEdits(id) && !(await flushPendingEdits(id))) return;
+    const count = stateRef.current.document?.pageCount ?? 0;
+    if (Number.isInteger(index) && index >= 0 && index < count) setPageIndex(index);
+  }, []);
+
+  const zoomTo = useCallback((requested: number, point?: {x:number;y:number;pageIndex?:number}) => {
     const next = clampScale(requested);
     const current = stateRef.current;
     if (!current.document || next === current.scale) {
       return;
     }
     const stage = viewportRef.current;
-    const surface = surfaceRef.current;
+    const surface = point?.pageIndex === undefined ? surfaceRef.current : stage?.querySelector<HTMLElement>(`[data-page-slot="${point.pageIndex}"]`);
     if (stage && surface && stage.clientWidth > 0 && stage.clientHeight > 0) {
       anchorRef.current = {
-        pageScrollLeft: stage.scrollLeft - surface.offsetLeft,
-        pageScrollTop: stage.scrollTop - surface.offsetTop,
+        pageScrollLeft: continuousRef.current ? stage.getBoundingClientRect().left - surface.getBoundingClientRect().left : stage.scrollLeft - surface.offsetLeft,
+        pageScrollTop: continuousRef.current ? stage.getBoundingClientRect().top - surface.getBoundingClientRect().top : stage.scrollTop - surface.offsetTop,
         viewportWidth: stage.clientWidth,
         viewportHeight: stage.clientHeight,
         previousScale: current.scale,
+        ...(point ? {pointX:point.x-stage.getBoundingClientRect().left,pointY:point.y-stage.getBoundingClientRect().top,pageIndex:point.pageIndex} : {}),
       };
     }
     setScale(next);
@@ -407,16 +510,14 @@ export function useDocumentViewer(
     anchorRef.current = null;
     if (stage) {
       stage.scrollLeft = 0;
-      stage.scrollTop = 0;
+      if (!continuousRef.current) stage.scrollTop = 0;
     }
     if (!current.info) {
       return;
     }
     const next = fitScale(
       mode,
-      stage
-        ? { width: stage.clientWidth, height: stage.clientHeight }
-        : { width: 0, height: 0 },
+      fittingViewport(stage),
       current.info,
     );
     if (next !== current.scale) {
@@ -428,26 +529,64 @@ export function useDocumentViewer(
     zoomToCustom(DEFAULT_SCALE);
   }, [zoomToCustom]);
 
+  useEffect(() => {
+    const stage = viewportRef.current;
+    if (!documentId || !stage) return;
+    let frame = 0;
+    let delta = 0;
+    let point: { x: number; y: number; pageIndex?: number } | undefined;
+    const wheel = (event: WheelEvent) => {
+      if (!event.ctrlKey && !event.metaKey) return;
+      event.preventDefault();
+      delta += event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? stage.clientHeight : 1);
+      const slot = event.target instanceof Element ? event.target.closest<HTMLElement>("[data-page-slot]") : null;
+      point = { x: event.clientX, y: event.clientY, ...(slot ? { pageIndex: Number(slot.dataset.pageSlot) } : {}) };
+      if (frame) return;
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        const factor = Math.exp(-Math.max(-240, Math.min(240, delta)) * 0.002);
+        delta = 0;
+        setZoomMode("custom");
+        zoomTo(stateRef.current.scale * factor, point);
+      });
+    };
+    stage.addEventListener("wheel", wheel, { passive: false });
+    return () => {
+      stage.removeEventListener("wheel", wheel);
+      if (frame) cancelAnimationFrame(frame);
+    };
+  }, [documentId, zoomTo]);
+
   const handleScroll = useCallback(() => {
+    const stageElement = viewportRef.current;
+    if (continuousRef.current && stageElement && stageElement.clientHeight > 0) {
+      const targetY = stageElement.getBoundingClientRect().top + Math.min(160, stageElement.clientHeight / 3);
+      const slots = stageElement.querySelectorAll<HTMLElement>("[data-page-slot]");
+      for (const slot of slots) {
+        const bounds = slot.getBoundingClientRect();
+        if (bounds.top <= targetY && bounds.bottom > targetY) {
+          void setVisiblePage(Number(slot.dataset.pageSlot));
+          break;
+        }
+      }
+    }
     const current = stateRef.current;
     const { document: currentDocument, info: currentInfo, scale: currentScale } =
       current;
-    if (
-      !currentDocument ||
-      !currentInfo ||
-      !shouldTile(currentInfo, currentScale)
-    ) {
+    const ratio = current.pixelRatio;
+    const renderScale = currentScale * ratio;
+    if (!currentDocument || !currentInfo || !shouldTile(currentInfo, renderScale)) {
       return;
     }
     const stage = viewportRef.current;
     if (!stage) {
       return;
     }
-    const pixel = pagePixelSize(currentInfo, currentScale);
+    const pixel = pagePixelSize(currentInfo, renderScale);
     const region = visiblePageRegion(
-      readViewport(stage),
+      scaleViewport(readViewport(stage, continuousRef.current ? surfaceRef.current : null), ratio),
       pixel,
-      REGION_OVERSCAN,
+      REGION_OVERSCAN * ratio,
     );
     if (region.width <= 0 || region.height <= 0) {
       return;
@@ -455,6 +594,7 @@ export function useDocumentViewer(
     const rendered = current.render;
     if (
       rendered.scale === currentScale &&
+      rendered.pixelRatio === ratio &&
       rendered.regions.some((view) => covers(view, region))
     ) {
       return;
@@ -469,11 +609,10 @@ export function useDocumentViewer(
     const requestId = ++requestRef.current;
     const currentDocumentId = currentDocument.documentId;
     const currentPageIndex = current.pageIndex;
-    const requestedScale = currentScale;
     renderPageRegion(
       currentDocumentId,
       currentPageIndex,
-      requestedScale,
+      renderScale,
       region.x,
       region.y,
       region.width,
@@ -485,13 +624,16 @@ export function useDocumentViewer(
           requestRef.current === requestId &&
           latest.document?.documentId === currentDocumentId &&
           latest.pageIndex === currentPageIndex &&
-          latest.scale === requestedScale
+          latest.scale === currentScale &&
+          latest.pixelRatio === ratio
         ) {
-          setRender({
-            scale: requestedScale,
-            image: null,
+          setRender((previous) => ({
+            scale: currentScale,
+            pixelRatio: ratio,
+            image: previous.image?.documentId === currentDocumentId && previous.image.pageIndex === currentPageIndex
+              ? previous.image : null,
             regions: [view],
-          });
+          }));
         }
       })
       .catch((error) => {
@@ -499,7 +641,7 @@ export function useDocumentViewer(
           onErrorRef.current(toCommandError(error));
         }
       });
-  }, []);
+  }, [setVisiblePage]);
 
   const handleViewportKeyDown = useCallback(
     (event: ReactKeyboardEvent<HTMLElement>) => {
@@ -586,7 +728,8 @@ export function useDocumentViewer(
     viewportRef,
     surfaceRef,
     goToPage,
-    zoomTo,
+    setVisiblePage,
+    zoomTo: zoomToCustom,
     zoomBy,
     fit,
     actualSize,

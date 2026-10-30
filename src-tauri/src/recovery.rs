@@ -686,6 +686,12 @@ impl RecentFilesStore {
         Ok(files)
     }
 
+    /// Clears only the history index; documents and recovery files are untouched.
+    pub fn clear(&self) -> Result<Vec<RecentFile>, RecoveryError> {
+        self.save(&[])?;
+        Ok(Vec::new())
+    }
+
     fn save(&self, files: &[RecentFile]) -> Result<(), RecoveryError> {
         let directory = self.path.parent().ok_or_else(|| {
             RecoveryError::Io(io::Error::new(
@@ -1287,6 +1293,19 @@ mod tests {
             1
         );
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn clearing_recent_files_persists_without_deleting_documents() {
+        let dir = scratch_dir("recent-clear");
+        let document = dir.join("keep.pdf");
+        fs::write(&document, b"%PDF-1.7 original").unwrap();
+        let store = RecentFilesStore::new(&dir);
+        store.record(&document.to_string_lossy(), 1).unwrap();
+        assert!(store.clear().unwrap().is_empty());
+        assert!(RecentFilesStore::new(&dir).list().is_empty());
+        assert_eq!(fs::read(&document).unwrap(), b"%PDF-1.7 original");
+        fs::remove_dir_all(dir).ok();
     }
 
     #[test]

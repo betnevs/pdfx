@@ -47,6 +47,7 @@ fn default_style() -> TextBoxStyleView {
         bold: false,
         italic: false,
         underline: false,
+        strikeout: false,
         color: "#000000".to_owned(),
         alignment: TextAlignment::Left,
     }
@@ -126,6 +127,7 @@ fn styled(font_family: &str, size: f32) -> TextBoxStyleView {
         bold: true,
         italic: true,
         underline: true,
+        strikeout: false,
         color: "#c0392b".to_owned(),
         alignment: TextAlignment::Right,
     }
@@ -136,16 +138,18 @@ fn flattened(text: &str) -> String {
 }
 
 #[test]
-fn font_registry_lists_base14_and_the_bundled_cjk_family_with_metadata() {
+fn font_registry_lists_base14_and_the_bundled_cjk_families_with_metadata() {
     let fonts = text_box_fonts();
-    assert_eq!(
-        fonts.len(),
-        13,
-        "three base-14 families with four variants each plus the bundled CJK font"
+    assert!(
+        fonts.len() >= 20,
+        "three base-14 families with four variants each plus the eight bundled CJK fonts"
     );
 
     for family in ["Helvetica", "Times", "Courier"] {
-        let variants: Vec<_> = fonts.iter().filter(|font| font.family == family).collect();
+        let variants: Vec<_> = fonts
+            .iter()
+            .filter(|font| font.source == "base14" && font.family == family)
+            .collect();
         assert_eq!(
             variants.len(),
             4,
@@ -172,26 +176,46 @@ fn font_registry_lists_base14_and_the_bundled_cjk_family_with_metadata() {
         assert!(!font.postscript_name.is_empty());
     }
 
-    // The bundled font advertises what the embedding pipeline can rely on:
-    // a real TrueType program under a freely embeddable licence with CJK
-    // coverage. It has one upright face; bold is synthesised from its weight
-    // axis and italic is refused.
+    // The bundled fonts advertise what the embedding pipeline can rely on:
+    // TrueType programs under freely embeddable OFL licences with CJK
+    // coverage. Each has one upright face; the Noto faces honour bold through
+    // their weight axis, the static faces keep their regular outlines, and
+    // italic is refused for all of them.
     let bundled: Vec<_> = fonts
         .iter()
         .filter(|font| font.source == "embedded")
         .collect();
-    assert_eq!(bundled.len(), 1);
-    let bundled = bundled[0];
-    assert_eq!(bundled.family, "Noto Sans SC");
-    assert_eq!(bundled.label, "Noto Sans SC");
-    assert_eq!(bundled.postscript_name, "NotoSansSC");
-    assert!(bundled.embedded && bundled.embeddable);
-    assert_eq!(bundled.coverage, "cjk");
-    assert!(!bundled.italic, "the bundled font has no italic face");
-    assert!(
-        !bundled.bold,
-        "the registry lists the upright face; bold is a style flag"
-    );
+    assert_eq!(bundled.len(), 8);
+    for font in &bundled {
+        assert!(font.embedded && font.embeddable);
+        assert_eq!(font.coverage, "cjk");
+        assert!(!font.italic, "the bundled fonts have no italic face");
+        assert!(
+            !font.bold,
+            "the registry lists upright faces; bold is a style flag"
+        );
+        assert!(!font.label.is_empty());
+    }
+    let noto_sans = bundled
+        .iter()
+        .find(|font| font.family == "Noto Sans SC")
+        .expect("Noto Sans SC is bundled");
+    assert_eq!(noto_sans.label, "思源黑体");
+    assert_eq!(noto_sans.postscript_name, "NotoSansSC");
+    for family in [
+        "Noto Serif SC",
+        "Zhuque Fangsong",
+        "LXGW WenKai",
+        "Smiley Sans",
+        "Ma Shan Zheng",
+        "ZCOOL XiaoWei",
+        "ZCOOL QingKe HuangYou",
+    ] {
+        assert!(
+            bundled.iter().any(|font| font.family == family),
+            "{family} must be offered by the Text Box font registry"
+        );
+    }
 
     assert!(fonts
         .iter()
@@ -202,6 +226,29 @@ fn font_registry_lists_base14_and_the_bundled_cjk_family_with_metadata() {
     assert!(fonts
         .iter()
         .any(|font| font.postscript_name == "Courier-Oblique"));
+
+    // Installed fonts (including WPS Office's) are read from this machine, so
+    // the list is machine-dependent. Every entry that is listed must be a
+    // subsettable TrueType program the resolver can use, and must not shadow
+    // a base-14 family.
+    let installed: Vec<_> = fonts
+        .iter()
+        .filter(|font| font.source == "system" || font.source == "wps")
+        .collect();
+    for font in &installed {
+        assert!(!font.embedded, "installed fonts are read from the machine");
+        assert!(font.embeddable);
+        assert_eq!(font.coverage, "system");
+        assert!(!font.label.is_empty());
+        assert!(!font.postscript_name.is_empty());
+        assert!(!font.family.starts_with('.'));
+    }
+    for family in ["Helvetica", "Times", "Courier"] {
+        assert!(
+            installed.iter().all(|font| font.family != family),
+            "{family} must stay the base-14 family"
+        );
+    }
 }
 
 #[test]
@@ -422,11 +469,13 @@ fn style_and_text_rejections_do_not_mutate_the_document() {
         error.message
     );
 
+    // A family that is neither bundled nor installed on this machine is
+    // refused with the list of families the editor can use.
     let error = apply_text_box_style(
         document_id.clone(),
         0,
         box_id,
-        styled("Comic Sans MS", 18.0),
+        styled("PDFX Missing Font", 18.0),
     )
     .expect_err("unknown font must be rejected");
     assert_eq!(error.code, CommandErrorCode::UnsupportedFont);
@@ -693,6 +742,7 @@ fn every_base14_variant_saves_with_its_real_font_name() {
             bold,
             italic,
             underline: false,
+            strikeout: false,
             color: "#112233".to_owned(),
             alignment: TextAlignment::Left,
         };
@@ -1036,7 +1086,8 @@ fn clicking_existing_text_selects_a_listed_box_with_its_original_geometry() {
 
 #[test]
 fn moving_existing_text_leaves_one_copy_and_does_not_reflow_the_page() {
-    let document_id = open_fixture("text");
+    let source = synthetic::independent_text_rows_pdf();
+    let document_id = open_synthetic(&source);
     let layer = extract_text_layer(document_id.clone(), 0).expect("text layer");
     let before_text = flattened(&layer.text);
     let before_origins: Vec<(f32, f32)> = ["Latin text", "The quick brown fox"]
@@ -1104,7 +1155,10 @@ fn moving_existing_text_leaves_one_copy_and_does_not_reflow_the_page() {
         moved_char.origin_x
     );
     assert!(
-        (moved_char.origin_y - (400.0 + 18.0 * 0.8)).abs() < 0.6,
+        (moved_char.origin_y
+            - (400.0 + layer.chars[char_index_of(&layer, "PDFX fixture")].origin_y - target.y))
+            .abs()
+            < 0.6,
         "moved baseline was {}",
         moved_char.origin_y
     );
@@ -1160,7 +1214,7 @@ fn moving_existing_text_leaves_one_copy_and_does_not_reflow_the_page() {
         reopened_char.origin_x
     );
     assert!(
-        (reopened_char.origin_y - (400.0 + 18.0 * 0.8)).abs() < 0.6,
+        (reopened_char.origin_y - moved_char.origin_y).abs() < 0.02,
         "saved baseline was {}",
         reopened_char.origin_y
     );
@@ -1344,6 +1398,7 @@ fn restyling_existing_text_updates_the_whole_box_and_saves_it() {
         bold: true,
         italic: false,
         underline: true,
+        strikeout: false,
         color: "#c0392b".to_owned(),
         alignment: TextAlignment::Left,
     };
@@ -1498,7 +1553,8 @@ fn undo_and_redo_existing_text_edits_reach_past_a_save() {
 
 #[test]
 fn text_boxes_lists_resolved_strings_in_stable_order_and_hides_deleted_ones() {
-    let document_id = open_fixture("text");
+    let source = synthetic::independent_text_rows_pdf();
+    let document_id = open_synthetic(&source);
     let layer = extract_text_layer(document_id.clone(), 0).expect("text layer");
     let third = text_edit_target(
         document_id.clone(),
@@ -1654,4 +1710,626 @@ fn moving_existing_text_on_a_rotated_page_keeps_its_orientation() {
 
     close_document(reopened).expect("close reopened");
     close_document(document_id).expect("close");
+}
+
+#[test]
+fn strikeout_is_visible_saved_and_undoable() {
+    let document_id = open_fixture("text");
+    let created = create_text_box(
+        document_id.clone(),
+        0,
+        create_request(72.0, 200.0, 300.0, 60.0),
+    )
+    .unwrap();
+    let box_id = created.target.box_id;
+    apply_text_edit(
+        document_id.clone(),
+        0,
+        box_id,
+        "Strikethrough verification".to_owned(),
+    )
+    .unwrap();
+    let before = render_page(document_id.clone(), 0, 1.0).unwrap().png_base64;
+    let mut style = default_style();
+    style.strikeout = true;
+    apply_text_box_style(document_id.clone(), 0, box_id, style).unwrap();
+    assert!(text_boxes(document_id.clone(), 0)
+        .unwrap()
+        .iter()
+        .any(|b| b.box_id == box_id && b.strikeout));
+    let after = render_page(document_id.clone(), 0, 1.0).unwrap().png_base64;
+    assert_ne!(before, after);
+    let bytes = save_document_bytes(&document_id).unwrap();
+    let saved = synthetic::pdf_bytes_file("strikeout-saved", bytes);
+    let reopened = open_synthetic(&saved);
+    assert_eq!(
+        render_page(reopened.clone(), 0, 1.0).unwrap().png_base64,
+        after
+    );
+    undo_text_edit(document_id.clone()).unwrap();
+    assert_eq!(
+        render_page(document_id.clone(), 0, 1.0).unwrap().png_base64,
+        before
+    );
+    close_document(document_id).unwrap();
+    close_document(reopened).unwrap();
+}
+
+#[test]
+fn drag_preview_reflows_with_real_fonts_without_changing_document_or_history() {
+    use pdfx_lib::text_edit::preview_text_box_transform;
+    let id = open_fixture("text");
+    let layer = extract_text_layer(id.clone(), 0).unwrap();
+    let target = text_edit_target(id.clone(), 0, char_index_of(&layer, "PDFX") as u32).unwrap();
+    let before = render_page(id.clone(), 0, 1.0).unwrap().png_base64;
+    let history = edit_history(id.clone()).unwrap();
+    let request = TextBoxTransformRequest {
+        x: target.x + 40.0,
+        y: target.y + 30.0,
+        width: 65.0,
+        height: target.font_size * 1.2,
+        rotation: target.rotation,
+        auto_height: true,
+    };
+    let preview =
+        preview_text_box_transform(id.clone(), 0, target.box_id, request.clone(), 1.0).unwrap();
+    assert_ne!(preview.image.png_base64, before);
+    assert_eq!(preview.target.font_family, target.font_family);
+    assert_eq!(preview.target.font_size, target.font_size);
+    assert!(preview.target.height > target.height);
+    assert_eq!(render_page(id.clone(), 0, 1.0).unwrap().png_base64, before);
+    assert_eq!(edit_history(id.clone()).unwrap(), history);
+    let committed = transform_text_box(id.clone(), 0, target.box_id, request.clone()).unwrap();
+    assert_eq!(
+        render_pixels(&id, 0, 1.0).rgba,
+        decode_png(&preview.image.png_base64).rgba
+    );
+    undo_text_edit(id.clone()).unwrap();
+    let undo_history = edit_history(id.clone()).unwrap();
+    preview_text_box_transform(id.clone(), 0, target.box_id, request, 1.0).unwrap();
+    assert_eq!(edit_history(id.clone()).unwrap(), undo_history);
+    redo_text_edit(id.clone()).unwrap();
+    assert_eq!(
+        text_boxes(id.clone(), 0).unwrap()[0].width,
+        committed.target.width
+    );
+    let saved = synthetic::pdf_bytes_file("drag-preview-reflow", save_document_bytes(&id).unwrap());
+    let reopened = open_synthetic(&saved);
+    assert_eq!(
+        render_pixels(&reopened, 0, 1.0).rgba,
+        decode_png(&preview.image.png_base64).rgba
+    );
+    close_document(id).unwrap();
+    close_document(reopened).unwrap();
+}
+
+#[test]
+fn resizing_original_cjk_and_embedded_text_preserves_font_and_reverses_wrapping() {
+    for pdf in [
+        synthetic::cjk_fangsong_pdf(),
+        synthetic::embedded_true_type_pdf(),
+    ] {
+        let id = open_synthetic(&pdf);
+        let target = text_edit_target(id.clone(), 0, 0).unwrap();
+        let narrow = transform_text_box(
+            id.clone(),
+            0,
+            target.box_id,
+            TextBoxTransformRequest {
+                x: target.x,
+                y: target.y,
+                width: 40.0,
+                height: target.font_size * 1.2,
+                rotation: target.rotation,
+                auto_height: true,
+            },
+        )
+        .unwrap()
+        .target;
+        assert_eq!(narrow.font_family, target.font_family);
+        assert_eq!(narrow.font_size, target.font_size);
+        assert!(narrow.height > target.font_size * 1.2);
+        let wide = transform_text_box(
+            id.clone(),
+            0,
+            target.box_id,
+            TextBoxTransformRequest {
+                x: target.x,
+                y: target.y,
+                width: 400.0,
+                height: target.font_size * 1.2,
+                rotation: target.rotation,
+                auto_height: true,
+            },
+        )
+        .unwrap()
+        .target;
+        assert_eq!(wide.font_family, target.font_family);
+        assert_eq!(wide.font_size, target.font_size);
+        assert!(wide.height < narrow.height);
+        let text = extract_text(id.clone(), 0)
+            .unwrap()
+            .text
+            .replace(['\r', '\n'], "");
+        assert!(text.contains(&target.text));
+        let pixels = render_page(id.clone(), 0, 1.0).unwrap().png_base64;
+        let saved =
+            synthetic::pdf_bytes_file("resized-original-font", save_document_bytes(&id).unwrap());
+        let reopened = open_synthetic(&saved);
+        assert_eq!(
+            render_page(reopened.clone(), 0, 1.0).unwrap().png_base64,
+            pixels
+        );
+        close_document(id).unwrap();
+        close_document(reopened).unwrap();
+    }
+}
+
+#[test]
+fn resized_cjk_phone_stays_inside_the_requested_line_width() {
+    let pdf = synthetic::cjk_phone_pdf();
+    let id = open_synthetic(&pdf);
+    let target = text_edit_target(id.clone(), 0, 0).unwrap();
+    let narrow = transform_text_box(
+        id.clone(),
+        0,
+        target.box_id,
+        TextBoxTransformRequest {
+            x: target.x,
+            y: target.y,
+            width: 74.0,
+            height: target.font_size * 1.2,
+            rotation: 0.0,
+            auto_height: true,
+        },
+    )
+    .unwrap()
+    .target;
+    let layer = extract_text_layer(id.clone(), 0).unwrap();
+    for c in layer.chars.iter().filter(|c| !c.generated && c.width > 0.0) {
+        assert!(
+            c.x + c.width <= narrow.x + narrow.width + 1.0,
+            "{} extends to {}, frame ends at {}",
+            c.text,
+            c.x + c.width,
+            narrow.x + narrow.width
+        );
+    }
+    close_document(id).unwrap();
+}
+
+#[test]
+fn reopened_wrapped_original_text_can_be_selected_and_widened_as_one_box() {
+    let pdf = synthetic::cjk_phone_pdf();
+    let id = open_synthetic(&pdf);
+    let original = text_edit_target(id.clone(), 0, 0).unwrap();
+    transform_text_box(
+        id.clone(),
+        0,
+        original.box_id,
+        TextBoxTransformRequest {
+            x: original.x,
+            y: original.y,
+            width: 74.0,
+            height: original.font_size * 1.2,
+            rotation: 0.0,
+            auto_height: true,
+        },
+    )
+    .unwrap();
+    let saved =
+        synthetic::pdf_bytes_file("reopen-wrapped-phone", save_document_bytes(&id).unwrap());
+    let reopened = open_synthetic(&saved);
+    let selected = text_edit_target(reopened.clone(), 0, 0).unwrap();
+    assert_eq!(selected.text, "测试号码-0000");
+    let wide = transform_text_box(
+        reopened.clone(),
+        0,
+        selected.box_id,
+        TextBoxTransformRequest {
+            x: selected.x,
+            y: selected.y,
+            width: 400.0,
+            height: selected.font_size * 1.2,
+            rotation: 0.0,
+            auto_height: true,
+        },
+    )
+    .unwrap()
+    .target;
+    assert!(wide.height < selected.height);
+    let text = extract_text(reopened.clone(), 0).unwrap().text;
+    assert_eq!(text.matches("测试号码").count(), 1);
+    close_document(id).unwrap();
+    close_document(reopened).unwrap();
+}
+
+#[test]
+fn adjacent_paragraph_lines_share_a_selection_but_table_rows_do_not() {
+    let id = open_fixture("text");
+    let layer = extract_text_layer(id.clone(), 0).unwrap();
+    let first = text_edit_target(id.clone(), 0, 0).unwrap();
+    let second =
+        text_edit_target(id.clone(), 0, char_index_of(&layer, "Latin text") as u32).unwrap();
+    assert_eq!(first.box_id, second.box_id);
+    assert!(first.text.contains("PDFX fixture"));
+    assert!(first.text.contains("Latin text"));
+    assert!(!edit_history(id.clone()).unwrap().dirty);
+    close_document(id).unwrap();
+    let pdf = synthetic::independent_text_rows_pdf();
+    let id = open_synthetic(&pdf);
+    let layer = extract_text_layer(id.clone(), 0).unwrap();
+    let first = text_edit_target(id.clone(), 0, 0).unwrap();
+    let second =
+        text_edit_target(id.clone(), 0, char_index_of(&layer, "Latin text") as u32).unwrap();
+    assert_ne!(first.box_id, second.box_id);
+    close_document(id).unwrap();
+}
+
+#[test]
+fn moving_a_selected_paragraph_preserves_every_glyph_baseline_and_exact_undo() {
+    let id = open_fixture("text");
+    let before = extract_text_layer(id.clone(), 0).unwrap();
+    let original_pixels = render_page(id.clone(), 0, 1.0).unwrap().png_base64;
+    let target = text_edit_target(id.clone(), 0, 0).unwrap();
+    transform_text_box(
+        id.clone(),
+        0,
+        target.box_id,
+        TextBoxTransformRequest {
+            x: target.x + 35.0,
+            y: target.y + 70.0,
+            width: target.width,
+            height: target.height,
+            rotation: target.rotation,
+            auto_height: target.auto_height,
+        },
+    )
+    .unwrap();
+    let moved = extract_text_layer(id.clone(), 0).unwrap();
+    assert_eq!(moved.text, before.text);
+    assert_eq!(moved.chars.len(), before.chars.len());
+    for (old, new) in before
+        .chars
+        .iter()
+        .zip(moved.chars.iter())
+        .filter(|(old, _)| !old.generated)
+    {
+        assert!((new.origin_x - old.origin_x - 35.0).abs() < 0.02);
+        assert!((new.origin_y - old.origin_y - 70.0).abs() < 0.02);
+        assert_eq!(new.font_size, old.font_size);
+    }
+    let moved_pixels = render_page(id.clone(), 0, 1.0).unwrap().png_base64;
+    undo_text_edit(id.clone()).unwrap();
+    assert_eq!(
+        render_page(id.clone(), 0, 1.0).unwrap().png_base64,
+        original_pixels
+    );
+    redo_text_edit(id.clone()).unwrap();
+    assert_eq!(
+        render_page(id.clone(), 0, 1.0).unwrap().png_base64,
+        moved_pixels
+    );
+    close_document(id).unwrap();
+}
+
+#[test]
+fn vertical_frame_resize_keeps_paragraph_layout_and_never_clips_its_text() {
+    let id = open_fixture("text");
+    let target = text_edit_target(id.clone(), 0, 0).unwrap();
+    let before = render_page(id.clone(), 0, 1.0).unwrap().png_base64;
+    let tall = transform_text_box(
+        id.clone(),
+        0,
+        target.box_id,
+        TextBoxTransformRequest {
+            x: target.x,
+            y: target.y,
+            width: target.width,
+            height: 250.0,
+            auto_height: true,
+            rotation: 0.0,
+        },
+    )
+    .unwrap()
+    .target;
+    assert_eq!(tall.height, 250.0);
+    assert_eq!(render_page(id.clone(), 0, 1.0).unwrap().png_base64, before);
+    let short = transform_text_box(
+        id.clone(),
+        0,
+        target.box_id,
+        TextBoxTransformRequest {
+            x: target.x,
+            y: target.y,
+            width: target.width,
+            height: 4.0,
+            auto_height: true,
+            rotation: 0.0,
+        },
+    )
+    .unwrap()
+    .target;
+    assert!(short.height > 4.0);
+    assert!(short.height < 250.0);
+    assert_eq!(render_page(id.clone(), 0, 1.0).unwrap().png_base64, before);
+    close_document(id).unwrap();
+}
+
+#[test]
+fn paragraph_width_reflow_preserves_original_line_spacing() {
+    let id = open_fixture("text");
+    let target = text_edit_target(id.clone(), 0, 0).unwrap();
+    assert_eq!(target.line_height, Some(28.0));
+    let resized = transform_text_box(
+        id.clone(),
+        0,
+        target.box_id,
+        TextBoxTransformRequest {
+            x: target.x,
+            y: target.y,
+            width: 200.0,
+            height: target.font_size * 1.2,
+            rotation: 0.0,
+            auto_height: true,
+        },
+    )
+    .unwrap()
+    .target;
+    assert_eq!(resized.font_size, target.font_size);
+    assert_eq!(resized.line_height, Some(28.0));
+    let layer = extract_text_layer(id.clone(), 0).unwrap();
+    let mut rows: Vec<_> = layer
+        .chars
+        .iter()
+        .filter(|c| !c.generated && c.width > 0.0)
+        .map(|c| (c.origin_y * 100.0).round() as i32)
+        .collect();
+    rows.sort();
+    rows.dedup();
+    assert!(rows.len() > 3);
+    assert!(rows
+        .windows(2)
+        .all(|pair| (pair[1] - pair[0] - 2800).abs() <= 2));
+    close_document(id).unwrap();
+}
+
+#[test]
+fn line_ending_hyphens_survive_real_save_reopen_and_a_second_edit() {
+    use pdfx_lib::save::{save_document_with_progress, SaveDocumentRequest};
+    let pdf = synthetic::cjk_phone_pdf();
+    let id = open_synthetic(&pdf);
+    let target = text_edit_target(id.clone(), 0, 0).unwrap();
+    transform_text_box(
+        id.clone(),
+        0,
+        target.box_id,
+        TextBoxTransformRequest {
+            x: target.x,
+            y: target.y,
+            width: 90.0,
+            height: target.font_size * 1.2,
+            rotation: 0.0,
+            auto_height: true,
+        },
+    )
+    .unwrap();
+    let dir = support::temp::TempDir::new("line-end-hyphen");
+    let path = dir.path().join("saved.pdf");
+    save_document_with_progress(
+        &id,
+        SaveDocumentRequest {
+            save_as_path: Some(path.to_string_lossy().into_owned()),
+            confirm_unencrypted_output: false,
+            confirm_signature_invalidation: false,
+            password: None,
+        },
+        &mut |_| {},
+    )
+    .unwrap();
+    let reopened = open_document(path.to_string_lossy().into_owned(), None)
+        .unwrap()
+        .document_id;
+    let layer = extract_text_layer(reopened.clone(), 0).unwrap();
+    assert!(
+        !layer.text.contains('\u{2}'),
+        "internal hyphen marker leaked: {:?}",
+        layer.text
+    );
+    let box_view = text_edit_target(reopened.clone(), 0, 0).unwrap();
+    assert_eq!(box_view.text.trim_end(), "测试号码-0000");
+    transform_text_box(
+        reopened.clone(),
+        0,
+        box_view.box_id,
+        TextBoxTransformRequest {
+            x: box_view.x,
+            y: box_view.y,
+            width: 400.0,
+            height: box_view.font_size * 1.2,
+            rotation: 0.0,
+            auto_height: true,
+        },
+    )
+    .unwrap();
+    assert!(extract_text(reopened.clone(), 0)
+        .unwrap()
+        .text
+        .contains("测试号码-0000"));
+    close_document(id).unwrap();
+    close_document(reopened).unwrap();
+}
+
+#[test]
+fn per_glyph_wrapped_lines_select_as_one_content_box() {
+    let pdf = synthetic::glyph_by_glyph_wrapped_phone_pdf();
+    let id = open_synthetic(&pdf);
+    let layer = extract_text_layer(id.clone(), 0).unwrap();
+    let first = text_edit_target(id.clone(), 0, 0).unwrap();
+    assert_eq!(first.text.trim_end(), "Phone-0000");
+    let next = text_edit_target(id.clone(), 0, char_index_of(&layer, "0000") as u32).unwrap();
+    assert_eq!(first.box_id, next.box_id);
+    close_document(id).unwrap();
+    let id = open_synthetic(&pdf);
+    let layer = extract_text_layer(id.clone(), 0).unwrap();
+    let from_second =
+        text_edit_target(id.clone(), 0, char_index_of(&layer, "0000") as u32).unwrap();
+    assert_eq!(from_second.text.trim_end(), "Phone-0000");
+    close_document(id).unwrap();
+}
+
+#[test]
+fn appending_text_to_a_resized_original_box_grows_its_frame() {
+    let pdf = synthetic::embedded_true_type_pdf();
+    let id = open_synthetic(&pdf);
+    let original = text_edit_target(id.clone(), 0, 0).unwrap();
+    let resized = transform_text_box(
+        id.clone(),
+        0,
+        original.box_id,
+        TextBoxTransformRequest {
+            x: original.x,
+            y: original.y,
+            width: 100.0,
+            height: original.font_size * 1.2,
+            auto_height: true,
+            rotation: 0.0,
+        },
+    )
+    .unwrap()
+    .target;
+    apply_text_edit(
+        id.clone(),
+        0,
+        resized.box_id,
+        format!("{} 哈哈哈哈哈哈哈哈哈哈哈哈", resized.text),
+    )
+    .unwrap();
+    let current = text_boxes(id.clone(), 0)
+        .unwrap()
+        .into_iter()
+        .find(|b| b.box_id == resized.box_id)
+        .unwrap();
+    let layer = extract_text_layer(id.clone(), 0).unwrap();
+    let bottom = layer
+        .chars
+        .iter()
+        .filter(|c| !c.generated && c.width > 0.0)
+        .map(|c| c.y + c.height)
+        .fold(0.0, f32::max);
+    assert!(
+        current.height > resized.height,
+        "frame did not grow: {} -> {}",
+        resized.height,
+        current.height
+    );
+    assert!(
+        current.y + current.height + 2.0 >= bottom,
+        "new characters are outside the editable frame"
+    );
+    close_document(id).unwrap();
+}
+
+#[test]
+fn cached_move_pixels_match_native_translation_and_do_not_mutate_history_or_save() {
+    use pdfx_lib::text_edit::prepare_text_box_move_preview;
+    let source = synthetic::embedded_true_type_pdf();
+    let id = open_synthetic(&source);
+    let target = text_edit_target(id.clone(), 0, 0).unwrap();
+    let before = render_pixels(&id, 0, 2.0);
+    let history = edit_history(id.clone()).unwrap();
+    let saved_before = save_document_bytes(&id).unwrap();
+    let prepared = prepare_text_box_move_preview(id.clone(), 0, target.box_id, 2.0)
+        .unwrap()
+        .expect("ordinary text uses cached pixels");
+    assert_eq!(render_pixels(&id, 0, 2.0).rgba, before.rgba);
+    assert_eq!(edit_history(id.clone()).unwrap(), history);
+    // PDFium may regenerate trailer IDs on each serialization. Page objects,
+    // font streams and content streams must stay byte-for-byte identical.
+    let after_save = lopdf::Document::load_mem(&save_document_bytes(&id).unwrap()).unwrap();
+    let before_save = lopdf::Document::load_mem(&saved_before).unwrap();
+    assert!(
+        after_save.objects == before_save.objects,
+        "capture changed saved PDF objects"
+    );
+    let foreground = decode_png(&prepared.foreground.png_base64);
+    let mut background = decode_png(&prepared.background.png_base64);
+    assert!(foreground.rgba.chunks_exact(4).any(|p| p[3] == 0));
+    assert!(foreground.rgba.chunks_exact(4).any(|p| p[3] > 0));
+    let (dx, dy) = (24u32, 16u32);
+    for y in 0..foreground.height {
+        for x in 0..foreground.width {
+            let src = ((y * foreground.width + x) * 4) as usize;
+            let dest = (((y + prepared.foreground.y + dy) * background.width
+                + x
+                + prepared.foreground.x
+                + dx)
+                * 4) as usize;
+            let alpha = u32::from(foreground.rgba[src + 3]);
+            for c in 0..3 {
+                background.rgba[dest + c] = ((u32::from(foreground.rgba[src + c]) * alpha
+                    + u32::from(background.rgba[dest + c]) * (255 - alpha)
+                    + 127)
+                    / 255) as u8;
+            }
+        }
+    }
+    transform_text_box(
+        id.clone(),
+        0,
+        target.box_id,
+        TextBoxTransformRequest {
+            x: target.x + dx as f32 / 2.0,
+            y: target.y + dy as f32 / 2.0,
+            width: target.width,
+            height: target.height,
+            rotation: target.rotation,
+            auto_height: target.auto_height,
+        },
+    )
+    .unwrap();
+    let moved = render_pixels(&id, 0, 2.0);
+    let max_difference = moved
+        .rgba
+        .iter()
+        .zip(&background.rgba)
+        .map(|(a, b)| (i16::from(*a) - i16::from(*b)).abs())
+        .max()
+        .unwrap();
+    assert!(
+        max_difference <= 4,
+        "sprite/native pixels differ by {max_difference}"
+    );
+    undo_text_edit(id.clone()).unwrap();
+    let before_redo = edit_history(id.clone()).unwrap();
+    prepare_text_box_move_preview(id.clone(), 0, target.box_id, 2.0).unwrap();
+    assert_eq!(edit_history(id.clone()).unwrap(), before_redo);
+    redo_text_edit(id.clone()).unwrap();
+    assert_eq!(render_pixels(&id, 0, 2.0).rgba, moved.rgba);
+    close_document(id).unwrap();
+}
+
+#[test]
+fn cached_move_falls_back_when_other_content_occludes_the_text() {
+    use pdfx_lib::text_edit::prepare_text_box_move_preview;
+    let source = synthetic::embedded_true_type_pdf();
+    let mut pdf = lopdf::Document::load(source.path_string()).unwrap();
+    let stream = pdf.get_object_mut((7, 0)).unwrap().as_stream_mut().unwrap();
+    let mut content = stream.content.clone();
+    content.extend_from_slice(b"q 1 0 0 rg 100 710 100 30 re f Q\n");
+    stream.set_content(content);
+    let mut bytes = Vec::new();
+    pdf.save_to(&mut bytes).unwrap();
+    let source = synthetic::pdf_bytes_file("occluded-drag", bytes);
+    let id = open_synthetic(&source);
+    let target = text_edit_target(id.clone(), 0, 0).unwrap();
+    let before = render_pixels(&id, 0, 2.0);
+    assert!(
+        prepare_text_box_move_preview(id.clone(), 0, target.box_id, 2.0)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(render_pixels(&id, 0, 2.0).rgba, before.rgba);
+    assert!(!edit_history(id.clone()).unwrap().dirty);
+    close_document(id).unwrap();
 }

@@ -1,12 +1,33 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import type {
+  KeyboardEvent as ReactKeyboardEvent,
+  PointerEvent as ReactPointerEvent,
+} from "react";
 
-import { DocumentAccess } from "./components/DocumentAccess";
+import { DocumentNotices, DocumentSaveControls } from "./components/DocumentAccess";
 import { AnnotationPanel } from "./components/AnnotationPanel";
 import { AttachmentPanel, attachmentErrorMessage } from "./components/AttachmentPanel";
 import { LayerPanel } from "./components/LayerPanel";
 import { StampPanel } from "./components/StampPanel";
 import { WatermarkPanel } from "./components/WatermarkPanel";
-import { DocumentToolbar, PageSurface, ThumbnailRail } from "./components/PageViewer";
+import {
+  DocumentToolbar,
+  PageOperationsPanel,
+  PageSurface,
+  ThumbnailRail,
+} from "./components/PageViewer";
+import { DocumentNavigation, type NavigationTab } from "./components/DocumentNavigation";
+import { TextStylePlaceholder } from "./components/TextStylePlaceholder";
+import { ContinuousPages } from "./components/ContinuousPages";
+import { WorkspaceIcon, type WorkspaceIconName } from "./components/WorkspaceIcon";
+import {
+  EditorToolsProvider,
+  ToolActionChip,
+  ToolChips,
+  ToolPanelHost,
+  useEditorTools,
+  type ToolGroup,
+} from "./components/ToolShelf";
 import {
   PrintExport,
   type PrintExportHandle,
@@ -55,6 +76,7 @@ import {
   type PageOperationView,
   type StampKind,
 } from "./lib/backend";
+import { flushPendingEdits, hasPendingEdits, hasDirtyPendingEdits } from "./lib/pendingEdits";
 import { scaleToPercent } from "./lib/pageGeometry";
 import { notifyDocumentChanged } from "./lib/documentEvents";
 import { isEditableTarget, isWindowsPlatform } from "./lib/keyboard";
@@ -110,6 +132,184 @@ type PageDialogState =
     };
 
 const WRONG_PASSWORD_MESSAGE = "密码不正确，请重试。";
+
+/**
+ * Inspectors available beside the page. Each one owns the right-hand panel;
+ * the page overlay tools themselves stay active regardless of the selection.
+ */
+type WorkspacePanel =
+  | "annotate"
+  | "stamp"
+  | "watermark"
+  | "attachments"
+  | "layers"
+  | "pages"
+  | "export";
+
+const WORKSPACE_PANELS: ReadonlyArray<{
+  id: WorkspacePanel;
+  label: string;
+}> = [
+  { id: "annotate", label: "注释" },
+  { id: "stamp", label: "图章" },
+  { id: "watermark", label: "水印" },
+  { id: "attachments", label: "附件" },
+  { id: "layers", label: "图层" },
+  { id: "pages", label: "页面" },
+  { id: "export", label: "导出" },
+];
+
+/** The five edit-mode tool tabs, mirroring the reference editor. */
+type EditorTab = "annotate" | "shapes" | "insert" | "text" | "forms";
+
+const EDITOR_TABS: ReadonlyArray<{
+  id: EditorTab;
+  label: string;
+  icon: WorkspaceIconName;
+}> = [
+  { id: "annotate", label: "注释", icon: "comment" },
+  { id: "shapes", label: "形状", icon: "shape" },
+  { id: "insert", label: "插入", icon: "insert" },
+  { id: "text", label: "编辑文本", icon: "textEdit" },
+  { id: "forms", label: "表单", icon: "form" },
+];
+
+const TAB_GROUPS: Record<EditorTab, ToolGroup> = {
+  annotate: "annotate",
+  shapes: "shapes",
+  insert: "insert",
+  text: "text",
+  forms: "forms",
+};
+
+/** PDFX-only inspectors live in the overflow menu, not the tool tabs. */
+const OVERFLOW_PANELS = WORKSPACE_PANELS.filter(
+  (panel) => panel.id !== "annotate",
+);
+
+/**
+ * A chrome button that owns no page tool but must disarm whatever tool is
+ * active before it acts (opening a panel, panning, switching context).
+ */
+function EditorChromeButton({
+  label,
+  icon,
+  pressed,
+  disabled = false,
+  onClick,
+  className = "",
+  disarm = true,
+}: {
+  label: string;
+  icon: WorkspaceIconName;
+  pressed?: boolean;
+  disabled?: boolean;
+  onClick: () => void;
+  className?: string;
+  disarm?: boolean;
+}) {
+  const tools = useEditorTools();
+  return (
+    <button
+      type="button"
+      className={`icon-button ${className}`.trim()}
+      aria-label={label}
+      title={label}
+      aria-pressed={pressed}
+      disabled={disabled}
+      onClick={async () => {
+        if (disarm && hasPendingEdits() && !(await flushPendingEdits())) return;
+        if (disarm) tools?.closeActive();
+        onClick();
+      }}
+    >
+      <WorkspaceIcon name={icon} />
+    </button>
+  );
+}
+
+function EditorIdleTextPanel({show}: {show:boolean}) {
+  const tools = useEditorTools();
+  if (!show || tools?.activeKey) return null;
+  return <div className="inspector-default"><h2>文本样式</h2><TextStylePlaceholder /></div>;
+}
+
+function EditorRailActions({canUndo, canRedo, onUndo, onRedo}: {canUndo:boolean;canRedo:boolean;onUndo:()=>void;onRedo:()=>void}) {
+  const tools = useEditorTools();
+  return <div className="rail-history">
+    <button type="button" aria-label="样式" title="样式" aria-pressed={tools?.showProperties} onClick={tools?.toggleProperties}><WorkspaceIcon name="palette" /></button>
+    <span className="toolbar-divider" />
+    <button type="button" aria-label="撤销" title="撤销" disabled={!canUndo} onClick={onUndo}><WorkspaceIcon name="undo" /></button>
+    <button type="button" aria-label="重做" title="重做" disabled={!canRedo} onClick={onRedo}><WorkspaceIcon name="redo" /></button>
+  </div>;
+}
+
+function OverflowMenu({
+  active,
+  onSelect,
+}: {
+  active: WorkspacePanel;
+  onSelect: (panel: WorkspacePanel) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const tools = useEditorTools();
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setOpen(false);
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [open]);
+
+  return (
+    <div className="overflow-menu">
+      <button
+        type="button"
+        className="icon-button"
+        aria-label="更多工具"
+        title="更多工具"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen((current) => !current)}
+      >
+        <WorkspaceIcon name="more" />
+      </button>
+      {open && (
+        <>
+          <button
+            type="button"
+            className="menu-scrim"
+            aria-label="关闭菜单"
+            onClick={() => setOpen(false)}
+          />
+          <div className="overflow-menu-list" role="menu" aria-label="更多工具">
+            {OVERFLOW_PANELS.map((panel) => (
+              <button
+                key={panel.id}
+                type="button"
+                role="menuitem"
+                aria-current={active === panel.id ? "true" : undefined}
+                onClick={() => {
+                  tools?.closeActive();
+                  onSelect(panel.id);
+                  setOpen(false);
+                }}
+              >
+                {panel.label}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
 
 /** Basenames the same way the backend names a Document. */
 function fileName(path: string): string {
@@ -209,7 +409,7 @@ export function App() {
   }, []);
 
   const openDocumentView = editor.status === "open" ? editor.document : null;
-  const viewer = useDocumentViewer(openDocumentView, handleViewerError);
+  const viewer = useDocumentViewer(openDocumentView, handleViewerError, true);
   const viewerRef = useRef(viewer);
   viewerRef.current = viewer;
 
@@ -219,6 +419,21 @@ export function App() {
   const [selectedAnnotation, setSelectedAnnotation] =
     useState<AnnotationView | null>(null);
   const [armedStamp, setArmedStamp] = useState<StampKind | null>(null);
+  const [activePanel, setActivePanel] = useState<WorkspacePanel>("annotate");
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [navigationTab, setNavigationTab] = useState<NavigationTab>("thumbnails");
+  const [thumbnailSize, setThumbnailSize] = useState(144);
+  const [editorTab, setEditorTab] = useState<EditorTab>("text");
+  const [panMode, setPanMode] = useState(false);
+  const panDrag = useRef<{
+    pointerId: number;
+    startX: number;
+    startY: number;
+    left: number;
+    top: number;
+  } | null>(null);
+  const toolGroup: ToolGroup =
+    TAB_GROUPS[editorTab];
 
   // A list refresh can remove the selected annotation (delete, undo). Drop the
   // outline with it; the panel clears its property controls the same way.
@@ -235,19 +450,66 @@ export function App() {
   useEffect(() => {
     setSelectedAnnotation(null);
     setArmedStamp(null);
+    setActivePanel("annotate");
+    setSidebarOpen(true);
+    setEditorTab("text");
+    setPanMode(false);
   }, [openDocumentView?.documentId]);
 
   function selectAnnotation(annotation: AnnotationView | null) {
     setSelectedAnnotation(annotation);
     setArmedStamp(null);
     if (annotation) {
+      setEditorTab("annotate");
+      setActivePanel("annotate");
       viewer.goToPage(annotation.pageIndex);
     }
   }
 
+
+
+  function handlePanPointerDown(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!panMode || event.button !== 0) {
+      return;
+    }
+    const viewport = viewer.viewportRef.current;
+    if (!viewport) {
+      return;
+    }
+    panDrag.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      left: viewport.scrollLeft,
+      top: viewport.scrollTop,
+    };
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+  }
+
+  function handlePanPointerMove(event: ReactPointerEvent<HTMLDivElement>) {
+    const drag = panDrag.current;
+    const viewport = viewer.viewportRef.current;
+    if (!drag || drag.pointerId !== event.pointerId || !viewport) {
+      return;
+    }
+    viewport.scrollLeft = drag.left - (event.clientX - drag.startX);
+    viewport.scrollTop = drag.top - (event.clientY - drag.startY);
+  }
+
+  function handlePanPointerUp(event: ReactPointerEvent<HTMLDivElement>) {
+    if (panDrag.current?.pointerId === event.pointerId) {
+      panDrag.current = null;
+      event.currentTarget.releasePointerCapture?.(event.pointerId);
+    }
+  }
+
   function handleStampPlaced(annotation: AnnotationView) {
+    setEditorTab("annotate");
     setArmedStamp(null);
     setSelectedAnnotation(annotation);
+    // The placed stamp becomes the selected annotation, whose property
+    // controls live in the 注释 inspector tab.
+    setActivePanel("annotate");
   }
 
   // Required-field validation navigates to the page of the first empty widget
@@ -561,6 +823,7 @@ export function App() {
     }
     historyActionInFlightRef.current = true;
     try {
+      if (hasPendingEdits(documentId) && !(await flushPendingEdits(documentId))) return;
       const step =
         kind === "undo"
           ? await undoTextEdit(documentId)
@@ -743,7 +1006,7 @@ export function App() {
       if (closingRef.current || closePromptRef.current) {
         return;
       }
-      if (history && !history.dirty) {
+      if (history && !history.dirty && !hasDirtyPendingEdits(documentId)) {
         await closeWindow();
         return;
       }
@@ -1071,6 +1334,31 @@ export function App() {
   }, []);
 
   const open = editor.status === "open" ? editor : null;
+  const handleEditorTabKeyDown = (
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+    id: EditorTab,
+  ) => {
+    const index = EDITOR_TABS.findIndex((tab) => tab.id === id);
+    let nextIndex: number | null = null;
+    if (event.key === "ArrowRight") {
+      nextIndex = (index + 1) % EDITOR_TABS.length;
+    } else if (event.key === "ArrowLeft") {
+      nextIndex = (index - 1 + EDITOR_TABS.length) % EDITOR_TABS.length;
+    } else if (event.key === "Home") {
+      nextIndex = 0;
+    } else if (event.key === "End") {
+      nextIndex = EDITOR_TABS.length - 1;
+    }
+    if (nextIndex === null) {
+      return;
+    }
+    event.preventDefault();
+    setEditorTab(EDITOR_TABS[nextIndex].id);
+    const tablist = event.currentTarget.closest('[role="tablist"]');
+    tablist
+      ?.querySelectorAll<HTMLButtonElement>('[role="tab"]')
+      [nextIndex]?.focus();
+  };
 
   return (
     <div className="app-shell">
@@ -1081,38 +1369,46 @@ export function App() {
           </span>
           <h1>PDFX</h1>
         </div>
+        {open && (
+          <div className="document-chip" title={open.document.path}>
+            <WorkspaceIcon name="page" className="document-chip-icon" />
+            <span className="document-name">{open.document.name}</span>
+            {save.dirty && (
+              <span className="dirty-indicator" title="有未保存的更改">
+                未保存
+              </span>
+            )}
+            {open.document.recovered && (
+              <span
+                className="recovered-indicator"
+                title="此文档从恢复文件打开，原文件未被修改。"
+              >
+                已恢复
+              </span>
+            )}
+          </div>
+        )}
         <div className="header-actions">
-          {open && (
-            <span className="document-name" title={open.document.path}>
-              {open.document.name}
-            </span>
-          )}
-          {open && save.dirty && (
-            <span className="dirty-indicator" title="有未保存的更改">
-              未保存
-            </span>
-          )}
-          {open?.document.recovered && (
-            <span
-              className="recovered-indicator"
-              title="此文档从恢复文件打开，原文件未被修改。"
-            >
-              已恢复
-            </span>
-          )}
-          <span className="app-mode">本地 PDF 编辑器</span>
           <button
             type="button"
-            className="secondary-button"
+            className="header-button header-button--ghost"
+            onClick={promptOpen}
+          >
+            打开 PDF…
+          </button>
+          <button
+            type="button"
+            className="icon-button"
+            aria-label="设置"
+            title="设置"
             onClick={() => setSettingsOpen(true)}
           >
-            设置
-          </button>
-          <button type="button" className="open-button" onClick={promptOpen}>
-            打开 PDF…
+            <WorkspaceIcon name="settings" />
           </button>
         </div>
       </header>
+
+      {open && <DocumentNotices document={open.document} save={save} />}
 
       {notice && (
         <div className="app-notice" role="alert">
@@ -1234,13 +1530,21 @@ export function App() {
             </button>
             {recent.files.length > 0 && (
               <div className="recent-files">
-                <h3>最近文件</h3>
+                <div className="recent-files-heading">
+                  <h3>最近文件</h3>
+                  <button type="button" className="recent-file-remove" disabled={recent.busy}
+                    onClick={recent.clear} title="仅清空打开记录，不删除 PDF 文件">
+                    全部清空
+                  </button>
+                </div>
+                {recent.error && <p role="alert">{recent.error}</p>}
                 <ul>
                   {recent.files.map((file) => (
                     <li key={file.path}>
                       <button
                         type="button"
                         className="recent-file"
+                        disabled={recent.busy}
                         aria-label={`打开 ${file.name}`}
                         title={file.path}
                         onClick={() => {
@@ -1251,6 +1555,11 @@ export function App() {
                       >
                         <span className="recent-file-name">{file.name}</span>
                         <span className="recent-file-path">{file.path}</span>
+                      </button>
+                      <button type="button" className="recent-file-remove" disabled={recent.busy}
+                        aria-label={`移除 ${file.name} 的记录`} title="从最近文件移除，不删除 PDF 文件"
+                        onClick={() => recent.forget(file.path)}>
+                        移除
                       </button>
                     </li>
                   ))}
@@ -1288,151 +1597,353 @@ export function App() {
 
         {open && (
           <section className="document-view" aria-label="文档视图">
-            <DocumentToolbar
-              pageIndex={viewer.pageIndex}
-              pageCount={open.document.pageCount}
-              scale={viewer.scale}
-              zoomMode={viewer.zoomMode}
-              fullscreen={viewer.fullscreen}
-              onSelectPage={viewer.goToPage}
-              onZoomTo={viewer.zoomTo}
-              onZoomIn={() => viewer.zoomBy(ZOOM_STEP)}
-              onZoomOut={() => viewer.zoomBy(1 / ZOOM_STEP)}
-              onFit={viewer.fit}
-              onActualSize={viewer.actualSize}
-              onToggleFullscreen={viewer.toggleFullscreen}
-              canModifyPages={canModifyPages}
-              pageOperationDisabledReason={pageOperationDisabledReason}
-              onRotatePage={rotateCurrentPage}
-              onCopyPage={copyCurrentPage}
-              onDeletePage={openDeletePageDialog}
-              onInsertPage={openInsertBlankPageDialog}
-            />
-            <PrintExport
-              ref={printExportRef}
-              document={open.document}
-              pageIndex={viewer.pageIndex}
-            />
-            <DocumentAccess document={open.document} save={save} />
-            <div className="document-body">
-              <ThumbnailRail
-                documentId={open.document.documentId}
-                pageCount={open.document.pageCount}
-                currentPageIndex={viewer.pageIndex}
-                onSelectPage={viewer.goToPage}
-                canReorder={canModifyPages}
-                onMovePage={moveThumbnailPage}
-              />
-              <div
-                ref={viewer.viewportRef}
-                className="page-stage"
-                role="region"
-                aria-label="页面视口"
-                tabIndex={0}
-                onScroll={viewer.handleScroll}
-                onKeyDown={viewer.handleViewportKeyDown}
-              >
-                <div className="page-stage-inner">
-                  <PageSurface
-                    documentId={open.document.documentId}
-                    pageIndex={viewer.pageIndex}
-                    info={viewer.info}
-                    scale={viewer.scale}
-                    render={viewer.render}
-                    readOnly={open.document.readOnly}
-                    canAnnotate={open.document.permissions.canAnnotate}
-                    annotations={annotations.annotations}
-                    selectedAnnotation={selectedAnnotation}
-                    armedStamp={armedStamp}
-                    onSelectAnnotation={selectAnnotation}
-                    onStampPlaced={handleStampPlaced}
-                    onArmedStampChange={setArmedStamp}
-                    onAnnotationsChanged={() => void annotations.reload()}
-                    surfaceRef={viewer.surfaceRef}
-                    canFillForms={
-                      open.document.permissions.canFillForms &&
-                      !open.document.readOnly
-                    }
-                    canModifyContent={
-                      open.document.permissions.canModifyContent &&
-                      !open.document.readOnly
-                    }
-                    formFocusFieldId={formFocusFieldId}
-                    onFormFocusHandled={handleFormFocusHandled}
-                    onSelectPage={viewer.goToPage}
-                    onFormFocusField={setFormFocusFieldId}
-                    links={links.links}
-                    onLinksChanged={() => void links.reload()}
-                    pageCount={open.document.pageCount}
+            <EditorToolsProvider
+              group={toolGroup}
+              onToolActive={() => setPanMode(false)}
+            >
+            <div className="editor-bar">
+              <div className="editor-mode-label" aria-label="编辑模式"><WorkspaceIcon name="textEdit" /><span>编辑</span></div>
+                  <div className="editor-bar-actions editor-bar-actions--leading">
+                    <EditorChromeButton
+                      label="左侧面板"
+                      disarm={false}
+                      icon="panelLeft"
+                      pressed={sidebarOpen}
+                      onClick={() => setSidebarOpen((current) => !current)}
+                    />
+                    <EditorChromeButton
+                      label={panMode ? "退出拖动" : "拖动页面"}
+                      icon="hand"
+                      pressed={panMode}
+                      onClick={() => setPanMode((current) => !current)}
+                    />
+                  </div>
+                  <div
+                    className="editor-tabs"
+                    role="tablist"
+                    aria-label="编辑工具"
+                  >
+                    {EDITOR_TABS.map((tab) => (
+                      <button
+                        key={tab.id}
+                        type="button"
+                        role="tab"
+                        id={`editor-tab-${tab.id}`}
+                        className="editor-tab"
+                        aria-selected={editorTab === tab.id}
+                        aria-controls={`editor-tab-panel-${tab.id}`}
+                        tabIndex={editorTab === tab.id ? 0 : -1}
+                        onClick={async () => { if (hasPendingEdits() && !(await flushPendingEdits())) return; setEditorTab(tab.id); setActivePanel(tab.id === "insert" ? "stamp" : "annotate"); setPanMode(false); }}
+                        onKeyDown={(event) =>
+                          handleEditorTabKeyDown(event, tab.id)
+                        }
+                      >
+                        <WorkspaceIcon name={tab.icon} />
+                        <span>{tab.label}</span>
+                      </button>
+                    ))}
+                  </div>
+
+              <div className="editor-bar-spacer" />
+
+              <div className="editor-bar-actions">
+                <EditorChromeButton
+                  label="注释列表"
+                  icon="comment"
+                  pressed={activePanel === "annotate"}
+                  onClick={() => { setEditorTab("annotate"); setActivePanel("annotate"); }}
+                />
+                <OverflowMenu
+                  active={activePanel}
+                  onSelect={(panel) => setActivePanel(panel)}
+                />
+                <button
+                  type="button"
+                  className="icon-button"
+                  aria-label={viewer.fullscreen ? "退出全屏" : "全屏"}
+                  title={viewer.fullscreen ? "退出全屏" : "全屏"}
+                  onClick={viewer.toggleFullscreen}
+                >
+                  <WorkspaceIcon
+                    name={viewer.fullscreen ? "exitFullscreen" : "fullscreen"}
                   />
-                </div>
-              </div>
-              <div className="annotation-column">
-                <StampPanel
-                  armed={armedStamp}
-                  canAnnotate={open.document.permissions.canAnnotate}
-                  readOnly={open.document.readOnly}
-                  onPick={setArmedStamp}
-                />
-                <AttachmentPanel
-                  documentId={open.document.documentId}
-                  attachments={attachments.attachments}
-                  loading={attachments.status === "loading"}
-                  error={
-                    attachments.error
-                      ? attachmentErrorMessage(attachments.error.code)
-                      : null
-                  }
-                  canModify={
-                    open.document.permissions.canModifyContent &&
-                    !open.document.readOnly
-                  }
-                  readOnly={open.document.readOnly}
-                  onHistory={(history) => save.acceptHistory(history)}
-                  onChanged={() => void attachments.reload()}
-                />
-                <WatermarkPanel
-                  documentId={open.document.documentId}
-                  pageIndex={viewer.pageIndex}
-                  readOnly={open.document.readOnly}
-                  canModifyContent={open.document.permissions.canModifyContent}
-                  onHistory={(history) => save.acceptHistory(history)}
-                  onApplied={handleWatermarkApplied}
-                />
-                <LayerPanel
-                  documentId={open.document.documentId}
-                  canModifyContent={open.document.permissions.canModifyContent}
-                  readOnly={open.document.readOnly}
-                  onHistory={(history) => save.acceptHistory(history)}
-                  onChanged={handleLayerChanged}
-                />
-                <AnnotationPanel
-                  documentId={open.document.documentId}
-                  annotations={annotations.annotations}
-                  selectedName={selectedAnnotation?.name ?? null}
-                  loading={annotations.status === "loading"}
-                  error={annotations.error?.message ?? null}
-                  canAnnotate={open.document.permissions.canAnnotate}
-                  readOnly={open.document.readOnly}
-                  onSelect={selectAnnotation}
-                  onChanged={() => void annotations.reload()}
-                />
+                </button>
               </div>
             </div>
+
+            {(
+              <div
+                className="tool-rail"
+                id={`editor-tab-panel-${editorTab}`}
+                role="group"
+                aria-label={`${
+                  EDITOR_TABS.find((tab) => tab.id === editorTab)?.label ?? ""
+                }工具`}
+              >
+                <ToolChips className="tool-rail-tools" label="编辑工具" />
+                {editorTab !== "text" && <EditorRailActions canUndo={save.canUndo && !save.busy} canRedo={save.canRedo && !save.busy} onUndo={() => void runHistoryAction("undo")} onRedo={() => void runHistoryAction("redo")} />}
+                {editorTab === "insert" && (
+                  <>
+                    <ToolActionChip
+                      group="insert"
+                      label="橡皮图章"
+                      icon="stamp"
+                      order={1}
+                      onClick={() => setActivePanel("stamp")}
+                    />
+                    <ToolActionChip
+                      group="insert"
+                      label="文件附件"
+                      icon="attachment"
+                      order={3}
+                      onClick={() => setActivePanel("attachments")}
+                    />
+                  </>
+                )}
+              </div>
+            )}
+
+            <div className={`document-body${sidebarOpen ? "" : " document-body--sidebar-hidden"}`}>
+              <aside className="thumbnail-sidebar" aria-label="页面缩略图侧栏">
+                <div className="sidebar-navigation" role="toolbar" aria-label="页面导航">
+                  <button type="button" aria-label="缩略图" aria-pressed={navigationTab === "thumbnails"} title="缩略图" onClick={() => setNavigationTab("thumbnails")}><WorkspaceIcon name="pages" /></button>
+                  <button type="button" aria-label="大纲" aria-pressed={navigationTab === "outline"} title="大纲" onClick={() => setNavigationTab("outline")}><WorkspaceIcon name="list" /></button>
+                  <button type="button" aria-label="书签" aria-pressed={navigationTab === "bookmarks"} title="书签" onClick={() => setNavigationTab("bookmarks")}><WorkspaceIcon name="bookmark" /></button>
+                  <button type="button" aria-label="页面操作" title="页面操作" onClick={() => setActivePanel("pages")}><WorkspaceIcon name="more" /></button>
+                </div>
+                <div className="thumbnail-navigation" hidden={navigationTab !== "thumbnails"}>
+                <div className="thumbnail-size-control">
+                  <button type="button" aria-label="缩小缩略图" onClick={() => setThumbnailSize(s => Math.max(96, s - 24))}><WorkspaceIcon name="minus" /></button>
+                  <input type="range" min="96" max="216" step="12" value={thumbnailSize} aria-label="缩略图大小" onChange={e => setThumbnailSize(Number(e.target.value))} />
+                  <button type="button" aria-label="放大缩略图" onClick={() => setThumbnailSize(s => Math.min(216, s + 24))}><WorkspaceIcon name="plus" /></button>
+                </div>
+                <ThumbnailRail
+                  thumbnailSize={thumbnailSize}
+                  documentId={open.document.documentId}
+                  pageCount={open.document.pageCount}
+                  currentPageIndex={viewer.pageIndex}
+                  onSelectPage={viewer.goToPage}
+                  canReorder={canModifyPages}
+                  onMovePage={moveThumbnailPage}
+                />
+                </div>
+                {navigationTab !== "thumbnails" && <DocumentNavigation key={open.document.documentId} document={open.document} tab={navigationTab} pageIndex={viewer.pageIndex} onSelectPage={viewer.goToPage} />}
+              </aside>
+              <div className="page-area">
+                <div
+                  ref={viewer.viewportRef}
+                  className={`page-stage${panMode ? " page-stage--pan" : ""}`}
+                  role="region"
+                  aria-label="页面视口"
+                  tabIndex={0}
+                  onScroll={viewer.handleScroll}
+                  onKeyDown={viewer.handleViewportKeyDown}
+                  onPointerDown={handlePanPointerDown}
+                  onPointerMove={handlePanPointerMove}
+                  onPointerUp={handlePanPointerUp}
+                  onPointerCancel={handlePanPointerUp}
+                >
+                    <div className="page-stage-inner">
+                    <ContinuousPages document={open.document} viewer={viewer}>
+                      <PageSurface
+                        documentId={open.document.documentId}
+                        pageIndex={viewer.pageIndex}
+                        info={viewer.info}
+                        scale={viewer.scale}
+                        render={viewer.render}
+                        readOnly={open.document.readOnly}
+                        canAnnotate={open.document.permissions.canAnnotate}
+                        annotations={annotations.annotations}
+                        selectedAnnotation={selectedAnnotation}
+                        armedStamp={armedStamp}
+                        onSelectAnnotation={selectAnnotation}
+                        onStampPlaced={handleStampPlaced}
+                        onArmedStampChange={setArmedStamp}
+                        onAnnotationsChanged={() => void annotations.reload()}
+                        surfaceRef={viewer.surfaceRef}
+                        canFillForms={
+                          open.document.permissions.canFillForms &&
+                          !open.document.readOnly
+                        }
+                        canModifyContent={
+                          open.document.permissions.canModifyContent &&
+                          !open.document.readOnly
+                        }
+                        formFocusFieldId={formFocusFieldId}
+                        onFormFocusHandled={handleFormFocusHandled}
+                        onSelectPage={viewer.goToPage}
+                        onFormFocusField={setFormFocusFieldId}
+                        links={links.links}
+                        onLinksChanged={() => void links.reload()}
+                        pageCount={open.document.pageCount}
+                      />
+                    </ContinuousPages>
+                    </div>
+                  </div>
+                  <div className="floating-bar">
+                    <DocumentToolbar
+                      pageIndex={viewer.pageIndex}
+                      pageCount={open.document.pageCount}
+                      scale={viewer.scale}
+                      zoomMode={viewer.zoomMode}
+                      onSelectPage={viewer.goToPage}
+                      onZoomTo={viewer.zoomTo}
+                      onZoomIn={() => viewer.zoomBy(ZOOM_STEP)}
+                      onZoomOut={() => viewer.zoomBy(1 / ZOOM_STEP)}
+                      onFit={viewer.fit}
+                      onActualSize={viewer.actualSize}
+                      onSearch={() => {setSidebarOpen(true);setNavigationTab("search");}}
+                    />
+                  </div>
+              </div>
+              <aside className="inspector" aria-label="工具面板">
+                <ToolPanelHost />
+                <EditorIdleTextPanel show={activePanel === "annotate" && editorTab === "text"} />
+
+                <div className="inspector-body">
+                  <div
+                    className="inspector-panel"
+                    role="tabpanel"
+                    id="workspace-panel-annotate"
+                    aria-labelledby="workspace-tab-annotate"
+                    hidden={activePanel !== "annotate" || editorTab === "text"}
+                  >
+                    <AnnotationPanel
+                      documentId={open.document.documentId}
+                      annotations={annotations.annotations}
+                      selectedName={selectedAnnotation?.name ?? null}
+                      loading={annotations.status === "loading"}
+                      error={annotations.error?.message ?? null}
+                      canAnnotate={open.document.permissions.canAnnotate}
+                      readOnly={open.document.readOnly}
+                      onSelect={selectAnnotation}
+                      onChanged={() => void annotations.reload()}
+                    />
+                  </div>
+                  <div
+                    className="inspector-panel"
+                    role="tabpanel"
+                    id="workspace-panel-stamp"
+                    aria-labelledby="workspace-tab-stamp"
+                    hidden={activePanel !== "stamp"}
+                  >
+                    <StampPanel
+                      armed={armedStamp}
+                      canAnnotate={open.document.permissions.canAnnotate}
+                      readOnly={open.document.readOnly}
+                      onPick={setArmedStamp}
+                    />
+                  </div>
+                  <div
+                    className="inspector-panel"
+                    role="tabpanel"
+                    id="workspace-panel-watermark"
+                    aria-labelledby="workspace-tab-watermark"
+                    hidden={activePanel !== "watermark"}
+                  >
+                    <WatermarkPanel
+                      documentId={open.document.documentId}
+                      pageIndex={viewer.pageIndex}
+                      readOnly={open.document.readOnly}
+                      canModifyContent={
+                        open.document.permissions.canModifyContent
+                      }
+                      onHistory={(history) => save.acceptHistory(history)}
+                      onApplied={handleWatermarkApplied}
+                    />
+                  </div>
+                  <div
+                    className="inspector-panel"
+                    role="tabpanel"
+                    id="workspace-panel-attachments"
+                    aria-labelledby="workspace-tab-attachments"
+                    hidden={activePanel !== "attachments"}
+                  >
+                    <AttachmentPanel
+                      documentId={open.document.documentId}
+                      attachments={attachments.attachments}
+                      loading={attachments.status === "loading"}
+                      error={
+                        attachments.error
+                          ? attachmentErrorMessage(attachments.error.code)
+                          : null
+                      }
+                      canModify={
+                        open.document.permissions.canModifyContent &&
+                        !open.document.readOnly
+                      }
+                      readOnly={open.document.readOnly}
+                      onHistory={(history) => save.acceptHistory(history)}
+                      onChanged={() => void attachments.reload()}
+                    />
+                  </div>
+                  <div
+                    className="inspector-panel"
+                    role="tabpanel"
+                    id="workspace-panel-layers"
+                    aria-labelledby="workspace-tab-layers"
+                    hidden={activePanel !== "layers"}
+                  >
+                    <LayerPanel
+                      documentId={open.document.documentId}
+                      canModifyContent={
+                        open.document.permissions.canModifyContent
+                      }
+                      readOnly={open.document.readOnly}
+                      onHistory={(history) => save.acceptHistory(history)}
+                      onChanged={handleLayerChanged}
+                    />
+                  </div>
+                  <div
+                    className="inspector-panel"
+                    role="tabpanel"
+                    id="workspace-panel-pages"
+                    aria-labelledby="workspace-tab-pages"
+                    hidden={activePanel !== "pages"}
+                  >
+                    <PageOperationsPanel
+                      pageCount={open.document.pageCount}
+                      canModifyPages={canModifyPages}
+                      pageOperationDisabledReason={pageOperationDisabledReason}
+                      onRotatePage={rotateCurrentPage}
+                      onCopyPage={copyCurrentPage}
+                      onDeletePage={openDeletePageDialog}
+                      onInsertPage={openInsertBlankPageDialog}
+                    />
+                  </div>
+                  <div
+                    className="inspector-panel"
+                    role="tabpanel"
+                    id="workspace-panel-export"
+                    aria-labelledby="workspace-tab-export"
+                    hidden={activePanel !== "export"}
+                  >
+                    <PrintExport
+                      ref={printExportRef}
+                      document={open.document}
+                      pageIndex={viewer.pageIndex}
+                    />
+                  </div>
+                </div>
+                <div className="inspector-history" hidden={editorTab !== "text"} role="group" aria-label="编辑历史">
+                  <button type="button" aria-label="撤销" title="撤销" disabled={!save.canUndo || save.busy} onClick={() => void runHistoryAction("undo")}><WorkspaceIcon name="undo" /></button>
+                  <button type="button" aria-label="重做" title="重做" disabled={!save.canRedo || save.busy} onClick={() => void runHistoryAction("redo")}><WorkspaceIcon name="redo" /></button>
+                </div>
+                <div className="save-dock"><DocumentSaveControls document={open.document} save={save} /></div>
+              </aside>
+            </div>
+            </EditorToolsProvider>
+            <span className="visually-hidden">
+              第 {viewer.pageIndex + 1} / {open.document.pageCount} 页 ·{" "}
+              {scaleToPercent(viewer.scale)}%
+            </span>
           </section>
         )}
       </main>
 
-      <footer className="status-bar">
-        <span role="status">{statusText(appInfo)}</span>
-        {open && (
-          <span className="document-status">
-            第 {viewer.pageIndex + 1} / {open.document.pageCount} 页 ·{" "}
-            {scaleToPercent(viewer.scale)}%
-          </span>
-        )}
-        <span>离线 · 无遥测</span>
-      </footer>
+      <span className="visually-hidden" role="status">
+        {statusText(appInfo)}
+      </span>
 
       <SettingsPanel
         open={settingsOpen}

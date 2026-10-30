@@ -14,6 +14,7 @@ pub mod line_edit;
 pub mod links;
 pub mod logging;
 mod menu;
+pub mod navigation;
 pub mod page_ops;
 pub mod pdfium_adapter;
 pub mod print_export;
@@ -23,8 +24,10 @@ pub mod settings;
 pub mod signature;
 mod stamp_glyphs;
 pub mod stamps;
+mod system_fonts;
 mod target_path;
 pub mod text_edit;
+pub mod text_move_preview;
 pub mod updater;
 pub mod watermark;
 
@@ -64,6 +67,7 @@ pub fn run() {
             commands::render_thumbnail,
             commands::render_page_region,
             commands::page_info,
+            navigation::document_outline,
             commands::extract_text,
             commands::extract_text_layer,
             commands::close_document,
@@ -82,6 +86,7 @@ pub fn run() {
             page_ops::insert_blank_page,
             page_ops::copy_page,
             text_edit::text_edit_target,
+            text_edit::text_box_editor_fonts,
             text_edit::apply_text_edit,
             text_edit::delete_text_box,
             text_edit::text_box_fonts,
@@ -90,6 +95,8 @@ pub fn run() {
             text_edit::apply_text_box_style,
             text_edit::apply_text_box_selection_style,
             text_edit::transform_text_box,
+            text_edit::preview_text_box_transform,
+            text_edit::prepare_text_box_move_preview,
             text_edit::edit_history,
             text_edit::undo_text_edit,
             text_edit::redo_text_edit,
@@ -149,6 +156,7 @@ pub fn run() {
             commands::discard_recovery,
             commands::list_recent_files,
             commands::forget_recent_file,
+            commands::clear_recent_files,
             commands::get_settings,
             commands::update_settings,
             commands::export_diagnostics,

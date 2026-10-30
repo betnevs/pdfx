@@ -15,7 +15,16 @@
       "vendor/pdfium/bin/pdfium.dll": "pdfium.dll",
       "vendor/pdfium/LICENSE": "pdfium-licenses/LICENSE",
       "vendor/pdfium/licenses/": "pdfium-licenses/",
-      "../docs/install-windows.md": "INSTALL-windows.md"
+      "../docs/install-windows.md": "INSTALL-windows.md",
+      "fonts/SOURCE.txt": "font-licenses/SOURCE.txt",
+      "fonts/NotoSansSC-OFL.txt": "font-licenses/NotoSansSC-OFL.txt",
+      "fonts/NotoSerifSC-OFL.txt": "font-licenses/NotoSerifSC-OFL.txt",
+      "fonts/ZhuqueFangsong-OFL.txt": "font-licenses/ZhuqueFangsong-OFL.txt",
+      "fonts/LXGWWenKai-OFL.txt": "font-licenses/LXGWWenKai-OFL.txt",
+      "fonts/SmileySans-OFL.txt": "font-licenses/SmileySans-OFL.txt",
+      "fonts/MaShanZheng-OFL.txt": "font-licenses/MaShanZheng-OFL.txt",
+      "fonts/ZCOOLXiaoWei-OFL.txt": "font-licenses/ZCOOLXiaoWei-OFL.txt",
+      "fonts/ZCOOLQingKeHuangYou-OFL.txt": "font-licenses/ZCOOLQingKeHuangYou-OFL.txt"
     },
     "windows": {
       "webviewInstallMode": {

@@ -12,7 +12,7 @@ import {
 } from "../lib/backend";
 import { notifyDocumentChanged } from "../lib/documentEvents";
 import { hitTestEraser } from "../lib/eraserHitTest";
-
+import { ToolShelf } from "./ToolShelf";
 const DEFAULT_RADIUS = 8;
 const MIN_RADIUS = 2;
 const MAX_RADIUS = 60;
@@ -144,25 +144,33 @@ export function EraserLayer({
       className={`eraser-layer${active ? " eraser-layer--active" : ""}`}
       data-testid="eraser-layer"
     >
-      <div
-        className="eraser-toolbar"
-        role="toolbar"
-        aria-label="橡皮擦工具"
-        onPointerDown={(event) => event.stopPropagation()}
+      <ToolShelf
+        tools={[
+          {
+            id: "eraser",
+            label: "橡皮擦",
+            icon: "eraser",
+            groups: ["annotate", "shapes", "insert"],
+            active,
+            disabled: busy,
+            title:
+              "单击删除注释；单击墨迹只擦除该笔画，Shift+单击删除整条墨迹",
+            order: 100,
+            onActivate: () => {
+              setNotice(null);
+              setActive((current) => !current);
+            },
+          },
+        ]}
+        panelTitle="橡皮擦"
+        panelOpen={active}
       >
-        <span className="eraser-toolbar-title">橡皮擦</span>
-        <button
-          type="button"
-          aria-pressed={active}
-          disabled={busy}
-          title="单击删除注释；单击墨迹只擦除该笔画，Shift+单击删除整条墨迹"
-          onClick={() => {
-            setNotice(null);
-            setActive((current) => !current);
-          }}
+        <div
+          className="eraser-toolbar"
+          role="toolbar"
+          aria-label="橡皮擦工具"
+          onPointerDown={(event) => event.stopPropagation()}
         >
-          橡皮擦
-        </button>
         <label className="eraser-toolbar-control">
           半径
           <input
@@ -186,7 +194,8 @@ export function EraserLayer({
             单击墨迹擦除笔画，Shift+单击删除整条注释
           </span>
         )}
-      </div>
+        </div>
+      </ToolShelf>
 
       {active && (
         <div

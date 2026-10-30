@@ -50,3 +50,11 @@ src-tauri/vendor/downloads/
 # No trailing slash: setup-native.sh may create this as a symlink, which a
 # directory-only pattern would not match.
 src-tauri/vendor/pdfium
+
+# Local browser research, temporary QA app copies, and synthetic verification outputs
+.scratch/
+
+# Local release deliverables and protected user documents
+/release/
+/saved-documents/
+/.release-work/

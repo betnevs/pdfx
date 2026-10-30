@@ -276,6 +276,85 @@ export function buildTextLayer(chars: TextCharView[]): TextLayerStructure {
 }
 
 /**
+ * The text blocks clicking in Text Edit mode would open, as display-space
+ * rectangles. Blocks follow the backend's grouping: contiguous characters
+ * with the same baseline and font size, split where the horizontal gap is
+ * wider than a space (table cells, columns) and at line breaks.
+ *
+ * Rotated text advances along the display y axis, so each character fails
+ * the baseline test and gets its own block — matching the backend, which
+ * does not merge rotated objects.
+ */
+export function editableTextBlocks(chars: TextCharView[]): TextRect[] {
+
+  const blocks: TextRect[] = [];
+  let draft: {
+    left: number;
+    top: number;
+    right: number;
+    bottom: number;
+    baseline: number;
+    fontSize: number;
+  } | null = null;
+
+  const flush = () => {
+    if (!draft) {
+      return;
+    }
+    blocks.push({
+      x: draft.left,
+      y: draft.top,
+      width: draft.right - draft.left,
+      height: draft.bottom - draft.top,
+    });
+    draft = null;
+  };
+
+  for (const character of chars) {
+    if (character.generated) {
+      // Generated line-break characters end the line block; generated
+      // boundary spaces carry no geometry and can be skipped.
+      if (/[\r\n]/.test(character.text)) {
+        flush();
+      }
+      continue;
+    }
+    if (!hasBox(character)) {
+      continue;
+    }
+
+    const height = character.height;
+    const gap = draft ? character.x - draft.right : 0;
+    const continuesBlock =
+      draft !== null &&
+      Math.abs(character.originY - draft.baseline) <= 0.5 &&
+      Math.abs(character.fontSize - draft.fontSize) <= 0.05 &&
+      gap >= -0.25 * height &&
+      gap <= 0.75 * Math.max(height, draft.bottom - draft.top);
+
+    if (draft && continuesBlock) {
+      draft.right = Math.max(draft.right, character.x + character.width);
+      draft.top = Math.min(draft.top, character.y);
+      draft.bottom = Math.max(draft.bottom, character.y + character.height);
+      continue;
+    }
+
+    flush();
+    draft = {
+      left: character.x,
+      top: character.y,
+      right: character.x + character.width,
+      bottom: character.y + character.height,
+      baseline: character.originY,
+      fontSize: character.fontSize,
+    };
+  }
+  flush();
+
+  return blocks;
+}
+
+/**
  * Finds the character under a point, or the nearest one within `tolerance`
  * points. Generated line breaks and zero-sized boxes are never returned.
  */

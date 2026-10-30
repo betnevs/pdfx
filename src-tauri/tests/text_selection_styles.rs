@@ -39,6 +39,7 @@ fn base_style() -> TextBoxStyleView {
         bold: false,
         italic: false,
         underline: false,
+        strikeout: false,
         color: "#000000".to_owned(),
         alignment: TextAlignment::Left,
     }
@@ -51,6 +52,7 @@ fn selected_style() -> TextBoxStyleView {
         bold: true,
         italic: false,
         underline: true,
+        strikeout: false,
         color: "#c0392b".to_owned(),
         alignment: TextAlignment::Left,
     }
@@ -514,6 +516,7 @@ fn a_mixed_size_run_wraps_at_the_box_width_and_keeps_the_line_height_rule() {
             bold: false,
             italic: false,
             underline: false,
+            strikeout: false,
             color: "#c0392b".to_owned(),
             alignment: TextAlignment::Left,
         },
@@ -625,6 +628,7 @@ fn run_style(family: &str, size: f32, color: &str) -> TextBoxStyleView {
         bold: false,
         italic: false,
         underline: false,
+        strikeout: false,
         color: color.to_owned(),
         alignment: TextAlignment::Left,
     }
@@ -766,6 +770,7 @@ fn a_legacy_text_object_can_style_a_selection_without_moving_the_rest() {
         bold: false,
         italic: false,
         underline: true,
+        strikeout: false,
         color: "#c0392b".to_owned(),
         alignment: TextAlignment::Left,
     };

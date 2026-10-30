@@ -26,7 +26,9 @@ import {
   type FitMode,
 } from "../lib/pageGeometry";
 import type { PageRender, ZoomMode } from "../lib/useDocumentViewer";
+import { PathShapeLayer } from "./PathShapeLayer";
 import { EraserLayer } from "./EraserLayer";
+import { WorkspaceIcon } from "./WorkspaceIcon";
 import { FormLayer } from "./FormLayer";
 import { FreeTextLayer } from "./FreeTextLayer";
 import { LineLayer } from "./LineLayer";
@@ -51,9 +53,10 @@ function thumbnailRange(
   scrollTop: number,
   viewportHeight: number,
   pageCount: number,
+  itemHeight = THUMBNAIL_ITEM_HEIGHT,
 ): ThumbnailRange {
-  const first = Math.floor(scrollTop / THUMBNAIL_ITEM_HEIGHT);
-  const visible = Math.ceil(viewportHeight / THUMBNAIL_ITEM_HEIGHT);
+  const first = Math.floor(scrollTop / itemHeight);
+  const visible = Math.ceil(viewportHeight / itemHeight);
   return {
     start: Math.max(0, first - THUMBNAIL_OVERSCAN),
     end: Math.min(pageCount, first + visible + THUMBNAIL_OVERSCAN),
@@ -65,41 +68,25 @@ export function DocumentToolbar({
   pageCount,
   scale,
   zoomMode,
-  fullscreen,
   onSelectPage,
   onZoomTo,
   onZoomIn,
   onZoomOut,
   onFit,
   onActualSize,
-  onToggleFullscreen,
-  canModifyPages = false,
-  pageOperationDisabledReason = null,
-  onRotatePage,
-  onCopyPage,
-  onDeletePage,
-  onInsertPage,
+  onSearch,
 }: {
   pageIndex: number;
   pageCount: number;
   scale: number;
   zoomMode: ZoomMode;
-  fullscreen: boolean;
   onSelectPage: (index: number) => void;
   onZoomTo: (scale: number) => void;
   onZoomIn: () => void;
   onZoomOut: () => void;
   onFit: (mode: FitMode) => void;
   onActualSize: () => void;
-  onToggleFullscreen: () => void;
-  /** Permission Restrictions allow changing the page arrangement. */
-  canModifyPages?: boolean;
-  /** Chinese explanation shown while page operations are unavailable. */
-  pageOperationDisabledReason?: string | null;
-  onRotatePage?: (deltaDegrees: 90 | 180 | 270) => void;
-  onCopyPage?: () => void;
-  onDeletePage?: () => void;
-  onInsertPage?: () => void;
+  onSearch?: () => void;
 }) {
   const [pageDraft, setPageDraft] = useState(String(pageIndex + 1));
   const [zoomDraft, setZoomDraft] = useState(`${scaleToPercent(scale)}%`);
@@ -139,11 +126,13 @@ export function DocumentToolbar({
       <div className="page-nav" role="group" aria-label="翻页">
         <button
           type="button"
+          className="bar-icon"
           aria-label="上一页"
+          title="上一页"
           disabled={pageIndex <= 0}
           onClick={() => onSelectPage(pageIndex - 1)}
         >
-          上一页
+          <WorkspaceIcon name="chevronLeft" />
         </button>
         <input
           type="number"
@@ -164,69 +153,27 @@ export function DocumentToolbar({
         <span className="page-total">/ {pageCount}</span>
         <button
           type="button"
+          className="bar-icon"
           aria-label="下一页"
+          title="下一页"
           disabled={pageIndex >= pageCount - 1}
           onClick={() => onSelectPage(pageIndex + 1)}
         >
-          下一页
+          <WorkspaceIcon name="chevronRight" />
         </button>
       </div>
 
-      <div
-        className="page-ops"
-        role="group"
-        aria-label="页面操作"
-        title={pageOperationDisabledReason ?? undefined}
-      >
-        <button
-          type="button"
-          title="逆时针旋转 90°"
-          disabled={!canModifyPages}
-          onClick={() => onRotatePage?.(270)}
-        >
-          向左旋转
-        </button>
-        <button
-          type="button"
-          title="顺时针旋转 90°"
-          disabled={!canModifyPages}
-          onClick={() => onRotatePage?.(90)}
-        >
-          向右旋转
-        </button>
-        <button
-          type="button"
-          disabled={!canModifyPages}
-          onClick={() => onInsertPage?.()}
-        >
-          插入空白页…
-        </button>
-        <button
-          type="button"
-          title="复制当前页并插入到其后（可撤销）"
-          disabled={!canModifyPages}
-          onClick={() => onCopyPage?.()}
-        >
-          复制页面
-        </button>
-        <button
-          type="button"
-          disabled={!canModifyPages || pageCount <= 1}
-          title={
-            pageCount <= 1 ? "文档至少需要保留一页" : "删除当前页（可撤销）"
-          }
-          onClick={() => onDeletePage?.()}
-        >
-          删除页面
-        </button>
-        {pageOperationDisabledReason && (
-          <span className="page-ops-hint">{pageOperationDisabledReason}</span>
-        )}
-      </div>
+      <span className="bar-divider" aria-hidden="true" />
 
       <div className="zoom-controls" role="group" aria-label="缩放">
-        <button type="button" aria-label="缩小" onClick={onZoomOut}>
-          缩小
+        <button
+          type="button"
+          className="bar-icon"
+          aria-label="缩小"
+          title="缩小"
+          onClick={onZoomOut}
+        >
+          <WorkspaceIcon name="zoomOut" />
         </button>
         <input
           type="text"
@@ -243,33 +190,133 @@ export function DocumentToolbar({
             }
           }}
         />
-        <button type="button" aria-label="放大" onClick={onZoomIn}>
-          放大
-        </button>
-        <span className="toolbar-divider" aria-hidden="true" />
         <button
           type="button"
-          aria-pressed={zoomMode === "width"}
-          onClick={() => onFit("width")}
+          className="bar-icon"
+          aria-label="放大"
+          title="放大"
+          onClick={onZoomIn}
         >
-          适合宽度
-        </button>
-        <button
-          type="button"
-          aria-pressed={zoomMode === "page"}
-          onClick={() => onFit("page")}
-        >
-          适合页面
-        </button>
-        <button type="button" onClick={onActualSize}>
-          实际大小
-        </button>
-        <span className="toolbar-divider" aria-hidden="true" />
-        <button type="button" onClick={onToggleFullscreen}>
-          {fullscreen ? "退出全屏" : "全屏"}
+          <WorkspaceIcon name="zoomIn" />
         </button>
       </div>
+
+      <span className="bar-divider" aria-hidden="true" />
+
+      <button
+        type="button"
+        className="bar-icon"
+        aria-label="适合宽度"
+        title="适合宽度"
+        aria-pressed={zoomMode === "width"}
+        onClick={() => onFit("width")}
+      >
+        <WorkspaceIcon name="fitWidth" />
+      </button>
+      <button
+        type="button"
+        className="bar-icon"
+        aria-label="适合页面"
+        title="适合页面"
+        aria-pressed={zoomMode === "page"}
+        onClick={() => onFit("page")}
+      >
+        <WorkspaceIcon name="fitPage" />
+      </button>
+      <button
+        type="button"
+        className="bar-text"
+        aria-label="实际大小"
+        title="实际大小"
+        onClick={onActualSize}
+      >
+        1:1
+      </button>
+      {onSearch && <button type="button" className="bar-icon" aria-label="搜索" title="搜索" onClick={onSearch}><WorkspaceIcon name="search" /></button>}
     </div>
+  );
+}
+
+/**
+ * Page-arrangement actions for the current page. They live in the workspace
+ * inspector so the document toolbar stays a compact page/zoom control.
+ */
+export function PageOperationsPanel({
+  pageCount,
+  canModifyPages = false,
+  pageOperationDisabledReason = null,
+  onRotatePage,
+  onCopyPage,
+  onDeletePage,
+  onInsertPage,
+}: {
+  pageCount: number;
+  /** Permission Restrictions allow changing the page arrangement. */
+  canModifyPages?: boolean;
+  /** Chinese explanation shown while page operations are unavailable. */
+  pageOperationDisabledReason?: string | null;
+  onRotatePage?: (deltaDegrees: 90 | 180 | 270) => void;
+  onCopyPage?: () => void;
+  onDeletePage?: () => void;
+  onInsertPage?: () => void;
+}) {
+  return (
+    <section className="page-ops-panel" aria-label="页面操作">
+      <p className="panel-hint">对当前页执行以下操作，均可通过撤销恢复。</p>
+      <div className="panel-action-list" role="group" aria-label="页面操作">
+        <button
+          type="button"
+          className="panel-action"
+          disabled={!canModifyPages}
+          onClick={() => onRotatePage?.(270)}
+        >
+          <WorkspaceIcon name="rotateLeft" />
+          <span>向左旋转</span>
+        </button>
+        <button
+          type="button"
+          className="panel-action"
+          disabled={!canModifyPages}
+          onClick={() => onRotatePage?.(90)}
+        >
+          <WorkspaceIcon name="rotateRight" />
+          <span>向右旋转</span>
+        </button>
+        <button
+          type="button"
+          className="panel-action"
+          disabled={!canModifyPages}
+          onClick={() => onInsertPage?.()}
+        >
+          <span>插入空白页…</span>
+        </button>
+        <button
+          type="button"
+          className="panel-action"
+          title="复制当前页并插入到其后（可撤销）"
+          disabled={!canModifyPages}
+          onClick={() => onCopyPage?.()}
+        >
+          <span>复制页面</span>
+        </button>
+        <button
+          type="button"
+          className="panel-action panel-action--danger"
+          disabled={!canModifyPages || pageCount <= 1}
+          title={
+            pageCount <= 1 ? "文档至少需要保留一页" : "删除当前页（可撤销）"
+          }
+          onClick={() => onDeletePage?.()}
+        >
+          <span>删除页面</span>
+        </button>
+      </div>
+      {pageOperationDisabledReason && (
+        <p className="panel-hint panel-hint--warning">
+          {pageOperationDisabledReason}
+        </p>
+      )}
+    </section>
   );
 }
 
@@ -280,15 +327,18 @@ export function ThumbnailRail({
   onSelectPage,
   canReorder = false,
   onMovePage,
+  thumbnailSize,
 }: {
   documentId: string;
   pageCount: number;
   currentPageIndex: number;
   onSelectPage: (index: number) => void;
   /** Permission Restrictions allow changing the page arrangement. */
+  thumbnailSize?: number;
   canReorder?: boolean;
   onMovePage?: (fromIndex: number, toIndex: number) => void;
 }) {
+  const itemHeight = thumbnailSize === undefined ? THUMBNAIL_ITEM_HEIGHT : thumbnailSize + 76;
   const railRef = useRef<HTMLElement>(null);
   const cacheRef = useRef(new Map<number, PageImageView>());
   const pendingRef = useRef(new Set<number>());
@@ -377,8 +427,8 @@ export function ThumbnailRail({
     if (!rail || rail.clientHeight <= 0) {
       return;
     }
-    const top = currentPageIndex * THUMBNAIL_ITEM_HEIGHT;
-    const bottom = top + THUMBNAIL_ITEM_HEIGHT;
+    const top = currentPageIndex * itemHeight;
+    const bottom = top + itemHeight;
     if (top < rail.scrollTop) {
       rail.scrollTop = top;
     } else if (bottom > rail.scrollTop + rail.clientHeight) {
@@ -400,7 +450,7 @@ export function ThumbnailRail({
     }
   };
 
-  const range = thumbnailRange(scrollTop, viewportHeight, pageCount);
+  const range = thumbnailRange(scrollTop, viewportHeight, pageCount, itemHeight);
 
   useEffect(() => {
     for (let index = range.start; index < range.end; index += 1) {
@@ -410,7 +460,7 @@ export function ThumbnailRail({
       pendingRef.current.add(index);
       const generation = pageGenerationRef.current.get(index) ?? 0;
       const structureGeneration = structureGenerationRef.current;
-      renderThumbnail(documentId, index, THUMBNAIL_MAX_EDGE)
+      renderThumbnail(documentId, index, Math.max(THUMBNAIL_MAX_EDGE, thumbnailSize ?? 144))
         .then((image) => {
           if (
             !aliveRef.current ||
@@ -504,8 +554,8 @@ export function ThumbnailRail({
         title={canReorder ? "拖动以调整页面顺序" : undefined}
         draggable={canReorder}
         style={{
-          top: `${index * THUMBNAIL_ITEM_HEIGHT}px`,
-          height: `${THUMBNAIL_ITEM_HEIGHT - 8}px`,
+          top: `${index * itemHeight}px`,
+          height: `${itemHeight - 8}px`,
         }}
         onClick={() => onSelectPage(index)}
         onDragStart={(event) => handleDragStart(event, index)}
@@ -513,7 +563,7 @@ export function ThumbnailRail({
         onDrop={(event) => handleDrop(event, index)}
         onDragEnd={handleDragEnd}
       >
-        <span className="thumbnail-frame">
+        <span className="thumbnail-frame" style={{height:thumbnailSize, maxWidth:thumbnailSize}}>
           {image ? (
             <img
               src={`data:image/png;base64,${image.pngBase64}`}
@@ -538,7 +588,7 @@ export function ThumbnailRail({
     >
       <div
         className="thumbnail-track"
-        style={{ height: `${pageCount * THUMBNAIL_ITEM_HEIGHT}px` }}
+        style={{ height: `${pageCount * itemHeight}px` }}
       >
         {items}
       </div>
@@ -605,21 +655,28 @@ export function PageSurface({
   /** Number of pages an internal link may address. */
   pageCount?: number;
 }) {
+  const [paintVersion, pagePainted] = useReducer((version: number) => version + 1, 0);
   const pixel = info ? pagePixelSize(info, scale) : null;
-  const ready = pixel !== null && render.scale === scale;
+  const matchesPage = (view: PageImageView | PageRegionView) =>
+    view.documentId === documentId && view.pageIndex === pageIndex;
+  const image = render.image && matchesPage(render.image) ? render.image : null;
+  const regions = render.regions.filter(matchesPage);
+  const ready = pixel !== null && (image !== null || regions.length > 0);
+  // Old full-page images and tiles stay painted during zoom. A tile's own
+  // render scale, rather than the requested density, defines its coordinates.
 
   return (
     <div
       ref={surfaceRef}
       className="page-surface"
-      role="img"
+      role="region"
       aria-label={`第 ${pageIndex + 1} 页`}
       data-page-index={pageIndex}
       data-page-width={info?.width}
       data-page-height={info?.height}
       data-page-rotation={info?.rotation}
       data-render-mode={
-        ready ? (render.image ? "full" : "tiles") : "pending"
+        ready ? (render.scale !== scale ? "preview" : regions.length ? "tiles" : "full") : "pending"
       }
       style={
         pixel
@@ -627,30 +684,32 @@ export function PageSurface({
           : undefined
       }
     >
-      {ready && render.image && (
+      {ready && image && (
         <img
           className="page-image"
-          src={`data:image/png;base64,${render.image.pngBase64}`}
+          onLoad={pagePainted}
+          src={`data:image/png;base64,${image.pngBase64}`}
           alt=""
           draggable={false}
-          width={render.image.width}
-          height={render.image.height}
+          width={image.width}
+          height={image.height}
           style={{ width: "100%", height: "100%" }}
         />
       )}
       {ready &&
-        render.regions.map((region: PageRegionView) => (
+        regions.map((region: PageRegionView) => (
           <img
             key={`${region.x}:${region.y}:${region.width}:${region.height}`}
             className="page-region"
+            onLoad={pagePainted}
             src={`data:image/png;base64,${region.pngBase64}`}
             alt=""
             draggable={false}
             style={{
-              left: `${region.x}px`,
-              top: `${region.y}px`,
-              width: `${region.width}px`,
-              height: `${region.height}px`,
+              left: `${region.x * scale / region.scale}px`,
+              top: `${region.y * scale / region.scale}px`,
+              width: `${region.width * scale / region.scale}px`,
+              height: `${region.height * scale / region.scale}px`,
             }}
           />
         ))}
@@ -668,6 +727,7 @@ export function PageSurface({
         onSelectAnnotation={onSelectAnnotation}
         scale={scale}
         pageCount={pageCount}
+        paintVersion={paintVersion}
       />
       {info && (
         <>
@@ -696,6 +756,7 @@ export function PageSurface({
           />
         </>
       )}
+      {info && <PathShapeLayer documentId={documentId} pageIndex={pageIndex} pageWidth={info.width} pageHeight={info.height} enabled={canAnnotate && !readOnly} />}
       {info && (
         <ShapeLayer
           documentId={documentId}

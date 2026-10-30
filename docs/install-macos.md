@@ -48,6 +48,8 @@ macOS 26.4 起，系统会在检测到应用包含 Intel 组件时提示“对 I
 
 - `Contents/Frameworks/libpdfium.dylib`：PDFium 渲染引擎。arm64 构建中只有 arm64 切片，universal 构建中同时包含 arm64 与 x86_64。
 - `Contents/Resources/pdfium-licenses/`：PDFium 的 BSD-3-Clause 许可证及第三方许可证。
+- `Contents/Resources/font-licenses/`：八款内置字体的 SIL OFL 1.1 许可证与出处清单（含 SHA-256）。
+- PDFX 会自动读取本机已安装的字体，包括系统字体与 WPS Office 随版本提供的宋体、仿宋等，出现在“WPS 字体”与“本机字体”分组中；这些字体不随安装包分发，WPS Office 的专属字体只在安装了它的机器上出现。
 - 本说明也随应用位于 `Contents/Resources/INSTALL-macos.md`。
 
 ## 校验下载（可选）

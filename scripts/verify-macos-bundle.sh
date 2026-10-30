@@ -156,6 +156,17 @@ license_count="$(find "${LICENSE_DIR}" -type f | wc -l | tr -d ' ')"
   || fail "PDFium license tree looks incomplete (${license_count} file(s))"
 pass "PDFium LICENSE and license tree are bundled (${license_count} files)"
 
+FONT_LICENSE_DIR="${APP}/Contents/Resources/font-licenses"
+for FONT_LICENSE in \
+  NotoSansSC NotoSerifSC ZhuqueFangsong LXGWWenKai \
+  SmileySans MaShanZheng ZCOOLXiaoWei ZCOOLQingKeHuangYou; do
+  [ -f "${FONT_LICENSE_DIR}/${FONT_LICENSE}-OFL.txt" ] \
+    || fail "bundled font license is missing: font-licenses/${FONT_LICENSE}-OFL.txt"
+done
+[ -f "${FONT_LICENSE_DIR}/SOURCE.txt" ] \
+  || fail "bundled font provenance is missing: font-licenses/SOURCE.txt"
+pass "bundled OFL font licenses and provenance are present"
+
 INSTALL_NOTE="${APP}/Contents/Resources/INSTALL-macos.md"
 [ -f "${INSTALL_NOTE}" ] || fail "Gatekeeper install note is missing: ${INSTALL_NOTE}"
 grep -Fq 'xattr -dr com.apple.quarantine' "${INSTALL_NOTE}" \

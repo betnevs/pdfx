@@ -6,6 +6,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
+  type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
 
@@ -22,6 +23,7 @@ import {
   editHistory,
   extractTextLayer,
   redoTextEdit,
+  previewTextBoxTransform,
   textBoxFonts,
   textBoxes,
   textEditTarget,
@@ -42,8 +44,15 @@ import {
   type TextMarkupKind,
   type TextMarkupRect,
   type TextRangeView,
+  type TextBoxTransformPreview,
+  type TextBoxMovePreview,
 } from "../lib/backend";
-import { notifyDocumentChanged, onDocumentChanged } from "../lib/documentEvents";
+import {
+  notifyDocumentChanged,
+  onDocumentChanged,
+} from "../lib/documentEvents";
+import { useTextMovePreview } from "../lib/useTextMovePreview";
+import { useTextEditorFont } from "../lib/useTextEditorFont";
 import { linkErrorText } from "../lib/linkTarget";
 import {
   dragRect,
@@ -51,6 +60,10 @@ import {
   fitBoxToPage,
   moveBox,
   resizeBox,
+  resizeBoxFromDrag,
+  contentSelectionFrame,
+  RESIZE_HANDLES,
+  type ResizeHandle,
   rotationFromPointer,
   type BoxRect,
   type Point as BoxPoint,
@@ -58,7 +71,15 @@ import {
 import { TextBoxStylePanel } from "./TextBoxStylePanel";
 import { LinkTargetDialog } from "./LinkTargetDialog";
 import {
+  registerPendingEdit,
+  notifyPendingEditChanged,
+} from "../lib/pendingEdits";
+import { TextStylePlaceholder } from "./TextStylePlaceholder";
+import { ToolShelf, useEditorTools, type ToolShelfTool } from "./ToolShelf";
+import { WorkspaceIcon } from "./WorkspaceIcon";
+import {
   buildTextLayer,
+  editableTextBlocks,
   findCharAt,
   selectionForChar,
   selectionForDrag,
@@ -102,6 +123,7 @@ type BoxInteraction =
     }
   | {
       kind: "resize";
+      handle?: ResizeHandle;
       box: TextBoxTargetView;
       start: BoxPoint;
       current: BoxPoint;
@@ -139,7 +161,7 @@ function fontFallbackNotice(font: FontUsageView | null): Notice | null {
   }
   return {
     kind: "info",
-    text: `${font.originalFamily} 无法用于新文字，已改用 ${font.family}${font.reason ? `：${font.reason}` : ""}`,
+    text: `${font.originalFamily} 缺少部分新文字的字形，这些字已改用 ${font.family}`,
   };
 }
 
@@ -183,6 +205,8 @@ export interface PageTextLayerProps {
   scale?: number;
   /** Number of pages an internal link may address. */
   pageCount?: number;
+  /** Advances when the committed page bitmap has actually loaded. */
+  paintVersion?: number;
 }
 
 function TextEditToolbar({
@@ -197,7 +221,6 @@ function TextEditToolbar({
   inkLineWidth,
   readOnly,
   busy,
-  history,
   notice,
   onToggleEdit,
   onToggleBoxMode,
@@ -206,6 +229,8 @@ function TextEditToolbar({
   onInkColor,
   onInkOpacity,
   onInkLineWidth,
+  stylePanel,
+  history,
   onUndo,
   onRedo,
 }: {
@@ -231,159 +256,188 @@ function TextEditToolbar({
   onInkLineWidth: (width: number) => void;
   onUndo: () => void;
   onRedo: () => void;
+  stylePanel: ReactNode;
 }) {
+  const hosted = useEditorTools();
   const annotationDisabled = !canAnnotate || readOnly || busy;
+  const editDisabled = !canEdit || readOnly || busy;
+  const editTitle = readOnly
+    ? READ_ONLY_REASON
+    : !canEdit
+      ? SCANNED_REASON
+      : editMode
+        ? "退出文字编辑"
+        : "点击页面上的文字开始编辑";
+  const boxTitle = readOnly
+    ? READ_ONLY_REASON
+    : !canEdit
+      ? SCANNED_REASON
+      : boxMode
+        ? "退出文本框编辑"
+        : "点击原有文字以选中，或在空白处拖动以添加文本框";
+  const annotationTitle = (armed: boolean, idle: string) =>
+    readOnly
+      ? READ_ONLY_REASON
+      : !canAnnotate
+        ? ANNOTATION_PERMISSION_REASON
+        : armed
+          ? "退出该注释工具"
+          : idle;
+  const tools: ToolShelfTool[] = [
+    {
+      id: "edit-text",
+      label: hosted ? "编辑内容" : "编辑文字",
+      icon: "textEdit",
+      groups: ["text"],
+      active: editMode,
+      disabled: editDisabled,
+      title: editTitle,
+      order: 3,
+      onActivate: onToggleEdit,
+    },
+    {
+      id: "text-box",
+      label: hosted ? "添加段落" : "添加文本框",
+      icon: "textBox",
+      groups: ["text"],
+      active: boxMode,
+      disabled: readOnly || busy,
+      title: boxTitle,
+      order: 1,
+      onActivate: onToggleBoxMode,
+    },
+    {
+      id: "comment-text",
+      label: "添加文本",
+      icon: "textBox",
+      groups: ["comment"],
+      active: boxMode,
+      disabled: readOnly || busy,
+      title: boxTitle,
+      order: 1,
+      onActivate: onToggleBoxMode,
+    },
+    {
+      id: "note",
+      label: "便签",
+      icon: "note",
+      groups: ["annotate"],
+      active: noteMode,
+      disabled: annotationDisabled,
+      title: annotationTitle(noteMode, "在页面上点击以放置便签"),
+      order: 1,
+      onActivate: onToggleNoteMode,
+    },
+    {
+      id: "ink",
+      label: "手绘",
+      icon: "pen",
+      groups: ["annotate"],
+      active: inkMode,
+      disabled: annotationDisabled,
+      title: annotationTitle(inkMode, "在页面上按住并拖动以手绘"),
+      order: 2,
+      onActivate: onToggleInkMode,
+    },
+    {
+      id: "comment-ink",
+      label: "书写",
+      icon: "pen",
+      groups: ["comment"],
+      active: inkMode,
+      disabled: annotationDisabled,
+      title: annotationTitle(inkMode, "在页面上按住并拖动以手绘"),
+      order: 3,
+      onActivate: onToggleInkMode,
+    },
+  ];
   return (
-    <div
-      className="text-edit-toolbar"
-      onPointerDown={(event) => event.stopPropagation()}
-    >
-      <button
-        type="button"
-        className="text-edit-toggle"
-        aria-pressed={editMode}
-        disabled={!canEdit || readOnly || busy}
-        title={
-          readOnly
-            ? READ_ONLY_REASON
-            : !canEdit
-              ? SCANNED_REASON
-              : editMode
-                ? "退出文字编辑"
-                : "点击页面上的文字开始编辑"
-        }
-        onClick={onToggleEdit}
+    <ToolShelf tools={tools} panelTitle="文本样式" defaultToolId="edit-text">
+      <div
+        className="text-edit-toolbar"
+        onPointerDown={(event) => event.stopPropagation()}
       >
-        编辑文字
-      </button>
-      <button
-        type="button"
-        className="text-box-toggle"
-        aria-pressed={boxMode}
-        disabled={!canEdit || readOnly || busy}
-        title={
-          readOnly
-            ? READ_ONLY_REASON
-            : !canEdit
-              ? SCANNED_REASON
-              : boxMode
-                ? "退出文本框编辑"
-                : "点击原有文字以选中，或在空白处拖动以添加文本框"
-        }
-        onClick={onToggleBoxMode}
-      >
-        添加文本框
-      </button>
-      <span className="toolbar-divider" aria-hidden="true" />
-      <button
-        type="button"
-        className="annotation-note-toggle"
-        aria-pressed={noteMode}
-        disabled={annotationDisabled}
-        title={
-          readOnly
-            ? READ_ONLY_REASON
-            : !canAnnotate
-              ? ANNOTATION_PERMISSION_REASON
-              : noteMode
-                ? "退出便签放置"
-                : "在页面上点击以放置便签"
-        }
-        onClick={onToggleNoteMode}
-      >
-        便签
-      </button>
-      <button
-        type="button"
-        className="annotation-ink-toggle"
-        aria-pressed={inkMode}
-        disabled={annotationDisabled}
-        title={
-          readOnly
-            ? READ_ONLY_REASON
-            : !canAnnotate
-              ? ANNOTATION_PERMISSION_REASON
-              : inkMode
-                ? "退出手绘"
-                : "在页面上按住并拖动以手绘"
-        }
-        onClick={onToggleInkMode}
-      >
-        手绘
-      </button>
-      {inkMode && (
-        <span className="annotation-ink-controls">
-          <label className="text-markup-control">
-            颜色
-            <input
-              type="color"
-              aria-label="画笔颜色"
-              value={inkColor}
-              disabled={busy}
-              onChange={(event) => onInkColor(event.target.value)}
-            />
-          </label>
-          <label className="text-markup-control">
-            透明度
-            <input
-              type="range"
-              aria-label="画笔透明度"
-              min={0}
-              max={100}
-              step={1}
-              value={inkOpacity}
-              disabled={busy}
-              onChange={(event) =>
-                onInkOpacity(Number.parseInt(event.target.value, 10))
-              }
-            />
-            <span>{inkOpacity}%</span>
-          </label>
-          <label className="text-markup-control">
-            线宽
-            <input
-              type="range"
-              aria-label="画笔线宽"
-              min={0.5}
-              max={32}
-              step={0.5}
-              value={inkLineWidth}
-              disabled={busy}
-              onChange={(event) =>
-                onInkLineWidth(Number.parseFloat(event.target.value))
-              }
-            />
-            <span>{inkLineWidth} pt</span>
-          </label>
-        </span>
-      )}
-      <span className="toolbar-divider" aria-hidden="true" />
-      <button
-        type="button"
-        disabled={!history?.canUndo || busy}
-        title={history?.canUndo ? "撤销上一步编辑" : "没有可撤销的操作"}
-        onClick={onUndo}
-      >
-        撤销
-      </button>
-      <button
-        type="button"
-        disabled={!history?.canRedo || busy}
-        title={history?.canRedo ? "重做上一步编辑" : "没有可重做的操作"}
-        onClick={onRedo}
-      >
-        重做
-      </button>
-      {readOnly && <span className="text-edit-reason">{READ_ONLY_REASON}</span>}
-      {notice && (
-        <span
-          className={`text-edit-notice text-edit-notice--${notice.kind}`}
-          role={notice.kind === "error" ? "alert" : "status"}
-        >
-          {notice.text}
-        </span>
-      )}
-    </div>
+        {inkMode && (
+          <span className="annotation-ink-controls">
+            <label className="text-markup-control">
+              颜色
+              <input
+                type="color"
+                aria-label="画笔颜色"
+                value={inkColor}
+                disabled={busy}
+                onChange={(event) => onInkColor(event.target.value)}
+              />
+            </label>
+            <label className="text-markup-control">
+              透明度
+              <input
+                type="range"
+                aria-label="画笔透明度"
+                min={0}
+                max={100}
+                step={1}
+                value={inkOpacity}
+                disabled={busy}
+                onChange={(event) =>
+                  onInkOpacity(Number.parseInt(event.target.value, 10))
+                }
+              />
+              <span>{inkOpacity}%</span>
+            </label>
+            <label className="text-markup-control">
+              线宽
+              <input
+                type="range"
+                aria-label="画笔线宽"
+                min={0.5}
+                max={32}
+                step={0.5}
+                value={inkLineWidth}
+                disabled={busy}
+                onChange={(event) =>
+                  onInkLineWidth(Number.parseFloat(event.target.value))
+                }
+              />
+              <span>{inkLineWidth} pt</span>
+            </label>
+          </span>
+        )}
+        {!hosted && (
+          <>
+            <button
+              type="button"
+              disabled={!history?.canUndo || busy}
+              onClick={onUndo}
+            >
+              撤销
+            </button>
+            <button
+              type="button"
+              disabled={!history?.canRedo || busy}
+              onClick={onRedo}
+            >
+              重做
+            </button>
+          </>
+        )}
+        {readOnly && (
+          <span className="text-edit-reason">{READ_ONLY_REASON}</span>
+        )}
+        {notice && (
+          <span
+            className={`text-edit-notice text-edit-notice--${notice.kind}`}
+            role={notice.kind === "error" ? "alert" : "status"}
+          >
+            {notice.text}
+          </span>
+        )}
+        {hosted && !stylePanel && (editMode || boxMode) && (
+          <TextStylePlaceholder />
+        )}
+        {stylePanel}
+      </div>
+    </ToolShelf>
   );
 }
 
@@ -412,10 +466,14 @@ export function PageTextLayer({
   onSelectAnnotation,
   scale = 1,
   pageCount = 0,
+  paintVersion,
 }: PageTextLayerProps) {
+  const workspaceTools = useEditorTools();
   const [state, setState] = useState<LayerState>({ status: "loading" });
   const [selection, setSelection] = useState<TextRange | null>(null);
-  const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "failed">("idle");
+  const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "failed">(
+    "idle",
+  );
   const [markupColor, setMarkupColor] = useState(DEFAULT_MARKUP_COLOR);
   const [markupOpacity, setMarkupOpacity] = useState(DEFAULT_MARKUP_OPACITY);
   const [markupBusy, setMarkupBusy] = useState(false);
@@ -431,20 +489,136 @@ export function PageTextLayer({
   const [inkLineWidth, setInkLineWidth] = useState(DEFAULT_INK_LINE_WIDTH);
   const [inkDraft, setInkDraft] = useState<InkPoint[] | null>(null);
   const [inkBusy, setInkBusy] = useState(false);
-  const [noteInteraction, setNoteInteraction] = useState<NoteInteraction | null>(
-    null,
-  );
+  const [noteInteraction, setNoteInteraction] =
+    useState<NoteInteraction | null>(null);
   const [noteBusy, setNoteBusy] = useState(false);
   const [editMode, setEditMode] = useState(false);
   const [boxMode, setBoxMode] = useState(false);
   const [boxes, setBoxes] = useState<TextBoxTargetView[]>([]);
   const [fonts, setFonts] = useState<TextBoxFontView[]>([]);
   const [selectedBoxId, setSelectedBoxId] = useState<number | null>(null);
-  const [boxInteraction, setBoxInteraction] = useState<BoxInteraction | null>(
-    null,
-  );
+  const [boxInteraction, setBoxInteractionState] = useState<BoxInteraction | null>(null);
+  const interactionRef = useRef<BoxInteraction | null>(null);
+  const motionFrame = useRef<number | null>(null);
+  function setBoxInteraction(next: BoxInteraction | null) {
+    if (motionFrame.current !== null) cancelAnimationFrame(motionFrame.current);
+    motionFrame.current = null;
+    interactionRef.current = next;
+    setBoxInteractionState(next);
+  }
+  function queueBoxInteraction(next: BoxInteraction) {
+    interactionRef.current = next;
+    if (motionFrame.current !== null) return;
+    motionFrame.current = requestAnimationFrame(() => {
+      motionFrame.current = null;
+      setBoxInteractionState(interactionRef.current);
+    });
+  }
+  useEffect(() => () => {
+    if (motionFrame.current !== null) cancelAnimationFrame(motionFrame.current);
+  }, []);
   const [boxBusy, setBoxBusy] = useState(false);
+  const [dragPreview, setDragPreview] =
+    useState<TextBoxTransformPreview | null>(null);
   const [editor, setEditor] = useState<EditorState | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
+  const paintVersionRef = useRef(paintVersion);
+  paintVersionRef.current = paintVersion;
+  const [pendingMove, setPendingMove] = useState<{
+    boxId: number; data: TextBoxMovePreview; rect: BoxRect; origin: BoxRect; afterPaint: number | null;
+  } | null>(null);
+  useEffect(() => {
+    if (pendingMove?.afterPaint != null && paintVersion !== undefined && paintVersion > pendingMove.afterPaint) setPendingMove(null);
+  }, [paintVersion, pendingMove]);
+  const previewScale = Math.min(2, Math.max(0.1, scale * (window.devicePixelRatio || 1)));
+  const cacheBox = (editMode || Boolean(workspaceTools && boxMode)) && !editor && !boxBusy
+    ? boxes.find(box => box.boxId === selectedBoxId) ?? null : null;
+  const moveCache = useTextMovePreview(documentId, pageIndex, cacheBox, reloadKey, previewScale);
+  const previewing =
+    (editMode || Boolean(workspaceTools)) &&
+    (boxInteraction?.kind === "resize" || (boxInteraction?.kind === "move" && moveCache.status === "fallback"));
+  useEffect(() => {
+    if (!previewing) {
+      setDragPreview(null);
+      return;
+    }
+    let alive = true;
+    let timer: ReturnType<typeof setTimeout>;
+    let previous = "";
+    async function draw() {
+      const gesture = interactionRef.current;
+      if (
+        !alive ||
+        !gesture ||
+        (gesture.kind !== "move" && gesture.kind !== "resize")
+      )
+        return;
+      const box = gesture.box;
+      if (
+        Math.hypot(
+          gesture.current.x - gesture.start.x,
+          gesture.current.y - gesture.start.y,
+        ) <
+        1 / scale
+      ) {
+        if (alive) {
+          setDragPreview(null);
+          timer = setTimeout(() => void draw(), 16);
+        }
+        return;
+      }
+      const rect =
+        gesture.kind === "move"
+          ? moveBox(
+              box,
+              {
+                x: gesture.current.x - gesture.start.x,
+                y: gesture.current.y - gesture.start.y,
+              },
+              state.status === "ready" ? state.layer.pageWidth : 10000,
+              state.status === "ready" ? state.layer.pageHeight : 10000,
+            )
+          : resizeBoxFromDrag(
+              box,
+              box.rotation,
+              gesture.start,
+              gesture.current,
+              gesture.handle ?? "se",
+            );
+      if (
+        gesture.kind === "resize" &&
+        (gesture.handle === "e" || gesture.handle === "w") &&
+        Math.abs(rect.width - box.width) > 0.01
+      )
+        rect.height = box.fontSize * 1.2;
+      const key = `${rect.x}:${rect.y}:${rect.width}:${rect.height}`;
+      if (key !== previous) {
+        previous = key;
+        try {
+          const next = await previewTextBoxTransform(
+            documentId,
+            pageIndex,
+            box.boxId,
+            {
+              ...rect,
+              rotation: box.rotation,
+              autoHeight: gesture.kind === "resize" || box.autoHeight,
+            },
+            Math.min(2, Math.max(0.1, scale * (window.devicePixelRatio || 1))),
+          );
+          if (alive) setDragPreview(next);
+        } catch {
+          /* The final transform reports any persistent engine error. */
+        }
+      }
+      if (alive) timer = setTimeout(() => void draw(), 16);
+    }
+    void draw();
+    return () => {
+      alive = false;
+      clearTimeout(timer);
+    };
+  }, [previewing, documentId, pageIndex, scale]);
   // Textarea selection offsets in UTF-16 units, or null when the caret is
   // collapsed. They are converted to code points at the command boundary.
   const [editorSelection, setEditorSelection] = useState<{
@@ -453,7 +627,6 @@ export function PageTextLayer({
   } | null>(null);
   const [history, setHistory] = useState<EditHistoryView | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
-  const [reloadKey, setReloadKey] = useState(0);
   // External overlays (shapes, the annotation list) change the same document
   // and share this undo stack, so their events re-fetch the history. This
   // layer's own commands already return the new history, and re-fetching it
@@ -461,9 +634,27 @@ export function PageTextLayer({
   const [historyRefreshKey, setHistoryRefreshKey] = useState(0);
   const surfaceRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const editorFont = useTextEditorFont(documentId, pageIndex,
+    editor?.status === "editing" ? editor.target : null,
+    editor?.status === "editing" ? editor.draft : "");
+  const selectNewParagraph = useRef(false);
   const dragAnchor = useRef<number | null>(null);
   const targetRequest = useRef(0);
+  const enterEditingAfterResolve = useRef(false);
   const loadedPageKey = useRef<string | null>(null);
+  const draftDirty = useRef(false);
+  draftDirty.current =
+    editor?.status === "editing" && editor.draft !== editor.target.text;
+  useEffect(() => notifyPendingEditChanged(), [editor]);
+  const pendingCommit = useRef<() => Promise<boolean>>(async () => true);
+  useEffect(() => {
+    if (editor?.status !== "editing") return;
+    return registerPendingEdit(
+      documentId,
+      () => pendingCommit.current(),
+      () => draftDirty.current,
+    );
+  }, [documentId, editor?.status]);
 
   // Re-fetch the layer when this page's content changes (edit, delete, undo,
   // redo). The existing layer stays visible during the refresh so the overlay
@@ -531,7 +722,7 @@ export function PageTextLayer({
   }, [documentId, historyRefreshKey]);
 
   useEffect(() => {
-    if (!boxMode) {
+    if (!boxMode && !editMode) {
       setBoxes([]);
       setSelectedBoxId(null);
       return;
@@ -558,10 +749,10 @@ export function PageTextLayer({
     return () => {
       cancelled = true;
     };
-  }, [boxMode, documentId, pageIndex, reloadKey]);
+  }, [boxMode, editMode, documentId, pageIndex, reloadKey]);
 
   useEffect(() => {
-    if (!boxMode) {
+    if (!boxMode && !editMode) {
       return;
     }
     let cancelled = false;
@@ -580,7 +771,7 @@ export function PageTextLayer({
     return () => {
       cancelled = true;
     };
-  }, [boxMode]);
+  }, [boxMode, editMode]);
 
   useEffect(
     () =>
@@ -618,20 +809,59 @@ export function PageTextLayer({
     }
     textarea.style.height = "auto";
     textarea.style.height = `${textarea.scrollHeight}px`;
-  }, [editor]);
+  }, [editor, boxMode, scale, state, editorFont]);
 
   // A selection belongs to one editor session: closing the editor or opening
   // another box must not carry its offsets into a different text.
   useEffect(() => {
     setEditorSelection(null);
   }, [editor?.status === "editing" ? editor.target.boxId : null]);
+  useEffect(() => {
+    if (
+      selectNewParagraph.current &&
+      editor?.status === "editing" &&
+      textareaRef.current
+    ) {
+      selectNewParagraph.current = false;
+      textareaRef.current.select();
+      setEditorSelection({ start: 0, end: editor.draft.length });
+    }
+  }, [editor]);
 
   const layer = state.status === "ready" ? state.layer : null;
-  const structure = useMemo(() => (layer ? buildTextLayer(layer.chars) : null), [layer]);
+  const structure = useMemo(
+    () => (layer ? buildTextLayer(layer.chars) : null),
+    [layer],
+  );
   const selectedBox =
-    boxMode && selectedBoxId !== null
+    (boxMode || editMode) && selectedBoxId !== null
       ? (boxes.find((box) => box.boxId === selectedBoxId) ?? null)
       : null;
+  const contentGuides = editMode || Boolean(workspaceTools && boxMode);
+  const editBlocks = useMemo(() => {
+    if (!contentGuides || !layer || layer.rotation) return [];
+    let rects = editableTextBlocks(layer.chars);
+    for (const box of boxes) {
+      if (box.rotation) continue;
+      rects = rects.filter(
+        (rect) =>
+          !(
+            rect.x >= box.x - 1 &&
+            rect.y >= box.y - 1 &&
+            rect.x + rect.width <= box.x + box.width + 1 &&
+            rect.y + rect.height <= box.y + box.height + 1
+          ),
+      );
+      if (box.boxId !== selectedBoxId)
+        rects.push({
+          x: box.x,
+          y: box.y,
+          width: box.width,
+          height: box.height,
+        });
+    }
+    return rects;
+  }, [contentGuides, layer, boxes, selectedBoxId]);
   const editorRange =
     editor?.status === "editing" && editorSelection
       ? codePointRange(editor.draft, editorSelection.start, editorSelection.end)
@@ -643,7 +873,11 @@ export function PageTextLayer({
 
   if (state.status === "error") {
     return (
-      <div className="page-text-layer page-text-layer--message" role="status" title={state.error.message}>
+      <div
+        className="page-text-layer page-text-layer--message"
+        role="status"
+        title={state.error.message}
+      >
         <span className="text-layer-message">文字层无法载入</span>
       </div>
     );
@@ -653,7 +887,7 @@ export function PageTextLayer({
   const operationBusy =
     Boolean(editingBusy) || boxBusy || markupBusy || inkBusy || noteBusy;
   const annotationTools = canAnnotate && !readOnly;
-  const toolbarFor = (canEdit: boolean) => (
+  const toolbarFor = (canEdit: boolean, stylePanel: ReactNode) => (
     <TextEditToolbar
       canEdit={canEdit}
       canAnnotate={canAnnotate}
@@ -677,6 +911,7 @@ export function PageTextLayer({
       onInkLineWidth={setInkLineWidth}
       onUndo={() => void runHistory("undo")}
       onRedo={() => void runHistory("redo")}
+      stylePanel={stylePanel}
     />
   );
 
@@ -778,17 +1013,33 @@ export function PageTextLayer({
     setBoxBusy(true);
     setNotice(null);
     try {
-      const result = await createTextBox(documentId, pageIndex, rect);
+      const result = await createTextBox(documentId, pageIndex, {
+        ...rect,
+        ...(workspaceTools
+          ? {
+              style: {
+                fontFamily: "Helvetica",
+                fontSize: 12,
+                bold: false,
+                italic: false,
+                underline: false,
+                color: "#000000",
+                alignment: "left" as const,
+              },
+            }
+          : {}),
+      });
       setHistory(result.history);
       setBoxes((current) => [
         ...current.filter((box) => box.boxId !== result.target.boxId),
         result.target,
       ]);
       setSelectedBoxId(result.target.boxId);
+      selectNewParagraph.current = Boolean(workspaceTools);
       setEditor({
         status: "editing",
         target: result.target,
-        draft: "",
+        draft: workspaceTools ? "在这里插入文字" : "",
         busy: false,
         error: null,
       });
@@ -806,31 +1057,29 @@ export function PageTextLayer({
     rect: BoxRect,
     autoHeight = box.autoHeight,
     rotation = box.rotation,
+    onCommitted?: () => void,
   ) {
     setBoxBusy(true);
     setNotice(null);
     try {
-      const result = await transformTextBox(
-        documentId,
-        pageIndex,
-        box.boxId,
-        {
-          x: rect.x,
-          y: rect.y,
-          width: rect.width,
-          height: rect.height,
-          autoHeight,
-          rotation,
-        },
-      );
+      const result = await transformTextBox(documentId, pageIndex, box.boxId, {
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: rect.height,
+        autoHeight,
+        rotation,
+      });
       setHistory(result.history);
       setBoxes((current) =>
         current.map((item) =>
           item.boxId === result.target.boxId ? result.target : item,
         ),
       );
+      onCommitted?.();
       notifyDocumentChanged({ documentId, pageIndex, source: "text" });
     } catch (error) {
+      setPendingMove(null);
       setNotice({ kind: "error", text: toCommandError(error).message });
     } finally {
       setBoxBusy(false);
@@ -875,11 +1124,21 @@ export function PageTextLayer({
     if (!editor || editor.status !== "editing" || editor.busy) {
       return;
     }
-    const current = editor;
+    const current = {...editor, draft: textareaRef.current?.value ?? editor.draft};
     const rawSelection = editorSelection;
     setEditor({ ...current, busy: true, error: null });
     setNotice(null);
     try {
+      if (current.draft !== current.target.text) {
+        const committed = await applyTextEdit(
+          documentId,
+          pageIndex,
+          current.target.boxId,
+          current.draft,
+        );
+        setHistory(committed.history);
+        notifyDocumentChanged({ documentId, pageIndex, source: "text" });
+      }
       const result = range
         ? await applyTextBoxSelectionStyle(
             documentId,
@@ -943,9 +1202,7 @@ export function PageTextLayer({
     try {
       const result = await deleteTextBox(documentId, pageIndex, box.boxId);
       setHistory(result.history);
-      setBoxes((current) =>
-        current.filter((item) => item.boxId !== box.boxId),
-      );
+      setBoxes((current) => current.filter((item) => item.boxId !== box.boxId));
       setSelectedBoxId(null);
       setEditor(null);
       notifyDocumentChanged({ documentId, pageIndex, source: "text" });
@@ -991,6 +1248,7 @@ export function PageTextLayer({
     if (readOnly) {
       return;
     }
+    enterEditingAfterResolve.current = false;
     const requestId = targetRequest.current + 1;
     targetRequest.current = requestId;
     setBoxBusy(true);
@@ -1003,7 +1261,18 @@ export function PageTextLayer({
           target,
         ]);
         setSelectedBoxId(target.boxId);
-        setEditor(null);
+        setEditor(
+          enterEditingAfterResolve.current
+            ? {
+                status: "editing",
+                target,
+                draft: target.text,
+                busy: false,
+                error: null,
+              }
+            : null,
+        );
+        enterEditingAfterResolve.current = false;
       }
     } catch (error) {
       if (targetRequest.current === requestId) {
@@ -1032,17 +1301,21 @@ export function PageTextLayer({
     setNotice(null);
   }
 
-  async function commitEditor() {
+  async function commitEditor(): Promise<boolean> {
     if (!editor || editor.status !== "editing" || editor.busy) {
-      return;
+      return false;
     }
-    const current = editor;
+    const current = {...editor, draft: textareaRef.current?.value ?? editor.draft};
+    if (current.draft === current.target.text) {
+      setEditor(null);
+      return true;
+    }
     if (!current.draft.trim() && !current.target.created) {
       setEditor({
         ...current,
         error: "文字不能为空；如需移除文字，请使用删除。",
       });
-      return;
+      return false;
     }
     setEditor({ ...current, busy: true, error: null });
     try {
@@ -1059,14 +1332,18 @@ export function PageTextLayer({
       }
       setNotice(fontFallbackNotice(result.font));
       notifyDocumentChanged({ documentId, pageIndex, source: "text" });
+      return true;
     } catch (error) {
       setEditor({
         ...current,
         busy: false,
         error: toCommandError(error).message,
       });
+      return false;
     }
   }
+
+  pendingCommit.current = commitEditor;
 
   async function removeEditor() {
     if (!editor || editor.status !== "editing" || editor.busy) {
@@ -1204,10 +1481,7 @@ export function PageTextLayer({
     if (!annotationTools || noteBusy) {
       return;
     }
-    const width = Math.max(
-      1,
-      Math.min(DEFAULT_NOTE_SIZE, textLayer.pageWidth),
-    );
+    const width = Math.max(1, Math.min(DEFAULT_NOTE_SIZE, textLayer.pageWidth));
     const height = Math.max(
       1,
       Math.min(DEFAULT_NOTE_SIZE, textLayer.pageHeight),
@@ -1367,9 +1641,10 @@ export function PageTextLayer({
     box: TextBoxTargetView,
   ) => {
     event.stopPropagation();
-    if (readOnly || boxBusy) {
+    if (readOnly || boxBusy || event.button !== 0) {
       return;
     }
+    surfaceRef.current?.focus({ preventScroll: true });
     setSelectedBoxId(box.boxId);
     if (editor) {
       return;
@@ -1391,6 +1666,7 @@ export function PageTextLayer({
   const startBoxResize = (
     event: ReactPointerEvent<HTMLButtonElement>,
     box: TextBoxTargetView,
+    handle?: ResizeHandle,
   ) => {
     event.stopPropagation();
     event.preventDefault();
@@ -1405,7 +1681,13 @@ export function PageTextLayer({
     if (!point) {
       return;
     }
-    setBoxInteraction({ kind: "resize", box, start: point, current: point });
+    setBoxInteraction({
+      kind: "resize",
+      box,
+      handle,
+      start: point,
+      current: point,
+    });
     try {
       event.currentTarget.setPointerCapture?.(event.pointerId);
     } catch {
@@ -1474,9 +1756,14 @@ export function PageTextLayer({
     }
 
     if (boxMode) {
-      if (editor || boxBusy) {
+      if (editor?.status === "editing" && workspaceTools) {
+        event.preventDefault();
+        void commitEditor().then((saved) => {
+          if (saved) setSelectedBoxId(null);
+        });
         return;
       }
+      if (editor || boxBusy) return;
       event.preventDefault();
       surfaceRef.current?.focus({ preventScroll: true });
       const index = findCharAt(textLayer, point);
@@ -1495,13 +1782,27 @@ export function PageTextLayer({
 
     if (editMode) {
       event.preventDefault();
-      surfaceRef.current?.focus({ preventScroll: true });
-      if (editor) {
-        return;
-      }
+      if (boxBusy) return;
       const index = findCharAt(textLayer, point);
-      if (index !== null) {
-        void openEditor(index);
+      const select = () => {
+        if (index !== null) void selectExistingBox(index);
+        else {
+          setSelectedBoxId(null);
+          setEditor(null);
+        }
+      };
+      if (editor?.status === "editing") {
+        // Read the live composing value before moving focus. WKWebView can
+        // cancel the pending IME suffix synchronously when the textarea blurs.
+        void commitEditor().then((saved) => {
+          if (saved) {
+            surfaceRef.current?.focus({ preventScroll: true });
+            select();
+          }
+        });
+      } else {
+        surfaceRef.current?.focus({ preventScroll: true });
+        select();
       }
       return;
     }
@@ -1534,6 +1835,7 @@ export function PageTextLayer({
   };
 
   const handlePointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const boxInteraction = interactionRef.current;
     if (inkDraft) {
       const point = pointFromEvent(event);
       if (point) {
@@ -1547,28 +1849,28 @@ export function PageTextLayer({
     if (boxInteraction?.kind === "create") {
       const point = pointFromEvent(event);
       if (point) {
-        setBoxInteraction({ ...boxInteraction, current: point });
+        queueBoxInteraction({ ...boxInteraction, current: point });
       }
       return;
     }
     if (boxInteraction?.kind === "move") {
       const point = pointFromEvent(event);
       if (point) {
-        setBoxInteraction({ ...boxInteraction, current: point });
+        queueBoxInteraction({ ...boxInteraction, current: point });
       }
       return;
     }
     if (boxInteraction?.kind === "resize") {
       const point = pointFromEvent(event);
       if (point) {
-        setBoxInteraction({ ...boxInteraction, current: point });
+        queueBoxInteraction({ ...boxInteraction, current: point });
       }
       return;
     }
     if (boxInteraction?.kind === "rotate") {
       const point = pointFromEvent(event);
       if (point) {
-        setBoxInteraction({ ...boxInteraction, current: point });
+        queueBoxInteraction({ ...boxInteraction, current: point });
       }
       return;
     }
@@ -1586,6 +1888,7 @@ export function PageTextLayer({
   };
 
   const endDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const boxInteraction = interactionRef.current;
     if (inkDraft) {
       const stroke = [...inkDraft];
       const point = pointFromEvent(event);
@@ -1637,16 +1940,37 @@ export function PageTextLayer({
         // Pointer capture may never have been acquired.
       }
       const point = pointFromEvent(event) ?? interaction.current;
-      const resized = resizeBox(
-        interaction.box,
-        interaction.box.rotation,
-        point,
-      );
+      if (
+        Math.hypot(
+          point.x - interaction.start.x,
+          point.y - interaction.start.y,
+        ) <
+        1 / scale
+      )
+        return;
+      const resized = interaction.handle
+        ? resizeBoxFromDrag(
+            interaction.box,
+            interaction.box.rotation,
+            interaction.start,
+            point,
+            interaction.handle,
+          )
+        : resizeBox(interaction.box, interaction.box.rotation, point);
+      if (
+        (interaction.handle === "e" || interaction.handle === "w") &&
+        Math.abs(resized.width - interaction.box.width) > 0.01
+      )
+        resized.height = interaction.box.fontSize * 1.2;
       if (
         resized.width !== interaction.box.width ||
         resized.height !== interaction.box.height
       ) {
-        void transformBox(interaction.box, resized, false);
+        void transformBox(
+          interaction.box,
+          resized,
+          Boolean(interaction.handle),
+        );
       }
       return;
     }
@@ -1669,7 +1993,13 @@ export function PageTextLayer({
         textLayer.pageHeight,
       );
       if (moved.x !== interaction.box.x || moved.y !== interaction.box.y) {
-        void transformBox(interaction.box, moved);
+        if (moveCache.data) {
+          setPendingMove({boxId: interaction.box.boxId, data: moveCache.data, rect: moved, origin: interaction.box, afterPaint: null});
+        }
+        void transformBox(interaction.box, moved, interaction.box.autoHeight, interaction.box.rotation, () => {
+          if (paintVersionRef.current === undefined) setPendingMove(null);
+          else setPendingMove(current => current ? {...current, afterPaint: paintVersionRef.current!} : null);
+        });
       }
       return;
     }
@@ -1682,8 +2012,15 @@ export function PageTextLayer({
         // Pointer capture may never have been acquired.
       }
       const point = pointFromEvent(event) ?? current.current;
+      const placed = dragRect(current.anchor, point);
+      if (
+        workspaceTools &&
+        (Math.abs(point.x - current.anchor.x) < 12 ||
+          Math.abs(point.y - current.anchor.y) < 12)
+      )
+        placed.width = 120;
       const rect = fitBoxToPage(
-        dragRect(current.anchor, point),
+        placed,
         textLayer.pageWidth,
         textLayer.pageHeight,
       );
@@ -1711,7 +2048,18 @@ export function PageTextLayer({
   };
 
   const handleDoubleClick = (event: ReactMouseEvent<HTMLDivElement>) => {
-    if (editMode || boxMode || noteMode || inkMode) {
+    if (editMode) {
+      event.preventDefault();
+      if (selectedBox) openBoxEditor(selectedBox);
+      else if (boxBusy) enterEditingAfterResolve.current = true;
+      else {
+        const point = pointFromEvent(event);
+        const index = point ? findCharAt(textLayer, point) : null;
+        if (index !== null) void openEditor(index);
+      }
+      return;
+    }
+    if (boxMode || noteMode || inkMode) {
       return;
     }
     const point = pointFromEvent(event);
@@ -1798,9 +2146,7 @@ export function PageTextLayer({
     setLinkDraft({ rects });
   };
 
-  const createLinkFromSelection = async (
-    target: LinkTarget,
-  ): Promise<void> => {
+  const createLinkFromSelection = async (target: LinkTarget): Promise<void> => {
     if (!linkDraft || linkBusy) {
       return;
     }
@@ -1827,7 +2173,53 @@ export function PageTextLayer({
   };
 
   const handleKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (
+      event.target instanceof HTMLElement &&
+      event.target.closest("button,input,select,textarea,[contenteditable]")
+    )
+      return;
+    if ((editMode || workspaceTools) && selectedBox && !editor && !boxBusy) {
+      if (event.key === "Delete" || event.key === "Backspace") {
+        event.preventDefault();
+        void deleteSelectedBox();
+        return;
+      }
+      if (event.key === "Enter" || event.key === "F2") {
+        event.preventDefault();
+        openBoxEditor(selectedBox);
+        return;
+      }
+      if (event.key.startsWith("Arrow")) {
+        const step = event.shiftKey ? 10 : 1;
+        const delta = {
+          x:
+            event.key === "ArrowLeft"
+              ? -step
+              : event.key === "ArrowRight"
+                ? step
+                : 0,
+          y:
+            event.key === "ArrowUp"
+              ? -step
+              : event.key === "ArrowDown"
+                ? step
+                : 0,
+        };
+        event.preventDefault();
+        void transformBox(
+          selectedBox,
+          moveBox(
+            selectedBox,
+            delta,
+            textLayer.pageWidth,
+            textLayer.pageHeight,
+          ),
+        );
+        return;
+      }
+    }
     if (event.key === "Escape") {
+      setSelectedBoxId(null);
       if (editor) {
         event.preventDefault();
         cancelEditor();
@@ -1884,7 +2276,12 @@ export function PageTextLayer({
           editor.target.fontSize * 1.2,
         )
       : 0;
-  const previewRotationFor = (box: TextBoxTargetView): number => {    if (
+  // The floating action bar sits above the editor like iLovePDF's selection
+  // toolbar, except at the top of a page where the layer would clip it.
+  const editorActionsBelow =
+    editor?.status === "editing" && editor.target.y * scale < 52;
+  const previewRotationFor = (box: TextBoxTargetView): number => {
+    if (
       boxInteraction?.kind === "rotate" &&
       boxInteraction.box.boxId === box.boxId
     ) {
@@ -1893,6 +2290,7 @@ export function PageTextLayer({
     return box.rotation;
   };
   const previewRectFor = (box: TextBoxTargetView): BoxRect => {
+    if (pendingMove?.boxId === box.boxId) return pendingMove.rect;
     if (
       boxInteraction?.kind === "move" &&
       boxInteraction.box.boxId === box.boxId
@@ -1911,15 +2309,30 @@ export function PageTextLayer({
       boxInteraction?.kind === "resize" &&
       boxInteraction.box.boxId === box.boxId
     ) {
-      return resizeBox(box, box.rotation, boxInteraction.current);
+      const rect = boxInteraction.handle
+        ? resizeBoxFromDrag(
+            box,
+            box.rotation,
+            boxInteraction.start,
+            boxInteraction.current,
+            boxInteraction.handle,
+          )
+        : resizeBox(box, box.rotation, boxInteraction.current);
+      if (dragPreview?.target.boxId === box.boxId && Math.abs(dragPreview.target.width - rect.width) < 0.01) {
+        return {...rect, height: dragPreview.target.height};
+      }
+      return rect;
     }
     return box;
   };
+  const moving = boxInteraction?.kind === "move" && moveCache.data
+    ? {data: moveCache.data, rect: previewRectFor(boxInteraction.box), origin: boxInteraction.box}
+    : pendingMove;
 
   return (
     <div
       ref={surfaceRef}
-      className={`page-text-layer${editMode ? " page-text-layer--editing" : ""}${
+      className={`page-text-layer${editMode || (workspaceTools && boxMode) ? " page-text-layer--editing" : ""}${
         boxMode ? " page-text-layer--box-mode" : ""
       }${noteMode ? " page-text-layer--note-mode" : ""}${
         inkMode ? " page-text-layer--ink-mode" : ""
@@ -1939,13 +2352,92 @@ export function PageTextLayer({
       onClick={handleClick}
       onKeyDown={handleKeyDown}
     >
-      {toolbarFor(textLayer.hasText)}
+      {moving && (
+        <>
+          <img className="content-drag-preview" src={`data:image/png;base64,${moving.data.background.pngBase64}`} alt="" draggable={false} />
+          <img className="content-move-sprite" data-testid="text-move-sprite"
+            src={`data:image/png;base64,${moving.data.foreground.pngBase64}`} alt="" draggable={false}
+            style={{left: moving.data.foreground.x / moving.data.foreground.scale * scale,
+              top: moving.data.foreground.y / moving.data.foreground.scale * scale,
+              width: moving.data.foreground.width / moving.data.foreground.scale * scale,
+              height: moving.data.foreground.height / moving.data.foreground.scale * scale,
+              transform: `translate3d(${(moving.rect.x-moving.origin.x)*scale}px, ${(moving.rect.y-moving.origin.y)*scale}px, 0)`}} />
+        </>
+      )}
+      {previewing && dragPreview && (
+        <img
+          className="content-drag-preview"
+          src={`data:image/png;base64,${dragPreview.image.pngBase64}`}
+          alt=""
+          draggable={false}
+        />
+      )}
+      {toolbarFor(
+        textLayer.hasText,
+        editor?.status === "editing" ? (
+          <TextBoxStylePanel
+            target={editor.target}
+            fonts={fonts}
+            busy={editor.busy}
+            editing
+            selection={editorRange}
+            onChange={(style, range) => void applyEditorStyle(style, range)}
+            onDelete={() => void removeEditor()}
+            onLink={() =>
+              setLinkDraft({
+                rects: [
+                  {
+                    x: editor.target.x,
+                    y: editor.target.y,
+                    width: editor.target.width,
+                    height: editor.target.height,
+                  },
+                ],
+              })
+            }
+          />
+        ) : selectedBox ? (
+          <TextBoxStylePanel
+            target={selectedBox}
+            showDelete={!workspaceTools}
+            fonts={fonts}
+            busy={boxBusy}
+            onChange={(style) => void applyBoxStyle(style)}
+            onDelete={() => void deleteSelectedBox()}
+          />
+        ) : null,
+      )}
 
       {!textLayer.hasText && (
         <span className="text-layer-message" role="status">
           {SCANNED_REASON}
         </span>
       )}
+
+      {editBlocks.map((rect, index) => {
+        const rectRight = rect.x + rect.width;
+        const rectBottom = rect.y + rect.height;
+        const active =
+          editor?.status === "editing" &&
+          editor.target.x < rectRight &&
+          editor.target.x + editor.target.width > rect.x &&
+          editor.target.y < rectBottom &&
+          editor.target.y + editor.target.height > rect.y;
+        return (
+          <div
+            key={`edit-block:${index}`}
+            className={`text-edit-block${active ? " text-edit-block--active" : ""}`}
+            data-testid="text-edit-block"
+            aria-hidden="true"
+            style={{
+              left: `${(rect.x / textLayer.pageWidth) * 100}%`,
+              top: `${(rect.y / textLayer.pageHeight) * 100}%`,
+              width: `${(rect.width / textLayer.pageWidth) * 100}%`,
+              height: `${(rect.height / textLayer.pageHeight) * 100}%`,
+            }}
+          />
+        );
+      })}
 
       {highlights.map((rect, index) => (
         <div
@@ -2062,7 +2554,9 @@ export function PageTextLayer({
             />
           ) : (
             <polyline
-              points={inkDraft.map((point) => `${point.x},${point.y}`).join(" ")}
+              points={inkDraft
+                .map((point) => `${point.x},${point.y}`)
+                .join(" ")}
               fill="none"
               stroke={inkColor}
               strokeOpacity={inkOpacity / 100}
@@ -2075,83 +2569,122 @@ export function PageTextLayer({
         </svg>
       )}
 
-      {boxMode && (
+      {(boxMode || editMode) && (!editor || (!workspaceTools && boxMode)) && (
         <div className="text-box-overlay">
-          {boxes.map((box, index) => {
-            const rect = previewRectFor(box);
-            return (
-              <div
-                key={box.boxId}
-                className={`text-box-outline${
-                  selectedBoxId === box.boxId
-                    ? " text-box-outline--selected"
-                    : ""
-                }`}
-                role="group"
-                aria-label={`文本框 ${index + 1}`}
-                data-testid={`text-box-outline-${box.boxId}`}
-                style={{
-                  left: `${(rect.x / textLayer.pageWidth) * 100}%`,
-                  top: `${(rect.y / textLayer.pageHeight) * 100}%`,
-                  width: `${(rect.width / textLayer.pageWidth) * 100}%`,
-                  height: `${(rect.height / textLayer.pageHeight) * 100}%`,
-                  transform: `rotate(${previewRotationFor(box)}deg)`,
-                }}
-                onPointerDown={(event) => startBoxMove(event, box)}
-                onDoubleClick={(event) => {
-                  event.stopPropagation();
-                  openBoxEditor(box);
-                }}
-              >
-                <span className="text-box-outline-label">
-                  {box.text ? box.text.split("\n")[0] : "空文本框"}
-                </span>
-                {selectedBoxId === box.boxId && (
-                  <>
-                    <button
-                      type="button"
-                      className="text-box-handle text-box-handle--rotate"
-                      aria-label="旋转"
-                      data-testid="text-box-rotate-handle"
-                      onPointerDown={(event) => startBoxRotate(event, box)}
-                      onDoubleClick={(event) => event.stopPropagation()}
-                    />
-                    <button
-                      type="button"
-                      className="text-box-handle text-box-handle--resize"
-                      aria-label="调整大小"
-                      data-testid="text-box-resize-handle"
-                      onPointerDown={(event) => startBoxResize(event, box)}
-                      onDoubleClick={(event) => event.stopPropagation()}
-                    />
-                  </>
-                )}
-              </div>
-            );
-          })}
+          {boxes
+            .filter(
+              (box) =>
+                (boxMode && !workspaceTools) || box.boxId === selectedBoxId,
+            )
+            .map((box, index) => {
+              const rect = previewRectFor(box);
+              const frame = editMode || workspaceTools ? contentSelectionFrame(rect,previewRotationFor(box),scale) : rect;
+              return (
+                <div
+                  key={box.boxId}
+                  className={`text-box-outline${
+                    selectedBoxId === box.boxId
+                      ? " text-box-outline--selected"
+                      : ""
+                  }`}
+                  role="group"
+                  aria-label={
+                    editMode || workspaceTools
+                      ? "选中文本框"
+                      : `文本框 ${index + 1}`
+                  }
+                  tabIndex={0}
+                  data-testid={`text-box-outline-${box.boxId}`}
+                  style={{
+                    left: `${(frame.x / textLayer.pageWidth) * 100}%`,
+                    top: `${(frame.y / textLayer.pageHeight) * 100}%`,
+                    width: `${(frame.width / textLayer.pageWidth) * 100}%`,
+                    height: `${(frame.height / textLayer.pageHeight) * 100}%`,
+                    transform: `rotate(${previewRotationFor(box)}deg)`,
+                  }}
+                  onPointerDown={(event) => startBoxMove(event, box)}
+                  onDoubleClick={(event) => {
+                    event.stopPropagation();
+                    openBoxEditor(box);
+                  }}
+                >
+                  {!editMode && !workspaceTools && (
+                    <span className="text-box-outline-label">
+                      {box.text ? box.text.split("\n")[0] : "空文本框"}
+                    </span>
+                  )}
+                  {selectedBoxId === box.boxId && (
+                    <>
+                      {editMode || workspaceTools ? (
+                        <>
+                          {RESIZE_HANDLES.map((handle) => (
+                            <button
+                              key={handle}
+                              type="button"
+                              className={`text-box-handle content-resize-handle content-resize-handle--${handle}`}
+                              style={{width:12,height:12}}
+                              aria-label={`调整文本框 ${handle}`}
+                              data-testid={`text-box-resize-${handle}`}
+                              onPointerDown={(event) =>
+                                startBoxResize(event, box, handle)
+                              }
+                              onDoubleClick={(event) => event.stopPropagation()}
+                            />
+                          ))}
+                          <div
+                            className={`content-selection-actions${rect.y + rect.height + 52 / scale > textLayer.pageHeight ? " content-selection-actions--above" : ""}`}
+                            role="toolbar"
+                            aria-label="所选文字操作"
+                            onPointerDown={(event) => event.stopPropagation()}
+                          >
+                            <button
+                              type="button"
+                              aria-label="编辑选中文字"
+                              title="编辑"
+                              onClick={() => openBoxEditor(box)}
+                            >
+                              <WorkspaceIcon name="editObject" />
+                            </button>
+                            <button
+                              type="button"
+                              aria-label="删除选中文字"
+                              title="删除"
+                              onClick={() => void deleteSelectedBox()}
+                            >
+                              <WorkspaceIcon name="trash" />
+                            </button>
+                          </div>
+                        </>
+                      ) : (
+                        <>
+                          <button
+                            type="button"
+                            className="text-box-handle text-box-handle--rotate"
+                            aria-label="旋转"
+                            data-testid="text-box-rotate-handle"
+                            onPointerDown={(event) =>
+                              startBoxRotate(event, box)
+                            }
+                            onDoubleClick={(event) => event.stopPropagation()}
+                          />
+                          <button
+                            type="button"
+                            className="text-box-handle text-box-handle--resize"
+                            aria-label="调整大小"
+                            data-testid="text-box-resize-handle"
+                            onPointerDown={(event) =>
+                              startBoxResize(event, box)
+                            }
+                            onDoubleClick={(event) => event.stopPropagation()}
+                          />
+                        </>
+                      )}
+                    </>
+                  )}
+                </div>
+              );
+            })}
         </div>
-      )}
-
-      {boxMode && editor?.status === "editing" && (
-        <TextBoxStylePanel
-          target={editor.target}
-          fonts={fonts}
-          busy={editor.busy}
-          editing
-          selection={editorRange}
-          onChange={(style, range) => void applyEditorStyle(style, range)}
-          onDelete={() => void removeEditor()}
-        />
-      )}
-
-      {boxMode && editor?.status !== "editing" && selectedBox && (
-        <TextBoxStylePanel
-          target={selectedBox}
-          fonts={fonts}
-          busy={boxBusy}
-          onChange={(style) => void applyBoxStyle(style)}
-          onDelete={() => void deleteSelectedBox()}
-        />
       )}
 
       {createPreview && (
@@ -2186,20 +2719,42 @@ export function PageTextLayer({
             aria-label="文字内容"
             value={editor.draft}
             rows={1}
+            wrap="soft"
             autoFocus
             spellCheck={false}
+            readOnly={editor.busy}
+            onCompositionEnd={(event) => {const draft=event.currentTarget.value;setEditor(current => current?.status === "editing" ? {...current,draft,error:null} : current);}}
             style={{
-              fontFamily: editor.target.fontFamily,
+              fontFamily: editorFont,
+              // Same subpixel allowance as the native wrap calculation.
+              width: `calc(100% + ${0.25 * scale}px)`,
+              wordBreak: "keep-all",
+              overflowWrap: "anywhere",
               fontSize: `${editor.target.fontSize * scale}px`,
-              lineHeight: 1.2,
+              fontWeight: editor.target.bold ? 700 : 400,
+              fontStyle: editor.target.italic ? "italic" : "normal",
+              textDecoration:
+                [
+                  editor.target.underline ? "underline" : "",
+                  editor.target.strikeout ? "line-through" : "",
+                ]
+                  .filter(Boolean)
+                  .join(" ") || "none",
+              whiteSpace: "pre-wrap",
+              lineHeight: `${(editor.target.lineHeight ?? editor.target.fontSize * 1.2) * scale}px`,
               color: editor.target.color,
             }}
             onChange={(event) => {
-              setEditor({
-                ...editor,
-                draft: event.currentTarget.value,
-                error: null,
-              });
+              const draft = event.currentTarget.value;
+              setEditor((current) =>
+                current?.status === "editing"
+                  ? {
+                      ...current,
+                      draft,
+                      error: null,
+                    }
+                  : current,
+              );
               trackEditorSelection(event.currentTarget);
             }}
             onSelect={(event) => trackEditorSelection(event.currentTarget)}
@@ -2207,7 +2762,7 @@ export function PageTextLayer({
               if (event.key === "Escape") {
                 event.preventDefault();
                 event.stopPropagation();
-                cancelEditor();
+                if (!workspaceTools) cancelEditor();
               } else if (
                 (event.metaKey || event.ctrlKey) &&
                 event.key === "Enter"
@@ -2217,29 +2772,44 @@ export function PageTextLayer({
               }
             }}
           />
-          <div className="text-box-actions">
-            <button
-              type="button"
-              disabled={editor.busy}
-              onClick={() => void commitEditor()}
+          {!workspaceTools && (
+            <div
+              className={`text-box-actions${editorActionsBelow ? " text-box-actions--below" : ""}`}
+              role="toolbar"
+              aria-label="文字编辑"
             >
-              应用
-            </button>
-            <button
-              type="button"
-              disabled={editor.busy}
-              onClick={() => void removeEditor()}
-            >
-              删除
-            </button>
-            <button
-              type="button"
-              disabled={editor.busy}
-              onClick={cancelEditor}
-            >
-              取消
-            </button>
-          </div>
+              <button
+                type="button"
+                className="text-box-action text-box-action--apply"
+                aria-label="应用"
+                title="应用"
+                disabled={editor.busy}
+                onClick={() => void commitEditor()}
+              >
+                <WorkspaceIcon name="check" />
+              </button>
+              <button
+                type="button"
+                className="text-box-action"
+                aria-label="取消"
+                title="取消"
+                disabled={editor.busy}
+                onClick={cancelEditor}
+              >
+                <WorkspaceIcon name="close" />
+              </button>
+              <button
+                type="button"
+                className="text-box-action text-box-action--delete"
+                aria-label="删除"
+                title="删除"
+                disabled={editor.busy}
+                onClick={() => void removeEditor()}
+              >
+                <WorkspaceIcon name="trash" />
+              </button>
+            </div>
+          )}
           {editor.error && (
             <span role="alert" className="text-box-error">
               {editor.error}
@@ -2253,7 +2823,9 @@ export function PageTextLayer({
           className="text-selection-actions"
           onPointerDown={(event) => event.stopPropagation()}
         >
-          <span className="text-selection-count">已选择 {selectedCharacterCount} 个字符</span>
+          <span className="text-selection-count">
+            已选择 {selectedCharacterCount} 个字符
+          </span>
           <button type="button" onClick={() => void copySelection()}>
             复制
           </button>

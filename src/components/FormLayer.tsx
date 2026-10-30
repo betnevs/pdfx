@@ -22,6 +22,7 @@ import {
   type UpdateFormFieldRequest,
 } from "../lib/backend";
 import { notifyDocumentChanged, onDocumentChanged } from "../lib/documentEvents";
+import { ToolShelf, useEditorTools, type ToolShelfTool } from "./ToolShelf";
 
 /** Kinds the overlay can display and fill; buttons and signatures are inert. */
 const FILLABLE_KINDS: ReadonlySet<FormFieldView["kind"]> = new Set([
@@ -69,6 +70,15 @@ const TOOL_HINTS: Record<CreateKind, string> = {
   comboBox: "在页面上点击或拖动以放置下拉框",
   listBox: "在页面上点击或拖动以放置列表框",
   signature: "在页面上点击或拖动以放置签名字段结构",
+};
+
+const TOOL_ICONS: Record<CreateKind, ToolShelfTool["icon"]> = {
+  text: "textField",
+  checkbox: "checkbox",
+  radio: "radio",
+  comboBox: "dropdown",
+  listBox: "list",
+  signature: "signature",
 };
 
 interface PagePoint {
@@ -292,6 +302,7 @@ export function FormLayer({
   onSelectPage,
   onFocusField,
 }: FormLayerProps) {
+  const hosted = useEditorTools();
   const [fields, setFields] = useState<FormFieldView[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -1320,32 +1331,35 @@ export function FormLayer({
         setPlacementCurrent(null);
       }}
     >
-      <div
-        className="form-layer-toolbar"
-        role="group"
-        aria-label="表单工具"
-        onPointerDown={(event) => event.stopPropagation()}
+      <ToolShelf
+        defaultToolId="field-signature"
+        tools={[...(Object.keys(TOOL_LABELS) as CreateKind[]).map(
+          (kind, index): ToolShelfTool => ({
+            id: `field-${kind}`,
+            label: hosted ? ({text:"文本域",checkbox:"复选框字段",radio:"单选按钮字段",comboBox:"组合框字段",listBox:"列表框字段",signature:"签名栏"})[kind] : TOOL_LABELS[kind],
+            icon: TOOL_ICONS[kind],
+            groups: ["forms"],
+            active: placingKind === kind,
+            disabled: !canModifyContent || structureBusy,
+            title: !canModifyContent
+              ? STRUCTURE_DISABLED_REASON
+              : placingKind === kind
+                ? "退出表单字段工具"
+                : TOOL_HINTS[kind],
+            order: hosted ? ({signature:1,text:2,checkbox:4,radio:5,listBox:6,comboBox:7})[kind] : index + 1,
+            onActivate: () => togglePlacing(kind),
+          }),
+        ), {id:"edit-fields",label:"编辑表单字段",icon:"form",groups:["forms"],order:8,active:placingKind === null,onActivate:()=>setPlacingKind(null)}]}
+        panelTitle="表单字段"
+        panelOpen={selectedField !== null || createdPageFields.length > 0}
       >
-        {(Object.keys(TOOL_LABELS) as CreateKind[]).map((kind) => (
-          <button
-            key={kind}
-            type="button"
-            className="form-create-toggle"
-            aria-pressed={placingKind === kind}
-            disabled={!canModifyContent || structureBusy}
-            title={
-              !canModifyContent
-                ? STRUCTURE_DISABLED_REASON
-                : placingKind === kind
-                  ? "退出表单字段工具"
-                  : TOOL_HINTS[kind]
-            }
-            onClick={() => togglePlacing(kind)}
-          >
-            {TOOL_LABELS[kind]}
-          </button>
-        ))}
-        <span className="toolbar-divider" aria-hidden="true" />
+        <div
+          className="form-layer-toolbar"
+          role="group"
+          aria-label="表单工具"
+          onPointerDown={(event) => event.stopPropagation()}
+        >
+        {!hosted && <>
         <button
           type="button"
           disabled={!history?.canUndo || structureBusy}
@@ -1362,6 +1376,7 @@ export function FormLayer({
         >
           重做
         </button>
+        </>}
         {createdPageFields.length > 0 && (
           <button
             type="button"
@@ -1380,7 +1395,8 @@ export function FormLayer({
             {SIGNATURE_DISCLOSURE}
           </span>
         )}
-      </div>
+        </div>
+      </ToolShelf>
 
       {placingKind && placementStart && (
         <div
