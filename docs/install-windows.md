@@ -110,3 +110,11 @@ node scripts/verify-windows-config.mjs
 - PDFX 会自动读取本机已安装的字体，包括 Windows 自带的微软雅黑、宋体与 WPS Office 随版本提供的字体，出现在“WPS 字体”与“本机字体”分组中；这些字体不随安装包分发，WPS Office 的专属字体只在安装了它的机器上出现。
 - 安装目录中的 `INSTALL-windows.md`：本说明的副本。
 - 便携包根目录：`PDFX.exe`、`pdfium.dll`、`pdfium-licenses/`、`font-licenses/`、`INSTALL-windows.md`。
+
+## GitHub Actions 云端构建
+
+仓库的 **Actions → Windows build → Run workflow** 可手动构建；推送到 `main` 也会触发。
+工作流在 Windows Server 2022 x64 上安装 Node.js 24 和 Rust 1.96.0，执行前端测试、Windows 打包和原生测试。
+成功后，从运行页面的 **Artifacts → PDFX-windows-x64** 下载构建产物。
+给普通用户分发其中的 `PDFX_0.1.0_x64-setup.exe` 即可；`BUILD-INFO.txt` 记录源提交，`SHA256SUMS-windows.txt` 用于校验。
+Artifacts 保留 14 天，需要长期保存时请下载归档。云端测试不替代 Windows 桌面实际安装与编辑验收。
