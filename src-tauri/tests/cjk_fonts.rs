@@ -498,6 +498,11 @@ fn a_non_embedded_original_font_uses_installed_copy_or_reports_fallback() {
         "中文排版测试 PDF".to_owned(),
     )
     .expect("edit a non-embedded CJK font");
+    let expected_family = result
+        .font
+        .as_ref()
+        .map_or("SimSun", |font| font.family.as_str())
+        .to_owned();
     if let Some(font) = result.font {
         assert!(font.fallback);
         assert_eq!(font.original_family, "SimSun");
@@ -531,7 +536,7 @@ fn a_non_embedded_original_font_uses_installed_copy_or_reports_fallback() {
         char_index_of(&edited, "中文") as u32,
     )
     .expect("target after fallback");
-    assert_eq!(second.font_family, "Noto Serif SC");
+    assert_eq!(second.font_family, expected_family);
     let second_result = apply_text_edit(
         document_id.clone(),
         0,

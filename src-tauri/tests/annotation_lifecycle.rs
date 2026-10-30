@@ -23,6 +23,26 @@ fn annotation_metadata_survives_handle_close_save_and_reopen() {
     adapter::set_annotation_author(&document, annotation, "作者").unwrap();
     eprintln!("[DEBUG-win-annot] contents");
     adapter::set_annotation_contents(&document, annotation, "内容").unwrap();
+    eprintln!("[DEBUG-win-annot] color");
+    adapter::set_annotation_color(&document, annotation, 200, 30, 40, 255).unwrap();
+    eprintln!("[DEBUG-win-annot] border");
+    adapter::set_annotation_border_width(&document, annotation, 2.0).unwrap();
+    eprintln!("[DEBUG-win-annot] strokes");
+    adapter::append_ink_strokes(
+        &document,
+        annotation,
+        &[vec![(110.0, 110.0), (180.0, 180.0)]],
+    )
+    .unwrap();
+    eprintln!("[DEBUG-win-annot] appearance");
+    adapter::set_annotation_appearance(
+        &document,
+        annotation,
+        "q /GS gs 1 0 0 RG 2 w 110 110 m 180 180 l S Q",
+    )
+    .unwrap();
+    eprintln!("[DEBUG-win-annot] read color");
+    let _ = adapter::annotation_color(&document, annotation);
     eprintln!("[DEBUG-win-annot] read");
     assert_eq!(
         adapter::annotation_name(&document, annotation)
