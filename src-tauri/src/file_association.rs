@@ -416,7 +416,10 @@ mod windows {
 
             assert_eq!(commands.len(), 5);
             assert_eq!(commands[0][1], DOCUMENT_CLASS_KEY);
-            assert!(commands[3].contains(&"\"C:\\Program Files\\PDFX\\PDFX.exe\" \"%1\""));
+            assert_eq!(
+                commands[3][6],
+                "\"C:\\Program Files\\PDFX\\PDFX.exe\" \"%1\""
+            );
             assert_eq!(commands[4][1], PDF_OPEN_WITH_KEY);
             assert!(!commands.iter().any(|command| {
                 command.len() >= 2 && command[1] == r"HKCU\Software\Classes\.pdf"

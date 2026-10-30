@@ -42,10 +42,12 @@ jobs:
         run: node scripts/verify-windows-config.mjs
       - name: Frontend tests
         run: npm test -- --maxWorkers=2 --testTimeout=15000
-      - name: Build Windows installers and portable package
-        run: ./scripts/build-windows.ps1
+      - name: Set up PDFium
+        run: '& "$env:ProgramFiles/Git/bin/bash.exe" scripts/setup-native.sh'
       - name: Native tests on Windows
-        run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+        run: cargo test --locked --no-fail-fast --manifest-path src-tauri/Cargo.toml
+      - name: Build Windows installers and portable package
+        run: ./scripts/build-windows.ps1 -SkipNativeSetup
       - name: Collect distribution files
         run: |
           $bundle = 'src-tauri/target/x86_64-pc-windows-msvc/release/bundle'
