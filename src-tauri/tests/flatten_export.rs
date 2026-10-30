@@ -1214,6 +1214,12 @@ fn repeat_exports_overwrite_atomically_and_failures_leave_no_file() {
         false,
     )
     .expect_err("a directory cannot be replaced by the export");
+    // Windows reports ERROR_ACCESS_DENIED for replacing a directory; Unix
+    // reports a directory/type mismatch. Both must retain the target and
+    // remove the staged file, as checked below.
+    #[cfg(windows)]
+    assert_eq!(error.code, CommandErrorCode::PermissionDenied);
+    #[cfg(not(windows))]
     assert_eq!(error.code, CommandErrorCode::FileWriteFailed);
     assert!(
         directory_target.is_dir(),
