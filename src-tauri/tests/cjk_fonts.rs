@@ -507,7 +507,12 @@ fn a_non_embedded_original_font_uses_installed_copy_or_reports_fallback() {
     } else {
         // Windows can supply an installed SimSun collection. Keeping that
         // exact family is preferable to substituting the bundled Song face.
-        assert_eq!(result.target.font_family, "SimSun");
+        let boxes = text_boxes(document_id.clone(), 0).expect("edited boxes");
+        let edited = boxes
+            .iter()
+            .find(|item| item.box_id == target.box_id)
+            .unwrap();
+        assert_eq!(edited.font_family, "SimSun");
     }
 
     let edited = extract_text_layer(document_id.clone(), 0).expect("edited layer");

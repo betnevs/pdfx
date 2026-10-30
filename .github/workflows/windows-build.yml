@@ -54,6 +54,8 @@ jobs:
         run: npm test -- --maxWorkers=2 --testTimeout=15000
       - name: Set up PDFium
         run: '& "$env:ProgramFiles/Git/bin/bash.exe" scripts/setup-native.sh'
+      - name: Annotation lifecycle smoke test
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --test annotation_lifecycle -- --nocapture
       - name: Native tests on Windows
         run: cargo test --locked --no-fail-fast --manifest-path src-tauri/Cargo.toml
       - name: Build Windows installers and portable package
